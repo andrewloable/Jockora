@@ -1,0 +1,58 @@
+# Copyright (C) 2026 Andrew Loable
+# SPDX-License-Identifier: AGPL-3.0-only
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          check-latest: true
+
+      # ffmpeg and ffprobe are operator-supplied at runtime and required by the
+      # decode, encode, library and app tests. They are installed here, never
+      # vendored, and never linked: see LICENCES-MANUAL.md.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race ./...
+
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          check-latest: true
+
+      # Each of these fails the build. None of them is a warning.
+      - name: Licence gate
+        run: bash scripts/check-licences.sh
+
+      - name: SPDX header gate
+        run: bash scripts/check-headers.sh
+
+      - name: Cross-compile gate
+        run: bash scripts/check-crosscompile.sh

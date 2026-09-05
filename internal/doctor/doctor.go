@@ -1,0 +1,375 @@
+// Copyright (C) 2026 Andrew Loable
+// SPDX-License-Identifier: AGPL-3.0-only
+
+// Package doctor fails at startup with a precise message instead of at airtime
+// with silence.
+//
+// Three operator-supplied components and a macOS-to-Linux deploy path make this
+// the difference between "it works" and an hour of confusion. Every failure
+// names the binary, the filter, the URL or the path, and carries the actual
+// command to run.
+package doctor
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+)
+
+// MinFreeBytes is the disk headroom below which a long run will eventually die.
+const MinFreeBytes = 1 << 30 // 1 GiB
+
+// Check is one preflight result.
+type Check struct {
+	Name string
+	OK   bool
+	// Detail says what was actually found.
+	Detail string
+	// Fix is the command or action that resolves it. Never empty on a failure:
+	// "dependency error" sends an operator nowhere.
+	Fix string
+	// Hard marks a check the server must not start without.
+	Hard bool
+}
+
+// Config is what doctor needs to know.
+type Config struct {
+	LibraryPath string
+	SegmentDir  string
+	DBPath      string
+	LLMBaseURL  string
+	TTSAddr     string
+	FFmpegPath  string
+	HTTPClient  *http.Client
+
+	// RequireLLM makes the llama-server check a HARD failure.
+	//
+	// It is off for a run that never calls a model -- the splice spike plays
+	// tracks and a pre-rendered WAV and needs no LLM at all -- and on once the
+	// DJ brain is wired, where a missing model means no breaks are ever written.
+	RequireLLM bool
+	// RequireTTS makes the sidecar check hard. Off by default: speech is
+	// optional, music is not.
+	RequireTTS bool
+	// RequireLibrary makes a configured, readable library path mandatory. Off
+	// for a run given track files directly, on for a normal scan-and-serve.
+	RequireLibrary bool
+}
+
+// Run performs every check and returns them in a stable order.
+func Run(ctx context.Context, cfg Config) []Check {
+	if cfg.FFmpegPath == "" {
+		cfg.FFmpegPath = "ffmpeg"
+	}
+	if cfg.HTTPClient == nil {
+		cfg.HTTPClient = &http.Client{Timeout: 20 * time.Second}
+	}
+
+	return []Check{
+		checkBinary(cfg.FFmpegPath, "ffmpeg"),
+		checkBinary(ffprobeBeside(cfg.FFmpegPath), "ffprobe"),
+		checkFFmpegFilters(ctx, cfg.FFmpegPath),
+		checkLLM(ctx, cfg),
+		checkTTS(ctx, cfg),
+		checkLibrary(cfg.LibraryPath, cfg.RequireLibrary),
+		checkSegmentDir(cfg.SegmentDir),
+		checkDBWritable(cfg.DBPath),
+		checkDisk(cfg.SegmentDir),
+	}
+}
+
+// Failed returns the hard checks that did not pass.
+func Failed(checks []Check) []Check {
+	var out []Check
+	for _, c := range checks {
+		if !c.OK && c.Hard {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// Report renders the checks for a terminal.
+func Report(checks []Check) string {
+	var b strings.Builder
+	b.WriteString("JOCKORA PREFLIGHT\n")
+	for _, c := range checks {
+		mark := "ok  "
+		if !c.OK {
+			mark = "FAIL"
+		}
+		fmt.Fprintf(&b, "  [%s] %-22s %s\n", mark, c.Name, c.Detail)
+		if !c.OK && c.Fix != "" {
+			fmt.Fprintf(&b, "         fix: %s\n", c.Fix)
+		}
+	}
+	return b.String()
+}
+
+func ffprobeBeside(ffmpegPath string) string {
+	dir, base := filepath.Split(ffmpegPath)
+	if base == "ffmpeg" {
+		return filepath.Join(dir, "ffprobe")
+	}
+	return "ffprobe"
+}
+
+func checkBinary(path, name string) Check {
+	c := Check{Name: name, Hard: true}
+	found, err := exec.LookPath(path)
+	if err != nil {
+		c.Detail = fmt.Sprintf("%s not found on PATH", path)
+		c.Fix = "install it: apt install ffmpeg   (or: brew install ffmpeg)"
+		return c
+	}
+	c.OK, c.Detail = true, found
+	return c
+}
+
+// checkFFmpegFilters verifies the filters the mixer actually uses.
+//
+// A present ffmpeg WITHOUT loudnorm fails much later and much more confusingly,
+// during a library scan rather than at startup.
+func checkFFmpegFilters(ctx context.Context, ffmpegPath string) Check {
+	c := Check{Name: "ffmpeg filters", Hard: true}
+
+	out, err := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-filters").Output()
+	if err != nil {
+		c.Detail = fmt.Sprintf("could not list filters: %v", err)
+		c.Fix = "check that " + ffmpegPath + " runs: " + ffmpegPath + " -filters"
+		return c
+	}
+
+	var missing []string
+	for _, f := range []string{"loudnorm", "aresample", "afade", "volume"} {
+		if !bytes.Contains(out, []byte(" "+f+" ")) {
+			missing = append(missing, f)
+		}
+	}
+	if len(missing) > 0 {
+		c.Detail = "missing filter(s): " + strings.Join(missing, ", ")
+		c.Fix = "this ffmpeg was built without them; install a full build (apt install ffmpeg, or brew install ffmpeg)"
+		return c
+	}
+	c.OK, c.Detail = true, "loudnorm, aresample, afade, volume present"
+	return c
+}
+
+// checkLLM does a live json_schema round-trip, not a reachability probe.
+//
+// A llama-server that is UP but ignores json_schema fails at dossier time rather
+// than at startup, which is exactly the class of late failure this package
+// exists to prevent.
+func checkLLM(ctx context.Context, cfg Config) Check {
+	c := Check{Name: "llama-server", Hard: cfg.RequireLLM}
+	if cfg.LLMBaseURL == "" {
+		c.Detail = "no LLM URL configured"
+		c.Fix = "set --llm-url or JOCKORA_LLM_URL"
+		return c
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"prompt": "ok",
+		"json_schema": map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"ok": map[string]any{"type": "boolean"}},
+			"required":   []any{"ok"},
+		},
+		"n_predict": 16,
+	})
+
+	url := strings.TrimSuffix(cfg.LLMBaseURL, "/") + "/completion"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		c.Detail = err.Error()
+		return c
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := cfg.HTTPClient.Do(req)
+	if err != nil {
+		c.Detail = fmt.Sprintf("%s unreachable: %v", url, err)
+		c.Fix = "llama-server is not running. Start it: llama-server -m <model.gguf> --host 127.0.0.1 --port 8080"
+		return c
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		c.Detail = url + " returned 404"
+		c.Fix = "endpoint not found; this may be an OpenAI-only server. Jockora needs llama.cpp's native /completion."
+		return c
+	}
+	if resp.StatusCode != http.StatusOK {
+		c.Detail = fmt.Sprintf("%s returned %s", url, resp.Status)
+		c.Fix = "check the llama-server log; a model may not be loaded"
+		return c
+	}
+
+	var reply struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
+		c.Detail = "reply was not JSON: " + err.Error()
+		c.Fix = "server reachable but did not answer as llama.cpp does; check what is listening on " + cfg.LLMBaseURL
+		return c
+	}
+
+	var shaped map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(reply.Content)), &shaped); err != nil {
+		c.Detail = fmt.Sprintf("json_schema was ignored; got %.60q", reply.Content)
+		c.Fix = "server reachable but json_schema was ignored; upgrade llama.cpp."
+		return c
+	}
+	if _, ok := shaped["ok"]; !ok {
+		c.Detail = fmt.Sprintf("schema not honoured; required key missing from %.60q", reply.Content)
+		c.Fix = "server reachable but json_schema was ignored; upgrade llama.cpp."
+		return c
+	}
+
+	c.OK, c.Detail = true, url+" honoured a json_schema round-trip"
+	return c
+}
+
+// checkTTS is soft: speech is optional, music is not. A missing sidecar costs
+// breaks, not the stream.
+func checkTTS(ctx context.Context, cfg Config) Check {
+	c := Check{Name: "tts sidecar", Hard: cfg.RequireTTS}
+	if cfg.TTSAddr == "" {
+		c.Detail = "no TTS URL configured"
+		c.Fix = "set --tts-url or JOCKORA_TTS_URL; without it the DJ never speaks"
+		return c
+	}
+
+	url := strings.TrimSuffix(cfg.TTSAddr, "/") + "/health"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		c.Detail = err.Error()
+		return c
+	}
+	resp, err := cfg.HTTPClient.Do(req)
+	if err != nil {
+		c.Detail = fmt.Sprintf("%s unreachable: %v", url, err)
+		c.Fix = "start the Kokoro sidecar; without it every break is dropped and only music plays"
+		return c
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		c.Detail = fmt.Sprintf("%s returned %s", url, resp.Status)
+		c.Fix = "check the sidecar log"
+		return c
+	}
+	c.OK, c.Detail = true, url+" responding"
+	return c
+}
+
+func checkLibrary(path string, required bool) Check {
+	c := Check{Name: "library path", Hard: required}
+	if path == "" {
+		if !required {
+			// A run given track files directly has no library, and that is not
+			// a fault.
+			c.OK, c.Detail = true, "not configured (tracks supplied directly)"
+			return c
+		}
+		c.Detail = "no library path configured"
+		c.Fix = "set --library-path or JOCKORA_LIBRARY_PATH"
+		return c
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		c.Detail = err.Error()
+		c.Fix = "check the path exists and is readable: ls " + path
+		return c
+	}
+	if !fi.IsDir() {
+		c.Detail = path + " is not a directory"
+		c.Fix = "point --library-path at the folder holding your music"
+		return c
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		c.Detail = "not readable: " + err.Error()
+		c.Fix = "fix permissions: chmod +rx " + path
+		return c
+	}
+	f.Close()
+	c.OK, c.Detail = true, path
+	return c
+}
+
+func checkSegmentDir(dir string) Check {
+	c := Check{Name: "segment dir", Hard: true}
+	if dir == "" {
+		c.Detail = "no segment directory configured"
+		c.Fix = "set --segment-dir or JOCKORA_SEGMENT_DIR"
+		return c
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		c.Detail = "cannot create " + dir + ": " + err.Error()
+		c.Fix = "create it or choose a writable location: mkdir -p " + dir
+		return c
+	}
+	probe := filepath.Join(dir, ".jockora-write-probe")
+	if err := os.WriteFile(probe, []byte("x"), 0o644); err != nil {
+		c.Detail = dir + " is not writable: " + err.Error()
+		c.Fix = "fix permissions: chmod +w " + dir
+		return c
+	}
+	os.Remove(probe)
+	c.OK, c.Detail = true, dir+" writable"
+	return c
+}
+
+func checkDBWritable(dbPath string) Check {
+	c := Check{Name: "database", Hard: true}
+	if dbPath == "" {
+		c.Detail = "no database path configured"
+		c.Fix = "set --db-path or JOCKORA_DB_PATH"
+		return c
+	}
+	dir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		c.Detail = "cannot create " + dir + ": " + err.Error()
+		c.Fix = "mkdir -p " + dir
+		return c
+	}
+	probe := filepath.Join(dir, ".jockora-db-probe")
+	if err := os.WriteFile(probe, []byte("x"), 0o644); err != nil {
+		c.Detail = dir + " is not writable: " + err.Error()
+		c.Fix = "chmod +w " + dir
+		return c
+	}
+	os.Remove(probe)
+	c.OK, c.Detail = true, dbPath
+	return c
+}
+
+// checkDisk is soft: a full disk kills a long run, but refusing to start is
+// worse than warning and letting the operator watch it.
+func checkDisk(dir string) Check {
+	c := Check{Name: "free disk"}
+	if dir == "" {
+		dir = "."
+	}
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		c.Detail = "could not measure: " + err.Error()
+		return c
+	}
+	free := uint64(st.Bsize) * st.Bavail
+	c.Detail = fmt.Sprintf("%.1f GiB free", float64(free)/float64(1<<30))
+	if free < MinFreeBytes {
+		c.Fix = "free space under " + dir + "; segments accumulate and a long run will stop"
+		return c
+	}
+	c.OK = true
+	return c
+}

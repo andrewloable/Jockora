@@ -17,6 +17,7 @@ import (
 
 	"github.com/andrewloable/jockora/internal/app"
 	"github.com/andrewloable/jockora/internal/config"
+	"github.com/andrewloable/jockora/internal/doctor"
 )
 
 func main() {
@@ -39,13 +40,47 @@ func run() error {
 		return err
 	}
 
-	tracks := cfg.Args
-	if len(tracks) == 0 {
-		return fmt.Errorf("usage: jockora [flags] <track> [track...]\n" +
-			"       jockora -break voice.wav -break-at 30 a.mp3 b.mp3")
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	doctorCfg := doctor.Config{
+		LibraryPath: cfg.LibraryPath,
+		SegmentDir:  cfg.SegmentDir,
+		DBPath:      cfg.DBPath,
+		LLMBaseURL:  cfg.LLMBaseURL,
+		TTSAddr:     cfg.TTSAddr,
+		// The spike calls no model and speaks no TTS: it plays tracks and a
+		// pre-rendered WAV. These become required when the DJ brain is wired.
+		RequireLLM: false,
+		RequireTTS: false,
 	}
 
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	tracks := cfg.Args
+
+	// `jockora doctor` reports and exits, so an operator can diagnose without
+	// starting a stream.
+	if len(tracks) == 1 && tracks[0] == "doctor" {
+		checks := doctor.Run(context.Background(), doctorCfg)
+		fmt.Print(doctor.Report(checks))
+		if failed := doctor.Failed(checks); len(failed) > 0 {
+			return fmt.Errorf("%d hard check(s) failed", len(failed))
+		}
+		return nil
+	}
+
+	if len(tracks) == 0 {
+		return fmt.Errorf("usage: jockora [flags] <track> [track...]\n" +
+			"       jockora -break voice.wav -break-at 30 a.mp3 b.mp3\n" +
+			"       jockora doctor")
+	}
+
+	// The spike runs against explicit track files rather than a scanned library,
+	// so the library check does not apply to it.
+	doctorCfg.LibraryPath = ""
+	if checks := doctor.Run(context.Background(), doctorCfg); len(doctor.Failed(checks)) > 0 {
+		// Fail loudly at startup rather than quietly at airtime.
+		fmt.Print(doctor.Report(checks))
+		return fmt.Errorf("preflight failed; fix the checks above or run: jockora doctor")
+	}
 
 	a, err := app.New(cfg, app.Options{
 		Tracks:     tracks,

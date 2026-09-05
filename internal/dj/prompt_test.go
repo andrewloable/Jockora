@@ -1,0 +1,317 @@
+// Copyright (C) 2026 Andrew Loable
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package dj
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/andrewloable/jockora/internal/enrich"
+)
+
+func testPersona(t *testing.T) *Persona {
+	t.Helper()
+	p, err := LoadPersona(repoPersona)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func testDossier(facts int) *enrich.Dossier {
+	d := &enrich.Dossier{
+		StationTags:    []string{"synthwave"},
+		Mood:           []string{"nocturnal"},
+		SubjectSummary: "A narrator drives out of a city he is not going back to.",
+		Sources:        []string{enrich.SourceMusicBrainz},
+		Confidence:     enrich.ConfidenceHigh,
+	}
+	for i := 0; i < facts; i++ {
+		d.ArtistFacts = append(d.ArtistFacts, fmt.Sprintf("Distinct fact number %d about the band.", i))
+	}
+	return d
+}
+
+func prohibitions(openings, grams int) Prohibitions {
+	var p Prohibitions
+	for i := 0; i < openings; i++ {
+		p.Openings = append(p.Openings, fmt.Sprintf("opening formula number %d here", i))
+	}
+	for i := 0; i < grams; i++ {
+		p.NGrams = append(p.NGrams, fmt.Sprintf("phrase gram number %d", i))
+	}
+	return p
+}
+
+func TestPromptUnderBudget(t *testing.T) {
+	got, err := BuildBreakPrompt(PromptInput{
+		Persona:       testPersona(t),
+		Current:       testDossier(3),
+		Next:          testDossier(3),
+		Prohibitions:  prohibitions(20, 100),
+		Placement:     "ramp",
+		WindowSeconds: 9,
+		Schema:        map[string]any{"type": "object"},
+	})
+	if err != nil {
+		t.Fatalf("BuildBreakPrompt: %v", err)
+	}
+
+	if n := EstimateTokens(got); n > TokenBudget {
+		t.Errorf("prompt is %d tokens, over the %d budget", n, TokenBudget)
+	}
+	t.Logf("full prompt: %d estimated tokens of %d", EstimateTokens(got), TokenBudget)
+}
+
+// TestPromptTruncatesProhibitionsNotPersona: the persona is ground truth and the
+// prohibition list is the softest input in the prompt.
+func TestPromptTruncatesProhibitionsNotPersona(t *testing.T) {
+	p := testPersona(t)
+
+	got, err := BuildBreakPrompt(PromptInput{
+		Persona:       p,
+		Current:       testDossier(3),
+		Prohibitions:  prohibitions(200, 5000),
+		WindowSeconds: 9,
+	})
+	if err != nil {
+		t.Fatalf("BuildBreakPrompt: %v", err)
+	}
+
+	if n := EstimateTokens(got); n > TokenBudget {
+		t.Errorf("prompt is %d tokens with 5000 prohibitions, over the %d budget", n, TokenBudget)
+	}
+	// Every word of the persona survived.
+	if !strings.Contains(got, p.Personality()) {
+		t.Error("the persona's character text was trimmed")
+	}
+	if !strings.Contains(got, p.SpeechStyle()) {
+		t.Error("the persona's speech style was trimmed")
+	}
+	for _, rule := range p.Forbidden() {
+		if !strings.Contains(got, rule) {
+			t.Errorf("a forbidden rule was trimmed: %q", rule)
+		}
+	}
+	// And the instructions that make the response parseable survived.
+	if !strings.Contains(got, "Return ONLY the JSON object") {
+		t.Error("the output instruction was trimmed")
+	}
+	// The prohibitions were what gave way.
+	if strings.Count(got, "phrase gram number") >= 5000 {
+		t.Error("the prohibition list was not trimmed")
+	}
+}
+
+func TestPromptIncludesOnlyThreeFacts(t *testing.T) {
+	got, err := BuildBreakPrompt(PromptInput{
+		Persona:       testPersona(t),
+		Current:       testDossier(10),
+		WindowSeconds: 9,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if n := strings.Count(got, "  fact: "); n != MaxFactsInPrompt {
+		t.Errorf("%d facts in the prompt, want exactly %d", n, MaxFactsInPrompt)
+	}
+	for i := MaxFactsInPrompt; i < 10; i++ {
+		if strings.Contains(got, fmt.Sprintf("Distinct fact number %d ", i)) {
+			t.Errorf("fact %d leaked into the prompt", i)
+		}
+	}
+}
+
+func TestPromptDurationBudgetInPrompt(t *testing.T) {
+	got, err := BuildBreakPrompt(PromptInput{
+		Persona:       testPersona(t),
+		Current:       testDossier(2),
+		WindowSeconds: 9.0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 9.0s x 2.5 words/second.
+	if want := WordTarget(9.0); want != 22 && want != 23 {
+		t.Fatalf("WordTarget(9.0) = %d, want about 22", want)
+	}
+	if !strings.Contains(got, fmt.Sprintf("about %d words", WordTarget(9.0))) {
+		t.Errorf("the prompt does not state the word target:\n%s", got)
+	}
+	if !strings.Contains(got, "9.0 seconds") {
+		t.Error("the prompt does not state the speaking window")
+	}
+}
+
+// TestPromptEmptyDossierProducesPersonalityOnlyPrompt: an empty dossier is a
+// designed outcome. The DJ must be told to say less, not to fill the gap.
+func TestPromptEmptyDossierProducesPersonalityOnlyPrompt(t *testing.T) {
+	got, err := BuildBreakPrompt(PromptInput{
+		Persona:       testPersona(t),
+		WindowSeconds: 9,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	low := strings.ToLower(got)
+	if !strings.Contains(low, "no facts") {
+		t.Error("the prompt does not say the DJ has no facts")
+	}
+	if !strings.Contains(low, "personality only") {
+		t.Error("the prompt does not instruct personality-only talk")
+	}
+	if !strings.Contains(low, "inventing") {
+		t.Error("the prompt does not forbid inventing a detail")
+	}
+	if strings.Contains(got, "  fact: ") {
+		t.Error("the prompt lists facts despite there being no dossier")
+	}
+}
+
+// TestPromptSchemaCountsAgainstBudget: the json_schema travels with the request
+// and is charged against the same budget.
+//
+// A realistic asserted_facts enum lists only the facts actually resolvable for
+// this pair of tracks, which is at most MaxFactsInPrompt per dossier.
+func TestPromptSchemaCountsAgainstBudget(t *testing.T) {
+	schema := factEnumSchema(2 * MaxFactsInPrompt)
+
+	p := testPersona(t)
+	got, err := BuildBreakPrompt(PromptInput{
+		Persona:       p,
+		Current:       testDossier(3),
+		Next:          testDossier(3),
+		Prohibitions:  prohibitions(20, 100),
+		WindowSeconds: 9,
+		Schema:        schema,
+	})
+	if err != nil {
+		t.Fatalf("BuildBreakPrompt: %v", err)
+	}
+
+	schemaTokens := EstimateTokens(mustJSONString(t, schema))
+	total := EstimateTokens(got) + schemaTokens
+	if total > TokenBudget {
+		t.Errorf("prompt %d + schema %d = %d tokens, over the %d budget",
+			EstimateTokens(got), schemaTokens, total, TokenBudget)
+	}
+	if !strings.Contains(got, p.Personality()) {
+		t.Error("the persona was trimmed to make room for the schema")
+	}
+	t.Logf("prompt %d + schema %d = %d of %d", EstimateTokens(got), schemaTokens, total, TokenBudget)
+}
+
+// TestPromptLargeSchemaTrimsProhibitionsFirst: a schema big enough to squeeze
+// the prompt must cost prohibitions, never the persona.
+func TestPromptLargeSchemaTrimsProhibitionsFirst(t *testing.T) {
+	p := testPersona(t)
+	small, err := BuildBreakPrompt(PromptInput{
+		Persona: p, Current: testDossier(3), Prohibitions: prohibitions(20, 100),
+		WindowSeconds: 9, Schema: factEnumSchema(6),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Large enough that prompt plus schema genuinely exceeds the budget, so
+	// something has to give.
+	bigSchema := factEnumSchema(120)
+	big, err := BuildBreakPrompt(PromptInput{
+		Persona: p, Current: testDossier(3), Prohibitions: prohibitions(20, 100),
+		WindowSeconds: 9, Schema: bigSchema,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if EstimateTokens(big) >= EstimateTokens(small) {
+		t.Errorf("a schema large enough to exceed the budget did not shrink the prompt: %d then %d",
+			EstimateTokens(small), EstimateTokens(big))
+	}
+	if total := EstimateTokens(big) + EstimateTokens(mustJSONString(t, bigSchema)); total > TokenBudget {
+		t.Errorf("prompt plus schema is %d tokens, over the %d budget", total, TokenBudget)
+	}
+	if !strings.Contains(big, p.Personality()) {
+		t.Error("the persona gave way to the schema")
+	}
+	for _, rule := range p.Forbidden() {
+		if !strings.Contains(big, rule) {
+			t.Errorf("a forbidden rule gave way to the schema: %q", rule)
+		}
+	}
+}
+
+// TestPromptAbsurdSchemaIsReportedNotSwallowed: if the schema alone cannot fit,
+// that is a caller bug and must surface. Silently sending an over-budget request
+// is how a context-window overflow becomes a mystery at 3am.
+func TestPromptAbsurdSchemaIsReportedNotSwallowed(t *testing.T) {
+	_, err := BuildBreakPrompt(PromptInput{
+		Persona:       testPersona(t),
+		Current:       testDossier(3),
+		WindowSeconds: 9,
+		Schema:        factEnumSchema(300),
+	})
+	if err == nil {
+		t.Fatal("a schema too large to fit was accepted silently")
+	}
+	if !strings.Contains(err.Error(), "budget") {
+		t.Errorf("error %q does not explain the problem", err)
+	}
+}
+
+// factEnumSchema builds a break schema whose asserted_facts enum lists n facts.
+func factEnumSchema(n int) map[string]any {
+	enum := make([]any, n)
+	for i := range enum {
+		enum[i] = fmt.Sprintf("fact_%d_of_the_current_track", i)
+	}
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"asserted_facts": map[string]any{
+				"type":  "array",
+				"items": map[string]any{"type": "string", "enum": enum},
+			},
+		},
+	}
+}
+
+func TestPromptPlacementGuidance(t *testing.T) {
+	for placement, want := range map[string]string{
+		"ramp":    "before the singing starts",
+		"outro":   "instrumental TAIL",
+		"between": "gap between two tracks",
+	} {
+		got, err := BuildBreakPrompt(PromptInput{
+			Persona: testPersona(t), Current: testDossier(1),
+			Placement: placement, WindowSeconds: 9,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(got, want) {
+			t.Errorf("placement %q: prompt does not mention %q", placement, want)
+		}
+	}
+}
+
+func TestPromptRequiresPersona(t *testing.T) {
+	if _, err := BuildBreakPrompt(PromptInput{WindowSeconds: 9}); err == nil {
+		t.Error("BuildBreakPrompt accepted a nil persona")
+	}
+}
+
+func mustJSONString(t *testing.T, v any) string {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}

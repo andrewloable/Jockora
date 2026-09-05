@@ -54,10 +54,15 @@ var segNumber = regexp.MustCompile(`^seg(\d+)\.ts$`)
 
 // Server serves HLS from a directory and sweeps it.
 type Server struct {
-	cfg Config
-	log *slog.Logger
-	ln  net.Listener
+	cfg    Config
+	log    *slog.Logger
+	ln     net.Listener
+	status StatusSource
 }
+
+// SetStatusSource wires the /now.json data source. Without one the endpoint
+// reports unavailable rather than lying about a healthy stream.
+func (s *Server) SetStatusSource(src StatusSource) { s.status = src }
 
 // New validates the configuration and opens the listener.
 //
@@ -135,6 +140,8 @@ func (s *Server) Handler() http.Handler {
 		}
 
 		switch {
+		case p == "/now.json":
+			s.serveStatus(w, r)
 		case p == "/" || p == "/index.html":
 			s.serveAsset(w, r, "index.html")
 		case strings.HasPrefix(p, "/vendor/"):

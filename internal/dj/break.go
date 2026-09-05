@@ -1,0 +1,251 @@
+// Copyright (C) 2026 Andrew Loable
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package dj
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/andrewloable/jockora/internal/enrich"
+)
+
+// ErrBreakUngrounded means a break asserts something no dossier supports.
+//
+// Under the per-request fact enum this should never fire: an ungrounded id is
+// unrepresentable at the sampler. It is kept because a schema constrains the
+// output of the model, not the input to this function, and because an assertion
+// that never fires is exactly the one worth keeping.
+var ErrBreakUngrounded = errors.New("dj: break asserts an unresolvable fact")
+
+// ErrBreakBadJSON means the response was not a break.
+var ErrBreakBadJSON = errors.New("dj: break response is not valid json")
+
+// FactConfidenceThreshold is the minimum confidence a dossier must carry before
+// the DJ may state anything from it on air.
+const FactConfidenceThreshold = 0.6
+
+// ConfidenceScore converts a dossier's confidence label into a number.
+//
+// The dossier vocabulary is high/low/none, and this threshold is expressed as
+// 0.6, so the mapping is stated here rather than left implicit: only "high"
+// clears the bar. "low" means the model was not adequately grounded, and a DJ
+// asserting that on air is the failure the dossier design exists to prevent.
+func ConfidenceScore(label string) float64 {
+	switch label {
+	case enrich.ConfidenceHigh:
+		return 1.0
+	case enrich.ConfidenceLow:
+		return 0.5
+	default:
+		return 0.0
+	}
+}
+
+// Break is one written radio break.
+type Break struct {
+	Opening       string   `json:"opening"`
+	Body          string   `json:"body"`
+	Handoff       string   `json:"handoff"`
+	AssertedFacts []string `json:"asserted_facts"`
+}
+
+// Text is the whole break as it will be spoken.
+func (b *Break) Text() string {
+	return strings.TrimSpace(strings.Join(
+		nonEmpty(b.Opening, b.Body, b.Handoff), " "))
+}
+
+func nonEmpty(parts ...string) []string {
+	var out []string
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// ParseBreak decodes a model response into a Break.
+func ParseBreak(raw string) (*Break, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, fmt.Errorf("%w: empty response", ErrBreakBadJSON)
+	}
+
+	var b Break
+	if err := json.Unmarshal([]byte(trimmed), &b); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBreakBadJSON, err)
+	}
+
+	// GBNF enforces set membership but not uniqueness, so the same fact can come
+	// back twice. Dedupe before anything counts them.
+	b.AssertedFacts = dedupe(b.AssertedFacts)
+	return &b, nil
+}
+
+func dedupe(in []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, v := range in {
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
+}
+
+// indexedFactRE matches artist_facts[N].
+var indexedFactRE = regexp.MustCompile(`^artist_facts\[(\d+)\]$`)
+
+// ResolvableFactIDs lists every fact id the DJ may legitimately assert for this
+// pair of dossiers.
+//
+// This is what the schema's asserted_facts enum is built from, computed PER
+// REQUEST. With it, an ungrounded id is not merely rejected after generation, it
+// is unrepresentable: the sampler cannot produce a token sequence outside the
+// enum.
+func ResolvableFactIDs(prev, cur, next *enrich.Dossier) []string {
+	var out []string
+	for _, side := range []struct {
+		prefix string
+		d      *enrich.Dossier
+	}{{"prev", prev}, {"cur", cur}, {"next", next}} {
+		if side.d == nil || ConfidenceScore(side.d.Confidence) < FactConfidenceThreshold {
+			continue
+		}
+		if side.d.SubjectSummary != "" {
+			out = append(out, side.prefix+".subject_summary")
+		}
+		for i := range side.d.ArtistFacts {
+			if i >= MaxFactsInPrompt {
+				break
+			}
+			out = append(out, fmt.Sprintf("%s.artist_facts[%d]", side.prefix, i))
+		}
+		for _, tag := range side.d.StationTags {
+			_ = tag
+			out = append(out, side.prefix+".station_tags")
+			break
+		}
+		for _, m := range side.d.Mood {
+			_ = m
+			out = append(out, side.prefix+".mood")
+			break
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ResolveFacts verifies every asserted id points at real, sufficiently confident
+// dossier content.
+//
+// Resolution is a LOOKUP against field ids, never a fuzzy comparison against
+// dossier text. Fuzzy matching is how an ungrounded claim sneaks through: a
+// sentence that merely resembles a stored fact is not the stored fact.
+func ResolveFacts(b *Break, prev, cur, next *enrich.Dossier) error {
+	allowed := make(map[string]bool)
+	for _, id := range ResolvableFactIDs(prev, cur, next) {
+		allowed[id] = true
+	}
+
+	for _, id := range b.AssertedFacts {
+		if !allowed[id] {
+			return fmt.Errorf("%w: %q", ErrBreakUngrounded, id)
+		}
+	}
+	return nil
+}
+
+// ResolveFactText returns the text behind a fact id, for logging and for the
+// rubric review. It is not used to validate: validation is set membership.
+func ResolveFactText(id string, prev, cur, next *enrich.Dossier) (string, bool) {
+	prefix, field, ok := strings.Cut(id, ".")
+	if !ok {
+		return "", false
+	}
+
+	var d *enrich.Dossier
+	switch prefix {
+	case "prev":
+		d = prev
+	case "cur":
+		d = cur
+	case "next":
+		d = next
+	default:
+		return "", false
+	}
+	if d == nil || ConfidenceScore(d.Confidence) < FactConfidenceThreshold {
+		return "", false
+	}
+
+	switch {
+	case field == "subject_summary":
+		return d.SubjectSummary, d.SubjectSummary != ""
+	case field == "station_tags":
+		return strings.Join(d.StationTags, ", "), len(d.StationTags) > 0
+	case field == "mood":
+		return strings.Join(d.Mood, ", "), len(d.Mood) > 0
+	default:
+		m := indexedFactRE.FindStringSubmatch(field)
+		if m == nil {
+			return "", false
+		}
+		i, err := strconv.Atoi(m[1])
+		if err != nil || i < 0 || i >= len(d.ArtistFacts) || i >= MaxFactsInPrompt {
+			return "", false
+		}
+		return d.ArtistFacts[i], true
+	}
+}
+
+// BreakSchema builds the json_schema for one break request.
+//
+// The asserted_facts enum is computed from the ids that actually resolve for
+// THIS pair of dossiers. When nothing resolves, asserted_facts is dropped from
+// required and given an empty-only shape, so a personality-only break is still
+// generable rather than impossible.
+func BreakSchema(prev, cur, next *enrich.Dossier) map[string]any {
+	ids := ResolvableFactIDs(prev, cur, next)
+
+	props := map[string]any{
+		"opening": map[string]any{"type": "string", "maxLength": 200},
+		"body":    map[string]any{"type": "string", "maxLength": 600},
+		"handoff": map[string]any{"type": "string", "maxLength": 200},
+	}
+	required := []any{"opening", "body", "handoff"}
+
+	if len(ids) > 0 {
+		enum := make([]any, len(ids))
+		for i, id := range ids {
+			enum[i] = id
+		}
+		props["asserted_facts"] = map[string]any{
+			"type": "array", "maxItems": 4,
+			"items": map[string]any{"type": "string", "enum": enum},
+		}
+		required = append(required, "asserted_facts")
+	} else {
+		// Nothing is assertable, so the only legal value is the empty array.
+		props["asserted_facts"] = map[string]any{
+			"type": "array", "maxItems": 0,
+			"items": map[string]any{"type": "string"},
+		}
+	}
+
+	return map[string]any{
+		"type":                 "object",
+		"properties":           props,
+		"required":             required,
+		"additionalProperties": false,
+	}
+}
