@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jockora</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0; min-height: 100vh;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 1.25rem;
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  h1 { margin: 0; font-size: 1.5rem; letter-spacing: .02em; font-weight: 600; }
+  audio { width: min(90vw, 32rem); }
+  #status { min-height: 1.5em; opacity: .7; font-size: .875rem; }
+  #status[data-state="error"] { opacity: 1; color: #c0392b; }
+</style>
+</head>
+<body>
+
+<h1>Jockora</h1>
+
+<!-- No autoplay: browsers block it, and a blocked autoplay looks like a broken
+     stream rather than a browser policy. The listener presses play. -->
+<audio id="player" controls preload="none"></audio>
+
+<!-- No skip control and no playlist view. There is no skip in this product by
+     design; changing station is the escape hatch. -->
+<p id="status">Press play to tune in.</p>
+
+<!-- Vendored, not a CDN: this is a self-hosted product that has to work on a
+     machine with no internet connection. -->
+<script src="/vendor/hls.light.min.js"></script>
+<script>
+(function () {
+  var SRC = '/hls/stream.m3u8';
+  var player = document.getElementById('player');
+  var status = document.getElementById('status');
+
+  function say(text, state) {
+    status.textContent = text;
+    if (state) { status.setAttribute('data-state', state); }
+    else { status.removeAttribute('data-state'); }
+  }
+
+  // Native HLS is checked FIRST and wins wherever it exists. iOS Safari has no
+  // Media Source Extensions at all, so hls.js cannot work there under any
+  // circumstances, and iOS is a required target. Desktop Safari also plays HLS
+  // natively and does it better than the polyfill.
+  if (player.canPlayType('application/vnd.apple.mpegurl')) {
+    player.src = SRC;
+  } else if (window.Hls && window.Hls.isSupported()) {
+    var hls = new Hls({ enableWorker: true, lowLatencyMode: false });
+    hls.loadSource(SRC);
+    hls.attachMedia(player);
+    hls.on(Hls.Events.ERROR, function (_evt, data) {
+      if (!data.fatal) { return; }
+      // A live stream restarts its encoder now and then. Recover rather than
+      // dropping the listener.
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        say('Reconnecting…');
+        hls.startLoad();
+      } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+        say('Recovering…');
+        hls.recoverMediaError();
+      } else {
+        say('Stream unavailable. Is the server running?', 'error');
+        hls.destroy();
+      }
+    });
+  } else {
+    say('This browser cannot play HLS.', 'error');
+    return;
+  }
+
+  player.addEventListener('playing', function () { say('On air.'); });
+  player.addEventListener('waiting', function () { say('Buffering…'); });
+  player.addEventListener('pause', function () { say('Paused.'); });
+  player.addEventListener('error', function () {
+    say('Stream unavailable. Is the server running?', 'error');
+  });
+})();
+</script>
+
+</body>
+</html>
