@@ -1,0 +1,12 @@
+# Agent and design documents — local working material, not part of the distributed work.
+# Remove an entry here if you decide it should ship.
+CLAUDE.md
+.claude/
+jockora_brainstorming_product_direction.md
+
+.DS_Store
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
