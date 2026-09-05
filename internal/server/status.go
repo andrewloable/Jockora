@@ -48,6 +48,15 @@ type Metrics struct {
 	RingOccupancyS  float64 `json:"ring_occupancy_s"`
 	Underruns       uint64  `json:"underruns"`
 	EncoderRestarts int     `json:"encoder_restarts"`
+
+	// The pacing figures a long unattended run is judged on. They are here so a
+	// soak harness can WATCH them rather than only read them in the autopsy at
+	// shutdown: a run that degrades at minute 12 and recovers by minute 30 looks
+	// identical to a healthy one if you only see the final numbers.
+	P99GapMs          float64 `json:"p99_inter_write_gap_ms"`
+	MaxGapMs          float64 `json:"max_inter_write_gap_ms"`
+	MinRingOccupancyS float64 `json:"min_ring_occupancy_s"`
+	DriftMs           float64 `json:"drift_ms"`
 }
 
 // Enrichment reports background progress.

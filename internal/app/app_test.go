@@ -396,3 +396,45 @@ func TestMetricsAreCollectedDuringARun(t *testing.T) {
 		s.Writes, s.P99Gap.Round(time.Millisecond), s.MaxGap.Round(time.Millisecond),
 		s.MinOccupancy.Round(time.Millisecond))
 }
+
+// TestBreaksRepeatWhenAsked: a single short break is very hard to catch by ear,
+// because HLS runs 12-18 seconds behind live and a listener who presses play at
+// the wrong moment never hears it -- and cannot tell that from a broken splice.
+func TestBreaksRepeatWhenAsked(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig(t)
+
+	a, err := New(cfg, Options{
+		Tracks:        []string{toneFile(t, dir, "a.mp3", 2, 220)},
+		BreakPath:     voiceWAV(t, dir, 0.5),
+		BreakAtSec:    5,
+		BreakEverySec: 20,
+		Log:           slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Two hours of coverage at one every 20 seconds.
+	if got := a.PendingBreaks(); got != 360 {
+		t.Errorf("PendingBreaks() = %d, want 360 (2h at one every 20s)", got)
+	}
+}
+
+func TestSingleBreakIsStillTheDefault(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig(t)
+
+	a, err := New(cfg, Options{
+		Tracks:     []string{toneFile(t, dir, "a.mp3", 2, 220)},
+		BreakPath:  voiceWAV(t, dir, 0.5),
+		BreakAtSec: 5,
+		Log:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := a.PendingBreaks(); got != 1 {
+		t.Errorf("PendingBreaks() = %d, want 1 with no interval set", got)
+	}
+}

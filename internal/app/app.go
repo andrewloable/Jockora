@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,8 +30,16 @@ import (
 type Options struct {
 	Tracks     []string // music files, played in order and then looped
 	BreakPath  string   // a WAV to splice, optional
-	BreakAtSec int      // when it should be heard, in seconds from the start
-	Log        *slog.Logger
+	BreakAtSec int      // when the first one should be heard, seconds from start
+
+	// BreakEverySec repeats the break at this interval. Zero means one only.
+	//
+	// A single short break is very hard to catch by ear: HLS runs 12-18 seconds
+	// behind live, so a listener who presses play at the wrong moment simply
+	// never hears it and cannot tell that from a broken splice. Repeating it is
+	// what makes the seam actually observable.
+	BreakEverySec int
+	Log           *slog.Logger
 }
 
 // App is one running station.
@@ -48,12 +58,21 @@ type App struct {
 	// Guarded because the signal handler and the feeder are different goroutines.
 	stallMu    sync.Mutex
 	stallUntil time.Time
+
+	nowMu               sync.Mutex
+	nowArtist, nowTitle string
+
+	mixerMu sync.Mutex
+	mixer   *mix.Mixer
 }
 
 // ringSeconds is how much decoded audio is buffered ahead of the mixer. Enough
 // to ride out a slow disk or a decoder starting up, small enough that a track
 // change is not delayed by a wall of buffered audio.
 const ringSeconds = 10
+
+// scheduleAhead bounds how far ahead repeating breaks are queued.
+const scheduleAhead = 2 * time.Hour
 
 // New validates everything that can be validated before anything starts, then
 // opens the listener and spawns ffmpeg.
@@ -89,14 +108,23 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 		if _, err := mix.ReadWAV(opts.BreakPath); err != nil {
 			return nil, fmt.Errorf("app: break audio: %w", err)
 		}
-		at := int64(opts.BreakAtSec) * mix.SampleRate
-		if err := a.queue.Enqueue(sched.Entry{
-			AfterSample: at,
-			Action:      sched.ActionSpliceAudio,
-			Path:        opts.BreakPath,
-			Placement:   mix.PlacementBetween.String(),
-		}); err != nil {
-			return nil, fmt.Errorf("app: scheduling break: %w", err)
+		every := opts.BreakEverySec
+		count := 1
+		if every > 0 {
+			// Enough to cover a long listening session without scheduling
+			// forever.
+			count = int(scheduleAhead.Seconds()) / every
+		}
+		for i := 0; i < count; i++ {
+			at := int64(opts.BreakAtSec+i*every) * mix.SampleRate
+			if err := a.queue.Enqueue(sched.Entry{
+				AfterSample: at,
+				Action:      sched.ActionSpliceAudio,
+				Path:        opts.BreakPath,
+				Placement:   mix.PlacementBetween.String(),
+			}); err != nil {
+				return nil, fmt.Errorf("app: scheduling break: %w", err)
+			}
 		}
 	}
 
@@ -108,6 +136,7 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 		return nil, err
 	}
 	a.srv = srv
+	srv.SetStatusSource(a)
 
 	// The encoder comes up before the mixer, so the mixer never writes into a
 	// pipe that does not exist yet.
@@ -134,6 +163,63 @@ func (a *App) PendingBreaks() int { return a.queue.Pending() }
 
 // Metrics reports the run so far: inter-write gaps, ring occupancy, write count.
 func (a *App) Metrics() mix.MetricsSnapshot { return a.metrics.Snapshot() }
+
+// Status implements server.StatusSource, feeding /now.json.
+//
+// Everything here is a cached counter read. The page polls this every few
+// seconds and a status endpoint that costs real work is one nobody can afford
+// to look at.
+//
+// Fields the spike genuinely does not know are left EMPTY rather than filled
+// with plausible-looking values: a status endpoint that invents its answers is
+// worse than one that admits what it cannot see.
+func (a *App) Status() server.Status {
+	m := a.metrics.Snapshot()
+
+	st := server.Status{
+		Health: server.Health{
+			// ffmpeg is proven working by the fact that segments exist at all,
+			// and the supervisor reports restarts separately.
+			FFmpeg: "ok",
+			LLM:    "not used by the spike",
+			TTS:    "not used by the spike",
+		},
+		Metrics: server.Metrics{
+			RingOccupancyS:    a.ring.Occupancy().Seconds(),
+			Underruns:         a.ring.UnderrunCount(),
+			EncoderRestarts:   a.sup.Restarts(),
+			P99GapMs:          float64(m.P99Gap.Microseconds()) / 1000,
+			MaxGapMs:          float64(m.MaxGap.Microseconds()) / 1000,
+			MinRingOccupancyS: m.MinOccupancy.Seconds(),
+			DriftMs:           float64(a.drift().Microseconds()) / 1000,
+		},
+	}
+
+	a.nowMu.Lock()
+	if a.nowArtist != "" || a.nowTitle != "" {
+		st.Now = &server.Track{Artist: a.nowArtist, Title: a.nowTitle}
+	}
+	a.nowMu.Unlock()
+
+	return st
+}
+
+// drift reports how far behind schedule the mixer is, or zero before it starts.
+func (a *App) drift() time.Duration {
+	a.mixerMu.Lock()
+	defer a.mixerMu.Unlock()
+	if a.mixer == nil {
+		return 0
+	}
+	return a.mixer.Pacer.Drift()
+}
+
+// P99Gap and MaxGap expose the pacing tail for a soak harness.
+func (a *App) P99Gap() time.Duration { return a.metrics.Snapshot().P99Gap }
+func (a *App) MaxGap() time.Duration { return a.metrics.Snapshot().MaxGap }
+
+// MinRingOccupancy is the lowest the ring has been all run.
+func (a *App) MinRingOccupancy() time.Duration { return a.metrics.Snapshot().MinOccupancy }
 
 // StallFeeder pauses decoding for d, leaving the mixer to ride it out.
 //
@@ -182,6 +268,10 @@ func (a *App) Run(ctx context.Context) error {
 		Log:     a.log,
 		Metrics: &a.metrics,
 	}
+	a.mixerMu.Lock()
+	a.mixer = m
+	a.mixerMu.Unlock()
+
 	err := m.Run(ctx)
 
 	// The four numbers GATE 2 asserts on, logged at shutdown so a long
@@ -235,6 +325,7 @@ func (a *App) feedTracks(ctx context.Context) {
 				}
 			}()
 
+			a.setNowPlaying(path)
 			err := decode.Decode(ctx, path, blocks)
 			// The consumer must finish before the next track reuses the channel.
 			for len(blocks) > 0 && ctx.Err() == nil {
@@ -258,6 +349,18 @@ func (a *App) feedTracks(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// setNowPlaying records what is being decoded, for /now.json.
+//
+// The spike is handed file paths rather than a scanned library, so the file name
+// is all it honestly knows. It is deliberately NOT reported as a filesystem path
+// -- the status endpoint must not leak the library layout.
+func (a *App) setNowPlaying(path string) {
+	a.nowMu.Lock()
+	defer a.nowMu.Unlock()
+	a.nowArtist = ""
+	a.nowTitle = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 }
 
 // feedRing writes every frame into the ring, retrying while it is full.

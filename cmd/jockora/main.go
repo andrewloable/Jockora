@@ -27,14 +27,19 @@ func main() {
 	}
 }
 
+// ringSecondsForStall mirrors the app's ring depth, so a SIGUSR2 stall is
+// guaranteed to outlast the buffer rather than being absorbed by it.
+const ringSecondsForStall = 10 * time.Second
+
 func run() error {
 	// Run-specific flags live here rather than in config, which describes the
 	// server rather than one spike run.
 	var breakPath string
-	var breakAt int
+	var breakAt, breakEvery int
 	cfg, err := config.LoadWith(func(fs *flag.FlagSet) {
 		fs.StringVar(&breakPath, "break", "", "WAV to splice into the stream (48kHz 16-bit)")
-		fs.IntVar(&breakAt, "break-at", 30, "when the break should be heard, seconds from start")
+		fs.IntVar(&breakAt, "break-at", 30, "when the first break should be heard, seconds from start")
+		fs.IntVar(&breakEvery, "break-every", 0, "repeat the break every N seconds (0 = once)")
 	})
 	if err != nil {
 		return err
@@ -83,10 +88,11 @@ func run() error {
 	}
 
 	a, err := app.New(cfg, app.Options{
-		Tracks:     tracks,
-		BreakPath:  breakPath,
-		BreakAtSec: breakAt,
-		Log:        log,
+		Tracks:        tracks,
+		BreakPath:     breakPath,
+		BreakAtSec:    breakAt,
+		BreakEverySec: breakEvery,
+		Log:           log,
 	})
 	if err != nil {
 		return err
@@ -97,13 +103,25 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// SIGUSR1 stalls the decoder for eight seconds. This is GATE 2's first fault
-	// injection: `kill -USR1 <pid>` should make the ring drain, silence-fill
-	// cover it and the stream carry on. It is a test hook, not a feature.
-	usr1 := make(chan os.Signal, 1)
-	signal.Notify(usr1, syscall.SIGUSR1)
+	// Decoder-stall fault injection. Test hooks, not features.
+	//
+	// SIGUSR1 stalls 8 seconds, which is what GATE 2 specifies. On the default
+	// 10-second ring that stall is ABSORBED: the buffer covers it, UnderrunCount
+	// stays at zero and silence-fill never fires. That is the system working,
+	// but it does not demonstrate the safety net.
+	//
+	// SIGUSR2 stalls longer than the ring can hold, so the ring genuinely runs
+	// dry, silence-fill fires and UnderrunCount rises. The gate asks for the net
+	// to be proven to fire, not merely proven never to be needed, so both are
+	// available and both should be exercised.
+	stalls := make(chan os.Signal, 2)
+	signal.Notify(stalls, syscall.SIGUSR1, syscall.SIGUSR2)
 	go func() {
-		for range usr1 {
+		for sig := range stalls {
+			if sig == syscall.SIGUSR2 {
+				a.StallFeeder(ringSecondsForStall + 5*time.Second)
+				continue
+			}
 			a.StallFeeder(8 * time.Second)
 		}
 	}()
