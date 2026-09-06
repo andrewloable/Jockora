@@ -24,3 +24,13 @@ breaks-round-*.md
 
 # Kokoro model weights: hundreds of MB, operator-supplied, never vendored.
 models/
+
+# Local compose settings; .env.example is the template that ships.
+.env
+config/
+models/
+
+# Demo audio. Not committed until the music licence is confirmed by the
+# copyright holder; see Jockora-l6o.10.
+docs/demo*.mp3
+*.wav

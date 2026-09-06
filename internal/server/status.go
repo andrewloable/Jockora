@@ -18,6 +18,17 @@ type StatusSource interface {
 	Status() Status
 }
 
+// DialSource supplies the proposed dial.
+//
+// Separate from StatusSource, and CACHED for the same reason: building the dial
+// reads every dossier in the library, which is fine once at startup and absurd
+// on every poll. A nil source means the endpoint reports that no dial has been
+// proposed rather than 404ing, because "no stations yet" is a real state on a
+// library that has not been enriched.
+type DialSource interface {
+	Dial() any
+}
+
 // Track is what a listener may be told about a track.
 //
 // Artist and title only. No path: the endpoint is a debugging surface, and a
@@ -106,6 +117,27 @@ func (s *StaticStatus) Status() Status {
 //
 // It lives at /now.json, not under /hls/: it is not a media route, and putting
 // it there would drag it through the segment allowlist.
+// serveDial answers /stations.json, the dial a client renders as the primary UI.
+//
+// Unlike /now.json this one IS cacheable for a short while: the dial changes
+// only as enrichment progresses, which is minutes at best, and a client polling
+// it should not be re-reading every dossier in the library.
+func (s *Server) serveDial(w http.ResponseWriter, r *http.Request) {
+	if s.dial == nil {
+		http.Error(w, "no dial proposed", http.StatusServiceUnavailable)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "max-age=30")
+
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(s.dial.Dial()); err != nil {
+		s.log.Warn("writing dial", "err", err)
+	}
+}
+
 func (s *Server) serveStatus(w http.ResponseWriter, r *http.Request) {
 	if s.status == nil {
 		http.Error(w, "status unavailable", http.StatusServiceUnavailable)

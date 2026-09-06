@@ -272,6 +272,9 @@ func ResolvableFactIDs(prev, cur, next *enrich.Dossier) []string {
 		if side.d.SubjectSummary != "" {
 			out = append(out, side.prefix+".subject_summary")
 		}
+		if side.d.Release != "" {
+			out = append(out, side.prefix+".release")
+		}
 		for i := range side.d.ArtistFacts {
 			if i >= MaxFactsInPrompt {
 				break
@@ -339,6 +342,8 @@ func ResolveFactText(id string, prev, cur, next *enrich.Dossier) (string, bool) 
 	switch {
 	case field == "subject_summary":
 		return d.SubjectSummary, d.SubjectSummary != ""
+	case field == "release":
+		return d.Release, d.Release != ""
 	case field == "station_tags":
 		return strings.Join(d.StationTags, ", "), len(d.StationTags) > 0
 	case field == "mood":

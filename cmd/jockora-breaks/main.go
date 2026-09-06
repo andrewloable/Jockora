@@ -44,7 +44,7 @@ func main() {
 
 func run() error {
 	var dbPath, llmURL, personaPath, outDir string
-	var n, round int
+	var n, round, nPredict int
 	var temperature float64
 	flag.StringVar(&dbPath, "db", "jockora.db", "database holding scanned tracks and dossiers")
 	flag.StringVar(&llmURL, "llm-url", "http://127.0.0.1:8081", "llama-server base URL")
@@ -53,6 +53,7 @@ func run() error {
 	flag.IntVar(&n, "n", 50, "breaks to generate")
 	flag.IntVar(&round, "round", 1, "tuning round (1-3); step 5.5 allows at most three")
 	flag.Float64Var(&temperature, "temperature", enrich.WritingTemperature, "sampling temperature")
+	flag.IntVar(&nPredict, "n-predict", 0, "response token budget (0 = dj.BreakTokenBudget)")
 	flag.Parse()
 
 	if round < 1 || round > 3 {
@@ -120,7 +121,7 @@ func run() error {
 	// The index is NOT cleared between rounds. Round two colliding with round
 	// one is real: on air the index is never empty either.
 	said := &dj.SaidLines{Store: s, JockID: persona.ID()}
-	writer := dj.NewWriterAt(enrich.NewLlamaCPP(llmURL, nil), 0, temperature)
+	writer := dj.NewWriterAt(enrich.NewLlamaCPP(llmURL, nil), nPredict, temperature)
 	rubric := dj.Rubric{Said: said, Persona: persona}
 
 	// The fact cooldown is part of how production BUILDS the schema, not part
@@ -133,6 +134,9 @@ func run() error {
 	// instead of 50 is not the round the step asks for, and the pass rate would
 	// be computed over whatever survived without saying so.
 	failed := 0
+	// rawLong is the spec's unassisted criterion (c); relocated counts what
+	// production's ladder rescued. Reported separately so neither hides.
+	rawLong, relocated := 0, 0
 
 	var results []dj.RubricResult
 	var rows []row
@@ -148,15 +152,16 @@ func run() error {
 		}
 		schema := dj.BreakSchemaExcluding(prev, cur, next, cooling)
 
-		prompt, err := dj.BuildBreakPrompt(dj.PromptInput{
-			Persona: persona, Previous: prev, Current: cur, Next: next,
-			PreviousArtist: names[i%len(names)].artist,
-			PreviousTitle:  names[i%len(names)].title,
-			Placement:      placement.String(),
-			WindowSeconds:  window,
-			Schema:         schema,
-			IsColdOpen:     i == 0,
-		})
+		mkPrompt := func(words int) (string, error) {
+			return dj.BuildBreakPrompt(promptFor(persona, prev, cur, next, names, i,
+				placement, float64(words)/dj.WordsPerSecond, schema))
+		}
+
+		// Built through the SAME helper the retry uses. Two copies of this
+		// drifted immediately: the inline one here never gained the current and
+		// next track NAMES, so the harness was still measuring a writer that
+		// had to invent a title while production had been told it.
+		prompt, err := mkPrompt(dj.WordTarget(window))
 		if err != nil {
 			return err
 		}
@@ -174,9 +179,33 @@ func run() error {
 			continue
 		}
 
-		res, err := rubric.Score(ctx, b, prev, cur, next, dj.WordTarget(window), namesAt(names, i))
+		// PRODUCTION'S LADDER, not a single attempt.
+		//
+		// station.LengthCheck.Enforce does not drop an overlong break: it
+		// rewrites once at 0.75x the target, and if that still does not fit it
+		// RE-PLACES the break into the between-track gap, which is 120 words.
+		// Scoring the first attempt against the original window measured a
+		// configuration the product never runs -- the same mistake that made
+		// rounds 1 and 2 worthless -- and reported 20 of 47 as overlong when
+		// production would have aired nearly all of them.
+		//
+		// Both numbers are kept. `raw` is the spec's criterion (c) on the first
+		// attempt, so the writer's unassisted aim stays visible and a
+		// regression in it cannot hide behind the ladder.
+		raw, err := rubric.Score(ctx, b, prev, cur, next, dj.WordTarget(window), namesAt(names, i))
 		if err != nil {
 			return err
+		}
+		res, laddered, err := enforceLength(ctx, rubric, writer, b, prev, cur, next,
+			placement, window, schema, mkPrompt, namesAt(names, i))
+		if err != nil {
+			return err
+		}
+		if _, over := raw.Failures[dj.ReasonLength]; over {
+			rawLong++
+		}
+		if laddered {
+			relocated++
 		}
 		for _, id := range b.AssertedFacts {
 			usedAt[id] = i
@@ -210,6 +239,8 @@ func run() error {
 
 	summary := dj.Summarise(results)
 	fmt.Printf("\n%s", summary)
+	fmt.Printf("  %d of %d overran on the FIRST attempt (the spec's raw criterion (c));\n", rawLong, len(results))
+	fmt.Printf("  %d were rescued by the retry or the between-gap, as production would.\n", relocated)
 	if failed > 0 {
 		fmt.Printf("  %d of %d requests produced nothing readable\n", failed, n)
 	}
@@ -283,6 +314,86 @@ func writeMarkdown(path string, round int, p *dj.Persona, temp float64, s dj.Rub
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
+// promptFor assembles one break request. It exists so the retry rung can build
+// the SAME prompt aimed at a smaller word count, which is what production does.
+func promptFor(p *dj.Persona, prev, cur, next *enrich.Dossier, names []trackName, i int,
+	placement mix.Placement, window float64, schema map[string]any) dj.PromptInput {
+	curN, nextN := names[(i+1)%len(names)], names[(i+2)%len(names)]
+	return dj.PromptInput{
+		Persona: p, Previous: prev, Current: cur, Next: next,
+		PreviousArtist: names[i%len(names)].artist,
+		PreviousTitle:  names[i%len(names)].title,
+		CurrentArtist:  curN.artist, CurrentTitle: curN.title,
+		NextArtist: nextN.artist, NextTitle: nextN.title,
+		Placement:     placement.String(),
+		WindowSeconds: window,
+		Schema:        schema,
+		IsColdOpen:    i == 0,
+	}
+}
+
+// enforceLength walks the same ladder station.LengthCheck.Enforce walks, and
+// scores the break that would actually have aired.
+//
+// It measures WORDS rather than synthesised seconds. Production measures the
+// rendered WAV, which is more accurate and costs a TTS render per attempt; at
+// fifty breaks a round that is the difference between a loop that can be run
+// three times in an afternoon and one that cannot. The word target and the
+// speaking rate are the same on both sides, so the rung chosen is the same for
+// anything that is not within a word or two of a boundary.
+func enforceLength(ctx context.Context, rubric dj.Rubric, w dj.Writer, b *dj.Break,
+	prev, cur, next *enrich.Dossier, placement mix.Placement, window float64,
+	schema map[string]any, buildPrompt func(words int) (string, error), names []string) (dj.RubricResult, bool, error) {
+
+	res, err := rubric.Score(ctx, b, prev, cur, next, dj.WordTarget(window), names)
+	if err != nil {
+		return res, false, err
+	}
+	if _, over := res.Failures[dj.ReasonLength]; !over {
+		return res, false, nil
+	}
+
+	// Rung two: one rewrite, aimed shorter. Only one, because two model calls
+	// plus two renders is already the ceiling inside the lookahead window.
+	// The prompt is REBUILT for the shorter target. Re-rolling the original
+	// prompt would just be a second sample of the same request, which is not
+	// what production does and would measure nothing about aiming shorter.
+	shorter := int(float64(dj.WordTarget(window))*station.ShorterRetryFactor + 0.5)
+	shortPrompt, err := buildPrompt(shorter)
+	if err != nil {
+		return res, false, err
+	}
+	if out, err := w.WriteBreak(ctx, shortPrompt, schema); err == nil {
+		if retry, perr := dj.ParseBreak(out); perr == nil {
+			if r2, serr := rubric.Score(ctx, retry, prev, cur, next, shorter, names); serr == nil {
+				if r2.Pass {
+					return r2, true, nil
+				}
+				if _, stillOver := r2.Failures[dj.ReasonLength]; !stillOver {
+					return r2, true, nil
+				}
+				res, b = r2, retry
+			}
+		}
+	}
+
+	// Rung three: re-place rather than rewrite again. The between gap is wider
+	// than any ramp, and moving audio that already exists costs nothing.
+	if placement != mix.PlacementBetween {
+		moved, err := rubric.Score(ctx, b, prev, cur, next, station.BetweenWordBudget, names)
+		if err != nil {
+			return res, true, err
+		}
+		if _, stillOver := moved.Failures[dj.ReasonLength]; !stillOver {
+			return moved, true, nil
+		}
+	}
+
+	// Rung four: it does not fit anywhere. Production drops it; breaks are
+	// optional, music is not.
+	return res, true, nil
+}
+
 // The loaders below are deliberately duplicated from jockora-gate5 rather than
 // lifted into a shared package. They are forty lines, the two harnesses measure
 // different things, and a package that exists to serve two commands is a
@@ -307,12 +418,13 @@ func loadPersona(path string, taste enrich.StationTaste) (*dj.Persona, error) {
 // trackName is one track's name and its measured speaking windows.
 type trackName struct {
 	artist, title string
+	album         string
 	rampS, outroS float64
 }
 
 func loadDossiers(ctx context.Context, s *store.Store) ([]*enrich.Dossier, []trackName, error) {
 	rows, err := s.DB().QueryContext(ctx,
-		`SELECT d.track_id, coalesce(t.artist,''), coalesce(t.title,''),
+		`SELECT d.track_id, coalesce(t.artist,''), coalesce(t.title,''), coalesce(t.album,''),
 		        coalesce(t.ramp_s,0), coalesce(t.outro_s,0)
 		   FROM dossiers d JOIN tracks t ON t.id = d.track_id
 		  ORDER BY d.track_id LIMIT 200`)
@@ -326,7 +438,7 @@ func loadDossiers(ctx context.Context, s *store.Store) ([]*enrich.Dossier, []tra
 	for rows.Next() {
 		var id int64
 		var n trackName
-		if err := rows.Scan(&id, &n.artist, &n.title, &n.rampS, &n.outroS); err != nil {
+		if err := rows.Scan(&id, &n.artist, &n.title, &n.album, &n.rampS, &n.outroS); err != nil {
 			return nil, nil, err
 		}
 		d, ok, err := enrich.LoadDossier(ctx, s, id)
@@ -421,7 +533,7 @@ func namesAt(names []trackName, i int) []string {
 	var out []string
 	for _, k := range []int{i, i + 1, i + 2} {
 		n := names[k%len(names)]
-		out = append(out, n.artist, n.title)
+		out = append(out, n.artist, n.title, n.album)
 	}
 	return out
 }

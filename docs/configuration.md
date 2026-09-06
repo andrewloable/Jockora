@@ -1,0 +1,211 @@
+<!--
+Copyright (C) 2026 Andrew Loable
+SPDX-License-Identifier: AGPL-3.0-only
+-->
+
+# Configuration
+
+Every flag has a `JOCKORA_`-prefixed environment equivalent: `-library-path`
+is `JOCKORA_LIBRARY_PATH`, `-break-every-n-tracks` is
+`JOCKORA_BREAK_EVERY_N_TRACKS`. The flag wins when both are set.
+
+`jockora <command> -h` prints the live list. This page explains what changing
+each one does *audibly*, which `-h` cannot.
+
+## Library and storage
+
+| Flag | Default | What it changes |
+|---|---|---|
+| `-library-path` | — | Music root. **Read-only**; never written, retagged or transcoded. |
+| `-db-path` | `jockora.db` | Dossiers, said-lines, scan state. Delete it and every track re-enriches. |
+| `-subsonic-url` | — | Read the library from an OpenSubsonic server (Navidrome, Airsonic, Gonic) instead of a folder. Wins over `-library-path` when both are set. |
+| `-subsonic-user` | — | OpenSubsonic username. |
+| `-subsonic-password` | — | Prefer `JOCKORA_SUBSONIC_PASSWORD`; a password on a command line is visible in `ps`. |
+| `-segment-dir` | `segments` | HLS segments. Transient; a tmpfs is ideal. |
+
+### Reading from Navidrome instead of a folder
+
+If you already run Navidrome, Airsonic or Gonic, point Jockora at it and skip
+the folder scan entirely:
+
+```sh
+jockora serve -subsonic-url https://navidrome.example -subsonic-user you
+```
+
+Tracks are stored as stream URLs, so ffmpeg fetches audio over HTTP exactly as
+it would read a file. **The connection is read-only by construction** — the
+provider interface has no method that writes, and a test asserts every request
+is a GET and that no rating, star, scrobble or playlist endpoint is ever called.
+
+One consequence worth knowing: a long-lived auth token for that account is
+written into the local database, because the stored URL has to carry its own
+credentials. That is the same trust boundary as the password in your config.
+
+## The DJ
+
+| Flag | Default | What it changes |
+|---|---|---|
+| `-persona` | — | A `.toml` card, or a **directory** to pick from by what the library sounds like. |
+| `-break-every-n-tracks` | `4` | **The knob most likely to be wrong.** See below. |
+| `-station` | — | Which station to broadcast. |
+
+**Break cadence is the setting you will actually want to change.** Spotify's AI
+DJ draws its loudest complaints for talking too much. If you find yourself
+wishing it would be quiet, raise this number *before* concluding the writing is
+bad. Going from 4 to 8 halves how often you hear a voice and changes nothing
+else.
+
+## Language model
+
+| Flag | Default | What it changes |
+|---|---|---|
+| `-llm-url` | `http://127.0.0.1:8081` | Endpoint. |
+| `-llm-api` | `llamacpp` | `llamacpp`, `ollama`, or `openai` for any OpenAI-compatible host. |
+| `-llm-api-key` | — | Prefer `JOCKORA_LLM_API_KEY`; a key on a command line is visible in `ps`. |
+| `-llm-model` | — | A `.gguf`. Set this and Jockora starts and supervises `llama-server` itself. |
+| `-llm-binary` | `llama-server` | Used only with `-llm-model`. |
+| `-llm-context` | `8192` | Context size. Below ~4096 the enrichment prompt stops fitting. |
+| `-llm-gpu-layers` | `99` | `0` forces CPU. See [hardware.md](hardware.md) — the GPU buys about 2.6×, not an order of magnitude. |
+
+## Speech
+
+| Flag | Default | What it changes |
+|---|---|---|
+| `-tts-python` | `python3.10` | Interpreter with `kokoro-onnx` installed. |
+| `-tts-script` | `sidecar/kokoro_server.py` | Sidecar entry point. |
+| `-tts-url` | `http://127.0.0.1:8090` | Attach to a sidecar you run instead. |
+
+The voice comes from the persona card's `voice_id`, not from a flag.
+
+## Audio and streaming
+
+| Flag | Default | What it changes |
+|---|---|---|
+| `-sample-rate` | `48000` | Canonical bus rate. Changing it is not supported. |
+| `-channels` | `2` | Canonical bus channels. |
+| `-crossfade-seconds` | `2` | Track-boundary crossfade. |
+| `-segment-seconds` | `4` | Segment duration. Lower is more responsive, more HTTP requests. |
+| `-list-size` | `10` | Playlist window. Segment × list = how far a client can rewind. |
+| `-listen-addr` | `127.0.0.1:8080` | HTTP bind address. |
+| `-log-format` | inferred | `text`, `json`, or empty to infer — JSON when stdout is not a terminal. |
+| `-allow-lan` | off | **Required for any non-loopback bind. There is no authentication.** |
+
+## Coverage sampling
+
+`-sample` (with `enrich`) takes a track count and measures synced-lyric coverage over N
+sampled tracks and stops, instead of enriching. It answers "how many of my
+tracks will the DJ actually know anything about", which decides how much of the
+talking is personality-only.
+
+```sh
+jockora enrich -sample 200 -library-path /music
+```
+
+## Room-test splicing
+
+`-break`, `-break-at` and `-break-every` splice one **pre-recorded WAV** on a
+timer. That is the room-test-A harness, not the DJ. Leave them unset for a real
+station.
+
+## The dial
+
+`GET /stations.json` returns the proposed dial: one entry per station with its
+track count, its matched jock and the moods that actually occur in it, plus
+`enriched` and `total` so a client can say how provisional the proposal is.
+
+It is built ONCE at startup and cached — it reads every dossier in the library,
+which is fine once and absurd on every poll. On a fresh library most tracks land
+in `unsorted` and the dial fills in over the following days as enrichment runs.
+
+Two buckets never get a jock: `unsorted` (no dossier yet) and `other` (enriched,
+but fitting no genre in the closed vocabulary). Neither describes a sound, so
+there is no character to match a persona against.
+
+---
+
+# Troubleshooting
+
+**Run `jockora doctor` first.** It checks ffmpeg, the model endpoint, the speech
+sidecar, the library, the segment directory, the database and free disk, and it
+names the fix rather than only the problem.
+
+Most failures here look identical from the outside — the music keeps playing and
+the DJ says nothing. That is deliberate: **breaks are optional, music is not.**
+So each entry below names the log line or `/now.json` field that tells them
+apart.
+
+### Reading from Navidrome instead of a folder
+
+If you already run Navidrome, Airsonic or Gonic, point Jockora at it and skip
+the folder scan entirely:
+
+```sh
+jockora serve -subsonic-url https://navidrome.example -subsonic-user you
+```
+
+Tracks are stored as stream URLs, so ffmpeg fetches audio over HTTP exactly as
+it would read a file. **The connection is read-only by construction** — the
+provider interface has no method that writes, and a test asserts every request
+is a GET and that no rating, star, scrobble or playlist endpoint is ever called.
+
+One consequence worth knowing: a long-lived auth token for that account is
+written into the local database, because the stored URL has to carry its own
+credentials. That is the same trust boundary as the password in your config.
+
+## The DJ never talks
+
+The single most common report, and it has four distinct causes.
+
+1. **No persona.** Log: `no DJ: no persona configured`. Set `-persona`.
+2. **The model is unreachable.** `/now.json` → `health.llm`. Not `"ok"` means
+   every break fails before it is written.
+3. **Speech is failing.** `/now.json` → `health.tts`. A wrong `voice_id` fails
+   *every* synthesis with a 503 while the station plays on perfectly — this once
+   cost 20 breaks out of 20 with nothing appearing wrong.
+4. **Breaks are being written and dropped.** `/now.json` →
+   `metrics.break_drop_rate`. Above ~0.10 the writer is repeating itself or
+   overrunning; check `last_break` to see what did air.
+
+Also check `enrichment.done` / `.total`. Early on, most tracks have no dossier,
+so the DJ has little to say — that is expected, not broken.
+
+## The stream stalls after a few minutes
+
+- `/now.json` → `metrics.underruns` climbing means the mixer is not keeping the
+  ring fed; `metrics.ring_occupancy_s` shows how close to dry it ran.
+- `metrics.encoder_restarts` above zero means ffmpeg died and was respawned.
+  One is a recovery working; a rising count is a real fault.
+- Free disk. Segments are swept by the server, not by ffmpeg, so a stuck sweeper
+  fills the segment directory.
+
+## Nothing plays at all
+
+`jockora doctor`. Then the log: `no playable tracks under <path>` means the scan
+found nothing — the mount is empty or the wrong directory. `library scanned`
+with `found: 0` says the same thing.
+
+## Speech is clipped, or too quiet under the music
+
+The contract is fixed: music −16 LUFS, speech −16 LUFS, ducked to −28 LUFS
+(−12 dB), true-peak ceiling −1 dBTP. If speech sounds buried, the music's
+measured loudness is likely missing, so it was never normalised — check
+`loudness_lufs` in `tracks`.
+
+## Breaks land on top of the vocal
+
+The DJ aims at a track's instrumental ramp or outro. Where those are unmeasured
+it falls back to the between-track gap. Check `ramp_s`, `outro_s` and
+`ramp_confidence` in `tracks`; if they are null for most of the library, most
+breaks are landing between tracks rather than woven in.
+
+## It says the same thing about the same artist
+
+Known and measured. Artist facts come from MusicBrainz, which supplies about one
+usable sentence per artist, so that sentence recurs whenever the artist does.
+Prompt wording, fact cooldowns and withholding facts have each been measured
+against this and none helped; richer per-track dossiers are the actual lever.
+
+## First run seems to hang
+
+It is scanning. ~8 minutes for 7,700 tracks over a network mount; later scans of
+an unchanged library take about 48 seconds. Progress is logged every 500 files.

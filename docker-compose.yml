@@ -1,67 +1,78 @@
 # Copyright (C) 2026 Andrew Loable
 # SPDX-License-Identifier: AGPL-3.0-only
 #
-# Deployment for gsc-datacenter (192.168.0.254), following the conventions
-# already in use on that host: 420xx port slots, one shared user-defined bridge,
-# restart=always, config under /home/mandark/<service>.
+# Portable quickstart: builds from this checkout, needs nothing but a music
+# folder and a GGUF. Published on LOCALHOST ONLY, because Jockora has no
+# authentication whatsoever.
+#
+#   MUSIC=/path/to/music MODEL=qwen2.5-7b-instruct-q4_k_m.gguf docker compose up -d
+#
+# The house deployment, which is not portable, lives in deploy/.
 
 services:
+  llm:
+    # Pinned by digest-bearing tag rather than :latest, so a rebuild months from
+    # now produces the same station rather than a surprise.
+    image: ghcr.io/ggml-org/llama.cpp:server-b4738
+    restart: unless-stopped
+    volumes:
+      # Put your .gguf here. Nothing is downloaded for you: a language model is
+      # an operator-supplied dependency, like ffmpeg.
+      - ${MODELS:-./models}:/models:ro
+    command:
+      - "-m"
+      - "/models/${MODEL:?set MODEL to the .gguf filename inside your models directory}"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "-c"
+      - "8192"
+    healthcheck:
+      # Jockora's own preflight refuses to serve without a working model, so
+      # letting it start first would just produce a confusing failure.
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+
   jockora:
-    image: 192.168.0.254:42009/jockora:latest
-    container_name: jockora
-    restart: always
-    networks:
-      - server-network
+    build: .
+    restart: unless-stopped
+    depends_on:
+      llm:
+        condition: service_healthy
     ports:
-      # 42017 is the next free slot in the house 420xx range (42000-42016 taken).
-      #
-      # Published on 0.0.0.0 per house convention, WHICH MEANS THE WHOLE LAN CAN
-      # REACH IT. Jockora ships no authentication: anyone on the network can
-      # listen to the stream and read /now.json. That is a deliberate decision
-      # taken on 2026-09-06, not a default -- the binary refuses a non-loopback
-      # bind unless JOCKORA_ALLOW_LAN is set, and it warns on every start.
-      #
-      # Note the cloudflared tunnel on this host is REMOTELY MANAGED: a public
-      # hostname can be pointed at this service from the Cloudflare dashboard
-      # without changing anything here. Do not add one until accounts land.
-      - "42017:8080"
+      # 127.0.0.1 ON PURPOSE. THERE IS NO AUTHENTICATION: anyone who can reach
+      # this port can listen to your stream and read /now.json. Change this to
+      # 0.0.0.0 only if you have decided that is what you want, and never
+      # port-forward it to the internet.
+      - "127.0.0.1:8080:8080"
     environment:
       JOCKORA_LISTEN_ADDR: "0.0.0.0:8080"
+      # Required because the line above is non-loopback INSIDE the container.
+      # The published port above is what keeps it off your network.
       JOCKORA_ALLOW_LAN: "1"
       JOCKORA_LIBRARY_PATH: "/music"
-      JOCKORA_SEGMENT_DIR: "/tmp/segments"
-      JOCKORA_DB_PATH: "/config/jockora.db"
-      # llama-server runs on the host, not in this container: it is an
-      # operator-supplied service, and the P400's 2GB will not hold a 4B model
-      # so inference is CPU-bound anyway.
-      JOCKORA_LLM_URL: "http://172.20.0.1:8081"
+      JOCKORA_LLM_URL: "http://llm:8080"
+      JOCKORA_PERSONA: "/app/personas"
     volumes:
-      # READ-ONLY, and enforced twice: Jockora never writes to a music library
-      # by design, and the mount makes it impossible rather than merely
-      # promised. It layers on top of Jellyfin here; it must never become a
-      # competing writer.
-      - /media/data1/music:/music:ro
-      - /home/mandark/jockora:/config
+      # READ-ONLY, enforced by the mount rather than promised by the code.
+      # Jockora layers on top of a library you already have and must never
+      # become a competing writer.
+      - ${MUSIC:?set MUSIC to your music folder}:/music:ro
+      # Holds the database and the Kokoro voice models. MUST BE OWNED BY UID
+      # 10001: the container is unprivileged and cannot chown a bind mount from
+      # inside. This is the most common first-run failure, and `jockora doctor`
+      # names the exact fix if you hit it.
+      - ${CONFIG:-./config}:/config
+      - ${CONFIG:-./config}/models:/models:ro
     tmpfs:
       # Segments are rewritten every few seconds and never need to survive a
-      # restart. Keeping them in RAM avoids pointless disk churn on the SSD.
-      - /tmp/segments:size=512m
-    command:
-      # `serve` is required as of the five-subcommand CLI (Jockora-mf3.4).
-      # Without it the binary prints usage and exits 2.
-      - "serve"
-      - "-break"
-      - "/config/voice.wav"
-      - "-break-at"
-      - "45"
-      - "-break-every"
-      # ROOM TEST A wants a break the listener meets naturally, not a metronome.
-      # Every 4 minutes is roughly real radio cadence: often enough that an
-      # unbriefed person in the room will hit several, rare enough that it does
-      # not read as a gimmick.
-      - "240"
-      - "/music"
-
-networks:
-  server-network:
-    external: true
+      # restart.
+      # mode=1777 is REQUIRED. A tmpfs mounts root-owned, the container runs
+      # as uid 10001, and the segment directory is a HARD preflight check --
+      # without this the station refuses to start with "permission denied".
+      - /tmp/segments:size=1g,mode=1777
+    command: ["serve"]

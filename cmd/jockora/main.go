@@ -30,7 +30,11 @@ import (
 
 // Version is the release this binary reports. Semver, so an operator can tell
 // two builds apart in a bug report.
-const Version = "0.1.0"
+// Version is a VAR, not a const, so a release build can stamp the tag it was
+// built from with -ldflags "-X main.Version=v1.2.3". -X cannot write to a
+// const, so the linker flag would have been silently ignored and every release
+// binary would have reported the same hardcoded string.
+var Version = "0.1.0"
 
 // subcommands is the WHOLE surface, named once and deliberately.
 //
@@ -264,7 +268,10 @@ func runSubcommand(ctx context.Context, name string, args []string, out io.Write
 		Log:           log,
 	}
 
-	if cfg.LibraryPath != "" {
+	// EITHER source puts the station in library mode. Gating on LibraryPath
+	// alone sent a Subsonic-only configuration down the spike path, where it
+	// would have demanded a list of files and ignored the server entirely.
+	if cfg.LibraryPath != "" || cfg.SubsonicURL != "" {
 		lib, err := buildLibrary(ctx, cfg, log)
 		if err != nil {
 			return err
@@ -272,6 +279,7 @@ func runSubcommand(ctx context.Context, name string, args []string, out io.Write
 		defer lib.Store.Close() //nolint:errcheck // closing at shutdown
 
 		opts.Library = lib
+		opts.Personas = loadRoster(cfg.PersonaPath, log)
 		opts.Enricher = buildEnricher(ctx, cfg, lib, log)
 		pipeline, writer, sidecar := buildBreaks(ctx, cfg, lib, log)
 		opts.Breaks, opts.Writer = pipeline, writer
@@ -282,6 +290,7 @@ func runSubcommand(ctx context.Context, name string, args []string, out io.Write
 		if len(tracks) == 0 {
 			return fmt.Errorf("serve needs something to play:\n" +
 				"       jockora serve -library-path /music\n" +
+				"       jockora serve -subsonic-url https://navidrome.example -subsonic-user you\n" +
 				"       jockora serve <track|directory>...")
 		}
 		// A directory argument expands to the audio files beneath it.
@@ -294,7 +303,8 @@ func runSubcommand(ctx context.Context, name string, args []string, out io.Write
 	}
 
 	// The spike runs against explicit track files rather than a scanned library,
-	// so the library check does not apply to it.
+	// so the library-path check does not apply to it. It equally does not apply
+	// to a remote library, where there is no local path for the doctor to stat.
 	if cfg.LibraryPath == "" {
 		doctorCfg.LibraryPath = ""
 	}

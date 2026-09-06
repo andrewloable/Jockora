@@ -5,6 +5,7 @@ package dj
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 )
@@ -143,6 +144,33 @@ func AnalyseGate5Ignoring(raw []string, names [][]string, generated, dropped, fa
 	return r
 }
 
+// wilson95 is the 95% Wilson score interval for a proportion.
+//
+// Wilson rather than the textbook normal approximation, because at n=20 with a
+// small numerator the normal interval is simply wrong: it goes below zero, and
+// at zero successes it collapses to the point estimate 0 +/- 0, which reads as
+// certainty when the data supports nothing of the kind. Wilson stays inside
+// [0,1] and keeps a real upper bound when nothing was observed at all.
+func wilson95(successes, n int) (lo, hi float64) {
+	if n <= 0 {
+		return 0, 0
+	}
+	const z = 1.96
+	nf := float64(n)
+	p := float64(successes) / nf
+	denom := 1 + z*z/nf
+	centre := (p + z*z/(2*nf)) / denom
+	spread := z * math.Sqrt(p*(1-p)/nf+z*z/(4*nf*nf)) / denom
+	lo, hi = centre-spread, centre+spread
+	if lo < 0 {
+		lo = 0
+	}
+	if hi > 1 {
+		hi = 1
+	}
+	return lo, hi
+}
+
 // repeated returns the entries seen more than once, most frequent first.
 func repeated(counts map[string]int) []GramCount {
 	var out []GramCount
@@ -169,8 +197,9 @@ func (r Gate5Report) String() string {
 	fmt.Fprintf(&b, "  shared 4-grams          %d (limit %d)\n", len(r.SharedGrams), MaxRawCollisions)
 	fmt.Fprintf(&b, "  reused openings         %d (limit 0)\n", len(r.DuplicateOpenings))
 	fmt.Fprintf(&b, "  asserted facts resolved %d of %d\n", r.FactsResolved, r.FactsAsserted)
-	fmt.Fprintf(&b, "  validator drop rate     %.0f%% (%d of %d, limit %.0f%%)\n",
-		100*r.DropRate, r.Dropped, r.Generated, 100*MaxDropRate)
+	lo, hi := wilson95(r.Dropped, r.Generated)
+	fmt.Fprintf(&b, "  validator drop rate     %.0f%% (%d of %d, limit %.0f%%), 95%% CI %.0f%%-%.0f%%\n",
+		100*r.DropRate, r.Dropped, r.Generated, 100*MaxDropRate, 100*lo, 100*hi)
 
 	if len(r.SharedGrams) > 0 {
 		b.WriteString("\n  SHARED PHRASES\n")
@@ -184,6 +213,21 @@ func (r Gate5Report) String() string {
 			fmt.Fprintf(&b, "    %2d breaks  %q\n", o.Count, o.Text)
 		}
 	}
+
+	// PRINTED WITH EVERY RESULT, pass or fail. This gate is correctly sized for
+	// what it is -- a go/no-go before committing a week to step 5.5 -- and the
+	// risk is entirely in how it gets read afterwards. At n=20 the interval
+	// above spans most of the range the decision cares about, so a pass here is
+	// evidence that the design is not obviously broken, and is not a
+	// characterisation of the collision rate of a station that will write
+	// roughly 1,500 breaks a month.
+	//
+	// The real number comes free from the live-with-it month: compute the rate
+	// over every break aired and dropped, and use THAT to decide whether
+	// n-grams suffice or the index has to escalate to embeddings.
+	fmt.Fprintf(&b, "\nSAMPLE\n  n=%d raw, %d generated. Wide interval; a pass is a go/no-go,\n  not a monthly rate.\n", r.Sample, r.Generated)
+	b.WriteString("  Measure the real rate over the live-with-it month, across every\n")
+	b.WriteString("  break aired and dropped, before trusting or escalating the index.\n")
 
 	b.WriteString("\nDECISION\n")
 	if r.Pass {

@@ -280,3 +280,48 @@ func contains(hay []string, needle string) bool {
 	}
 	return false
 }
+
+// TestSaidExcusesAnAlbumNameLikeAnyOtherProperNoun.
+//
+// Dossier.Release names the album, so every track from one album makes the DJ
+// say the same words. Measured over 50 breaks, adding the release field without
+// this doubled collisions from 9 to 17 and cost ten breaks that would otherwise
+// have aired -- the index was rejecting correct writing for naming the record
+// it was playing, which is the job.
+func TestSaidExcusesAnAlbumNameLikeAnyOtherProperNoun(t *testing.T) {
+	s := saidStore(t)
+	ctx := context.Background()
+
+	album := "The Lord of the Rings: The Fellowship of the Ring"
+	first := "Concerning Hobbits, from " + album + "."
+	if err := s.Record(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+
+	// A different track, same album, naming it the same way.
+	second := "The Prophecy, from " + album + "."
+	names := []string{"Howard Shore", "The Prophecy", album}
+
+	hit, gram, err := s.CheckCollisionIgnoring(ctx, second, names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hit {
+		t.Errorf("naming the album collided on %q; announcing the record is not repetition", gram)
+	}
+
+	// The guard: excusing the album must not excuse everything else said
+	// around it.
+	reused := "The Prophecy, from " + album + ", is a river of pure emotion tonight."
+	if err := s.Record(ctx, reused); err != nil {
+		t.Fatal(err)
+	}
+	again := "Something else entirely, is a river of pure emotion tonight."
+	hit, _, err = s.CheckCollisionIgnoring(ctx, again, names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hit {
+		t.Error("a reused phrase around the album name went undetected")
+	}
+}

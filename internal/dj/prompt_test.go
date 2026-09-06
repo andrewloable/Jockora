@@ -329,3 +329,50 @@ func mustJSONString(t *testing.T, v any) string {
 	}
 	return string(raw)
 }
+
+// TestPromptNamesTheRecordsEitherSide closes the invention hole found while
+// sampling empty-dossier breaks.
+//
+// The writer used to be told the PREVIOUS track's name and nothing else, so it
+// could never correctly introduce what it was about to play. Asked to open an
+// unknown record it announced "Unknown Territory by The Unseen" -- a song and a
+// band that do not exist -- because a name was the one thing it needed and the
+// one thing it was never given.
+func TestPromptNamesTheRecordsEitherSide(t *testing.T) {
+	got, err := BuildBreakPrompt(PromptInput{
+		Persona:       testPersona(t),
+		WindowSeconds: 20,
+		CurrentArtist: "Radiohead", CurrentTitle: "Creep",
+		NextArtist: "Bush", NextTitle: "Glycerine",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{"Radiohead", "Creep", "Bush", "Glycerine"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the prompt never names %q, so the writer must invent one", want)
+		}
+	}
+}
+
+// TestPromptNamesARecordItKnowsNothingElseAbout: a name with no dossier is the
+// common case for an untagged library, and it is the case that matters most.
+// The jock must be told what is playing even when nothing else is known.
+func TestPromptNamesARecordItKnowsNothingElseAbout(t *testing.T) {
+	got, err := BuildBreakPrompt(PromptInput{
+		Persona:       testPersona(t),
+		WindowSeconds: 20,
+		NextTitle:     "Albularyong Buta",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(got, "Albularyong Buta") {
+		t.Error("a track with no dossier is not named at all; the writer will make a title up")
+	}
+	if !strings.Contains(got, "nothing else is known") {
+		t.Error("the prompt does not say that the name is ALL that is known")
+	}
+}

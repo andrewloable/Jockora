@@ -23,6 +23,7 @@ import (
 	"github.com/andrewloable/jockora/internal/clock"
 	"github.com/andrewloable/jockora/internal/config"
 	"github.com/andrewloable/jockora/internal/decode"
+	"github.com/andrewloable/jockora/internal/dj"
 	"github.com/andrewloable/jockora/internal/encode"
 	"github.com/andrewloable/jockora/internal/enrich"
 	"github.com/andrewloable/jockora/internal/mix"
@@ -47,6 +48,10 @@ type Options struct {
 	// what makes the seam actually observable.
 	BreakEverySec int
 	Log           *slog.Logger
+
+	// Personas is the roster the dial matches jocks from. Optional: with no
+	// personas the dial still proposes stations, they simply carry no jock.
+	Personas []*dj.Persona
 
 	// Library, when set, replaces Tracks as the source of music: the app
 	// selects from the scanned database instead of looping a list of files.
@@ -79,6 +84,9 @@ type track struct {
 	id            int64
 	path          string
 	artist, title string
+	// album is carried for one reason: it is a PROPER NOUN OF THE RECORD, so
+	// saying it is announcing the track, not reusing a phrase.
+	album string
 	// noCrossfadeNext marks gapless material, which the cadence refuses to
 	// interrupt.
 	noCrossfadeNext bool
@@ -91,17 +99,22 @@ func (l *Library) next(ctx context.Context) (track, error) {
 		return track{}, err
 	}
 	var t = track{id: id}
-	var artist, title sql.NullString
+	var artist, title, album sql.NullString
 	var gapless int
 	err = l.Store.DB().QueryRowContext(ctx,
-		`SELECT path, artist, title, no_crossfade_next FROM tracks WHERE id = ?`, id).
-		Scan(&t.path, &artist, &title, &gapless)
+		`SELECT path, artist, title, album, no_crossfade_next FROM tracks WHERE id = ?`, id).
+		Scan(&t.path, &artist, &title, &album, &gapless)
 	if err != nil {
 		return track{}, fmt.Errorf("reading track %d: %w", id, err)
 	}
-	t.artist, t.title, t.noCrossfadeNext = artist.String, title.String, gapless != 0
+	t.artist, t.title, t.album, t.noCrossfadeNext = artist.String, title.String, album.String, gapless != 0
 	return t, nil
 }
+
+// staticDial serves one dial value, computed at startup.
+type staticDial struct{ d station.Dial }
+
+func (s staticDial) Dial() any { return s.d }
 
 // App is one running station.
 type App struct {
@@ -231,6 +244,22 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 	}
 	a.srv = srv
 	srv.SetStatusSource(a)
+
+	// The dial is PROPOSED ONCE, at startup, and cached. It reads every dossier
+	// in the library, which is fine here and absurd on every poll of
+	// /stations.json. It goes stale as enrichment proceeds, which is why the
+	// payload carries enriched/total so a client can say how provisional it is.
+	if opts.Library != nil && opts.Library.Store != nil {
+		dial, err := station.ProposeDial(context.Background(), opts.Library.Store, opts.Personas)
+		if err != nil {
+			// Not fatal. A dial is a nicety; the stream is not.
+			log.Warn("could not propose a dial", "err", err)
+		} else {
+			srv.SetDialSource(staticDial{dial})
+			log.Info("dial proposed", "stations", len(dial.Stations),
+				"enriched", dial.Enriched, "of", dial.Total)
+		}
+	}
 
 	// The encoder comes up before the mixer, so the mixer never writes into a
 	// pipe that does not exist yet.
@@ -574,10 +603,15 @@ func (a *App) announceBoundary(ctx context.Context, boundary int, prev, cur, nex
 		a.opts.Writer.SetContext(prev.id, cur.id, next.id, prev.artist, prev.title)
 		// Every name in play at this boundary. Repeating these is not
 		// repetition, it is announcing the record.
+		// The ALBUM is in here too. Dossier.Release names it, so every track
+		// from one album ends up saying the same words -- measured, that
+		// doubled the collision count from 9 to 17 and cost ten breaks that
+		// would otherwise have aired. Naming the record you are playing is the
+		// job; the collision index is for reused PHRASING.
 		a.opts.Writer.SetTrackNames(
-			prev.artist, prev.title,
-			cur.artist, cur.title,
-			next.artist, next.title,
+			prev.artist, prev.title, prev.album,
+			cur.artist, cur.title, cur.album,
+			next.artist, next.title, next.album,
 		)
 	}
 

@@ -18,12 +18,20 @@ const envPrefix = "JOCKORA_"
 // Config is the whole of Jockora's runtime configuration.
 type Config struct {
 	LibraryPath string // music library root; read-only, Jockora never writes here
-	DBPath      string // SQLite file holding dossiers, stations and state
-	SegmentDir  string // where HLS segments and the playlist are written
-	ListenAddr  string // host:port for the HTTP server; loopback by default
-	LLMBaseURL  string // llama-server base URL, native /completion API
-	TTSAddr     string // Kokoro sidecar base URL
-	PersonaPath string // persona TOML describing the jock
+
+	// SubsonicURL points at an OpenSubsonic server -- Navidrome, Airsonic,
+	// Gonic -- instead of a local folder. The target listener usually already
+	// runs one, and pointing at it removes the whole "give it a folder and wait
+	// for a scan" step.
+	SubsonicURL      string
+	SubsonicUser     string
+	SubsonicPassword string
+	DBPath           string // SQLite file holding dossiers, stations and state
+	SegmentDir       string // where HLS segments and the playlist are written
+	ListenAddr       string // host:port for the HTTP server; loopback by default
+	LLMBaseURL       string // llama-server base URL, native /completion API
+	TTSAddr          string // Kokoro sidecar base URL
+	PersonaPath      string // persona TOML describing the jock
 	// TTSPython is the interpreter the speech sidecar runs under.
 	//
 	// PINNED, not inherited. onnxruntime has no wheels for the system python3
@@ -110,6 +118,9 @@ func LoadArgs(args []string, register func(*flag.FlagSet)) (*Config, error) {
 		register(fs)
 	}
 	fs.StringVar(&c.LibraryPath, "library-path", "", "music library root (read-only)")
+	fs.StringVar(&c.SubsonicURL, "subsonic-url", "", "OpenSubsonic server to read the library from instead of a folder (Navidrome, Airsonic, Gonic)")
+	fs.StringVar(&c.SubsonicUser, "subsonic-user", "", "OpenSubsonic username")
+	fs.StringVar(&c.SubsonicPassword, "subsonic-password", "", "OpenSubsonic password (prefer JOCKORA_SUBSONIC_PASSWORD)")
 	fs.StringVar(&c.DBPath, "db-path", "jockora.db", "SQLite database file")
 	fs.StringVar(&c.SegmentDir, "segment-dir", "segments", "directory for HLS segments")
 	// Loopback, never 0.0.0.0: v0.1 ships no authentication at all, and

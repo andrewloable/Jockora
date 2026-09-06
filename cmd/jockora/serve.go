@@ -37,17 +37,18 @@ func buildLibrary(ctx context.Context, cfg *config.Config, log *slog.Logger) (*a
 	// Progress every few hundred files. A ten-thousand-file library takes
 	// minutes -- every file is probed with ffprobe -- and a scan that says
 	// nothing looks exactly like a hang, which is how it was first read.
-	log.Info("scanning library, this takes a while on a large one", "root", cfg.LibraryPath)
+	src := librarySource(cfg)
+	log.Info("scanning library, this takes a while on a large one", "source", src.Name())
 	started := time.Now()
-	stats, err := library.ScanWithProgress(ctx, s, cfg.LibraryPath, func(found int, path string) {
+	stats, err := src.Scan(ctx, s, func(found int, path string) {
 		if found%500 == 0 {
 			log.Info("scanning", "files", found, "elapsed", time.Since(started).Round(time.Second))
 		}
 	})
 	if err != nil {
-		return nil, fmt.Errorf("scanning %s: %w", cfg.LibraryPath, err)
+		return nil, fmt.Errorf("scanning %s: %w", src.Name(), err)
 	}
-	log.Info("library scanned", "root", cfg.LibraryPath,
+	log.Info("library scanned", "source", src.Name(),
 		"found", stats.Found, "added", stats.Added, "updated", stats.Updated, "skipped", stats.Skipped, "unplayable", stats.Unplayable)
 	for _, rejected := range stats.Rejected {
 		log.Warn("file rejected at scan time", "err", rejected.Error())
@@ -263,4 +264,50 @@ func matchedOf(scores []dj.PersonaScore, id string) []string {
 		}
 	}
 	return nil
+}
+
+// loadRoster reads every persona available, for the DIAL rather than for the
+// session's jock.
+//
+// The two are different questions. choosePersona picks ONE jock for the whole
+// session from what the library sounds like overall; the dial matches a jock
+// PER STATION, so it needs the whole roster. A single .toml is a roster of one.
+// Failure is not fatal: a dial without jocks is still a dial.
+func loadRoster(path string, log *slog.Logger) []*dj.Persona {
+	if path == "" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	if !info.IsDir() {
+		p, err := dj.LoadPersona(path)
+		if err != nil {
+			return nil
+		}
+		return []*dj.Persona{p}
+	}
+	all, err := dj.LoadPersonas(path)
+	if err != nil {
+		log.Warn("could not load the persona roster for the dial", "path", path, "err", err)
+		return nil
+	}
+	return all
+}
+
+// librarySource picks where the music comes from.
+//
+// An OpenSubsonic server wins when one is configured, because an operator who
+// set -subsonic-url meant it. Both satisfy the same read-only interface, so
+// nothing downstream knows or cares which one answered.
+func librarySource(cfg *config.Config) library.Source {
+	if cfg.SubsonicURL != "" {
+		return library.Subsonic{
+			BaseURL:  cfg.SubsonicURL,
+			User:     cfg.SubsonicUser,
+			Password: cfg.SubsonicPassword,
+		}
+	}
+	return library.Folder{Root: cfg.LibraryPath}
 }

@@ -67,7 +67,12 @@ type Server struct {
 	log    *slog.Logger
 	ln     net.Listener
 	status StatusSource
+	dial   DialSource
 }
+
+// SetDialSource wires the /stations.json data source. Without one the endpoint
+// reports 503 rather than 404: the route exists, the dial does not yet.
+func (s *Server) SetDialSource(d DialSource) { s.dial = d }
 
 // SetStatusSource wires the /now.json data source. Without one the endpoint
 // reports unavailable rather than lying about a healthy stream.
@@ -160,6 +165,8 @@ func (s *Server) Handler() http.Handler {
 		switch {
 		case p == "/now.json":
 			s.serveStatus(w, r)
+		case p == "/stations.json":
+			s.serveDial(w, r)
 		case p == "/" || p == "/index.html":
 			s.serveAsset(w, r, "index.html")
 		case strings.HasPrefix(p, "/vendor/"):

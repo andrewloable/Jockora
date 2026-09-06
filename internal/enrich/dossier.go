@@ -52,8 +52,22 @@ type Dossier struct {
 	SubjectSummary string   `json:"subject_summary"`
 	ArtistFacts    []string `json:"artist_facts"`
 	NotableLine    string   `json:"notable_line"`
-	Sources        []string `json:"sources"`
-	Confidence     string   `json:"confidence"`
+
+	// Release is where and when the recording came out, in one sentence.
+	//
+	// A PER-TRACK fact, which is the point. Everything else the DJ can assert
+	// about a record is either about the ARTIST -- and MusicBrainz supplies
+	// only four primitives, which compose into exactly one sentence, measured
+	// at an average of 1.0 artist facts per track -- or about the LYRICS, which
+	// are absent for most of a real library. So the same artist sentence came
+	// round every time that artist did, and five of nine measured collisions
+	// were one birth year said twice with the digits written differently.
+	//
+	// The album and year were already read by the scanner and already printed
+	// into the enrichment prompt; there was simply no field to put them in.
+	Release    string   `json:"release"`
+	Sources    []string `json:"sources"`
+	Confidence string   `json:"confidence"`
 }
 
 // TrackInput is everything known about a track before the LLM pass.
@@ -79,9 +93,22 @@ type TrackInput struct {
 	Lyrics string
 }
 
-// hasSources reports whether anything factual was actually found.
+// hasSources reports whether anything factual was actually found ABOUT THE
+// ARTIST OR THE LYRICS.
+//
+// The release deliberately does NOT count. Knowing which album a file claims to
+// be from says nothing whatsoever about who made it, and letting a known album
+// satisfy this gate would let the model keep invented artist facts on every
+// tagged track in the library -- which is most of them. The release is real
+// information and it is kept separately, in Dossier.Release, precisely so it
+// cannot be confused with having researched anything.
 func (in TrackInput) hasSources() bool {
 	return in.ArtistFacts.Found || in.HasSyncedLyrics
+}
+
+// hasRelease reports whether the file told us where the recording came from.
+func (in TrackInput) hasRelease() bool {
+	return in.Album != "" || in.Year > 0
 }
 
 // CompletionRequest is one call to the language model.
@@ -409,6 +436,17 @@ func validate(d Dossier, in TrackInput) Dossier {
 		d.Confidence = ConfidenceNone
 	}
 
+	// The release survives that downgrade, because it was never a claim about
+	// the artist: it comes from the file's own tags. A track with an album and
+	// no artist lookup still has one true thing the DJ can say, and saying it
+	// is the difference between a jock with something to work with and one
+	// padding until it runs out of tokens.
+	if !in.hasRelease() {
+		d.Release = ""
+	} else if d.Release != "" && d.Confidence == ConfidenceNone {
+		d.Confidence = ConfidenceLow
+	}
+
 	return d
 }
 
@@ -528,13 +566,14 @@ func DossierSchema() map[string]any {
 				"items": map[string]any{"type": "string", "maxLength": 200},
 			},
 			"notable_line": map[string]any{"type": "string", "maxLength": MaxNotableLine},
+			"release":      map[string]any{"type": "string", "maxLength": 200},
 			"sources": map[string]any{
 				"type": "array", "items": map[string]any{"type": "string", "maxLength": 40},
 			},
 			"confidence": strEnum([]string{ConfidenceHigh, ConfidenceLow, ConfidenceNone}),
 		},
 		"required": []any{"station_tags", "mood", "themes", "subject_summary",
-			"artist_facts", "notable_line", "sources", "confidence"},
+			"artist_facts", "notable_line", "release", "sources", "confidence"},
 		// Nothing outside the schema may appear at all, which removes a whole
 		// class of unexpected-key handling downstream.
 		"additionalProperties": false,
@@ -576,10 +615,14 @@ func BuildPrompt(in TrackInput) string {
 	b.WriteString("6. Use ONLY the facts given below. Do not add anything from general\n")
 	b.WriteString("   knowledge, and do not guess. Inventing a fact is worse than an\n")
 	b.WriteString("   empty field: the DJ will say it on air as though it were true.\n")
-	b.WriteString("7. notable_line: leave it EMPTY unless lyrics are supplied below.\n")
+	b.WriteString("7. release: ONE sentence naming the album and the year, taken from\n")
+	b.WriteString("   the file metadata below. Leave it empty if neither is given.\n")
+	b.WriteString("   Do not add a label, a studio or a producer: you have not been\n")
+	b.WriteString("   told any of those.\n")
+	b.WriteString("8. notable_line: leave it EMPTY unless lyrics are supplied below.\n")
 	b.WriteString("   You have not been given the lyrics, so you cannot quote them.\n")
 	b.WriteString("   The title is not a notable line.\n")
-	b.WriteString("8. confidence: \"high\" only if the facts below actually support what\n")
+	b.WriteString("9. confidence: \"high\" only if the facts below actually support what\n")
 	b.WriteString("   you wrote. \"none\" if you were given nothing.\n\n")
 
 	b.WriteString("station_tags: choose ONLY from ")
@@ -600,6 +643,7 @@ func BuildPrompt(in TrackInput) string {
 	b.WriteString(`  "themes":["<what THIS song is about, 2-4 words>"],` + "\n")
 	b.WriteString(`  "subject_summary":"<one or two sentences about THIS song>",` + "\n")
 	b.WriteString(`  "artist_facts":["<a complete sentence from the researched facts below>"],` + "\n")
+	b.WriteString(`  "release":"<the album and year, from the metadata below>",` + "\n")
 	b.WriteString(`  "notable_line":"","sources":["<where a fact came from>"],"confidence":"<high|low|none>"}` + "\n\n")
 
 	// Everything below comes from files this program did not write. It is

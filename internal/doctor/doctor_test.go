@@ -324,3 +324,73 @@ func TestHealthyConfigHasNoHardFailures(t *testing.T) {
 		t.Errorf("a healthy configuration reported hard failures: %v\n%s", names(failed), Report(checks))
 	}
 }
+
+// TestDoctorCatchesMissingKokoroWeights.
+//
+// Importing kokoro_onnx proves the library is installed and says nothing about
+// whether there is a model to load. With the weights missing the sidecar
+// starts, fails, and the supervisor waits out its full three-minute start
+// timeout before the station goes on air with no DJ. It degrades correctly and
+// it reads like a hang, so the preflight has to catch it.
+func TestDoctorCatchesMissingKokoroWeights(t *testing.T) {
+	python := pythonThatImports(t)
+	dir := t.TempDir()
+	script := filepath.Join(dir, "sidecar.py")
+	if err := os.WriteFile(script, []byte("pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("JOCKORA_KOKORO_MODEL", filepath.Join(dir, "absent.onnx"))
+	t.Setenv("JOCKORA_KOKORO_VOICES", filepath.Join(dir, "absent.bin"))
+
+	got := checkTTSInterpreter(context.Background(), Config{
+		TTSPython: python, TTSScript: script,
+	}, Check{Name: "tts sidecar"})
+
+	if got.OK {
+		t.Fatal("the check passed with no weights on disk; the DJ would never speak")
+	}
+	if !strings.Contains(got.Detail, "absent.onnx") {
+		t.Errorf("the failure does not name the missing file: %q", got.Detail)
+	}
+	if !strings.Contains(got.Fix, "JOCKORA_KOKORO_MODEL") {
+		t.Errorf("the fix does not say how to point at the weights: %q", got.Fix)
+	}
+}
+
+// TestDoctorPassesWithKokoroWeightsPresent is the other half: the new check
+// must not fail a correct install.
+func TestDoctorPassesWithKokoroWeightsPresent(t *testing.T) {
+	python := pythonThatImports(t)
+	dir := t.TempDir()
+	script := filepath.Join(dir, "sidecar.py")
+	model := filepath.Join(dir, "kokoro.onnx")
+	voices := filepath.Join(dir, "voices.bin")
+	for _, f := range []string{script, model, voices} {
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("JOCKORA_KOKORO_MODEL", model)
+	t.Setenv("JOCKORA_KOKORO_VOICES", voices)
+
+	got := checkTTSInterpreter(context.Background(), Config{
+		TTSPython: python, TTSScript: script,
+	}, Check{Name: "tts sidecar"})
+	if !got.OK {
+		t.Errorf("a correct install failed the check: %s", got.Detail)
+	}
+}
+
+// pythonThatImports returns an interpreter that can import kokoro_onnx, or
+// skips. The weights check is what is under test, not the import.
+func pythonThatImports(t *testing.T) string {
+	t.Helper()
+	for _, p := range []string{".venv-tts/bin/python", "../../.venv-tts/bin/python"} {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	t.Skip("no venv with kokoro-onnx available")
+	return ""
+}

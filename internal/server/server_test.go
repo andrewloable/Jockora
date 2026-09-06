@@ -5,6 +5,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -467,5 +468,49 @@ func TestLoopbackNeverWarns(t *testing.T) {
 
 	if strings.Contains(buf.String(), "WITHOUT AUTHENTICATION") {
 		t.Error("a loopback bind warned anyway; the warning will be tuned out")
+	}
+}
+
+type fakeDial struct{ v any }
+
+func (f fakeDial) Dial() any { return f.v }
+
+// TestServerServesTheDial: the dial is the primary UI per §22A, so it needs a
+// route a client can actually fetch.
+func TestServerServesTheDial(t *testing.T) {
+	s, _ := newServer(t, 0)
+	s.SetDialSource(fakeDial{v: map[string]any{
+		"stations": []map[string]any{{"tag": "rock", "tracks": 412, "jock": "dutch_mahoney"}},
+		"enriched": 412, "total": 652,
+	}})
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/stations.json", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /stations.json = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("Content-Type = %q", ct)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	if got["total"] == nil {
+		t.Error("the payload omits total, so a client cannot say how provisional the dial is")
+	}
+}
+
+// TestServerDialUnavailableWithoutASource: 503, not 404. The route exists; the
+// dial does not yet, which is a real state on an unenriched library.
+func TestServerDialUnavailableWithoutASource(t *testing.T) {
+	s, _ := newServer(t, 0)
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/stations.json", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("GET /stations.json with no source = %d, want 503", rec.Code)
 	}
 }

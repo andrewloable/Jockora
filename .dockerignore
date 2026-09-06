@@ -1,0 +1,29 @@
+# Copyright (C) 2026 Andrew Loable
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The build context is sent to the daemon in full, so anything here is both a
+# speed cost and a disclosure risk.
+
+# Scraped third-party reference material. It is gitignored for licensing
+# reasons and must not travel in a build context either.
+transcripts/
+download_transcripts.sh
+
+# A host virtualenv is ~200MB of the wrong platform's wheels; the image builds
+# its own at /opt/tts.
+.venv-tts/
+**/__pycache__/
+*.pyc
+
+# Model weights are operator-supplied and mounted, never baked in.
+models/
+
+.git/
+.github/
+.beads/
+.claude/
+CLAUDE.md
+*.db
+segments/
+breaks-round-*.md
+test/gate2/results/

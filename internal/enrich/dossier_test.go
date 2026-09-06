@@ -628,3 +628,57 @@ func TestEmptyDossierCannotClaimConfidence(t *testing.T) {
 		t.Errorf("confidence = %q on a dossier with a station tag, want it left alone", got.Confidence)
 	}
 }
+
+// TestDossierKeepsTheReleaseWithoutAnArtistLookup is the whole point of a
+// separate release field.
+//
+// Most of a real library has an album tag and no MusicBrainz hit. Before this,
+// such a track was told it knew nothing and produced an empty dossier, so the
+// jock had to talk from personality alone about a record whose album and year
+// were sitting in the file the whole time.
+func TestDossierKeepsTheReleaseWithoutAnArtistLookup(t *testing.T) {
+	in := input()
+	in.ArtistFacts = ArtistFacts{} // nothing from MusicBrainz
+	in.HasSyncedLyrics = false     // and no lyrics either
+
+	llm := &fakeLLM{replies: []Completion{ok(`{"station_tags":["synthwave"],"mood":[],"themes":[],
+		"subject_summary":"","artist_facts":["invented fact"],"notable_line":"",
+		"release":"Power, Corruption & Lies, released in 1983.",
+		"sources":[],"confidence":"high"}`)}}
+
+	d, err := GenerateDossier(context.Background(), llm, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Release == "" {
+		t.Error("the release was dropped though the file supplied an album and a year")
+	}
+	// The artist claim still goes: nothing was looked up about the artist.
+	if len(d.ArtistFacts) != 0 {
+		t.Errorf("ArtistFacts = %v; knowing the album licenses nothing about the artist", d.ArtistFacts)
+	}
+	// And it is assertable, rather than being stranded behind confidence none.
+	if d.Confidence == ConfidenceNone {
+		t.Error("confidence is none despite a real release, so the DJ may not say it")
+	}
+}
+
+// TestDossierDropsAReleaseItWasNeverGiven: the model must not invent an album
+// any more than it may invent a birth year.
+func TestDossierDropsAReleaseItWasNeverGiven(t *testing.T) {
+	in := input()
+	in.Album, in.Year = "", 0
+
+	llm := &fakeLLM{replies: []Completion{ok(`{"station_tags":["synthwave"],"mood":[],"themes":[],
+		"subject_summary":"x","artist_facts":[],"notable_line":"",
+		"release":"Recorded at Abbey Road in 1968.",
+		"sources":[],"confidence":"high"}`)}}
+
+	d, err := GenerateDossier(context.Background(), llm, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Release != "" {
+		t.Errorf("Release = %q with no album and no year in the file; the model made it up", d.Release)
+	}
+}

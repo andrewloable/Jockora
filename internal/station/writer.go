@@ -79,6 +79,12 @@ func (w *BreakWriter) Write(ctx context.Context, wordTarget int, placement mix.P
 		return "", err
 	}
 
+	// The names of the records either side of the break, read from the same
+	// place the dossiers come from. Without them the writer has to invent a
+	// title for whatever it is introducing, and it does.
+	curArtist, curTitle := w.names(ctx, curID)
+	nextArtist, nextTitle := w.names(ctx, nextID)
+
 	prompt, err := dj.BuildBreakPrompt(dj.PromptInput{
 		Persona:        w.Persona,
 		Previous:       prev,
@@ -86,6 +92,10 @@ func (w *BreakWriter) Write(ctx context.Context, wordTarget int, placement mix.P
 		Next:           next,
 		PreviousArtist: prevArtist,
 		PreviousTitle:  prevTitle,
+		CurrentArtist:  curArtist,
+		CurrentTitle:   curTitle,
+		NextArtist:     nextArtist,
+		NextTitle:      nextTitle,
 		Placement:      placement.String(),
 		// The window the writer aims at, derived from the target it was given
 		// rather than passed separately, so the two can never disagree.
@@ -102,6 +112,20 @@ func (w *BreakWriter) Write(ctx context.Context, wordTarget int, placement mix.P
 		return "", err
 	}
 	return b.Text(), nil
+}
+
+// names reads one track's artist and title.
+//
+// A missing name is not an error and not worth a log line: the scanner falls
+// back to the filename, so an empty result here means the row is genuinely
+// nameless, and the prompt simply omits it.
+func (w *BreakWriter) names(ctx context.Context, id int64) (artist, title string) {
+	if id == 0 || w.Store == nil {
+		return "", ""
+	}
+	_ = w.Store.DB().QueryRowContext(ctx,
+		`SELECT COALESCE(artist,''), COALESCE(title,'') FROM tracks WHERE id = ?`, id).Scan(&artist, &title)
+	return artist, title
 }
 
 // dossier reads one track's dossier. A track with none is not an error: it

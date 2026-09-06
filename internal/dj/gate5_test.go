@@ -317,3 +317,42 @@ func TestGate5PhrasingStillCollidesAroundNames(t *testing.T) {
 		t.Error("collision reported without naming the phrase")
 	}
 }
+
+// TestGate5StatesItsOwnSampleSize: the gate is a go/no-go sized for a decision
+// before step 5.5, and the danger is entirely in reading a pass as a monthly
+// rate. The caveat therefore prints on EVERY result, pass included -- a warning
+// that only appears on failure is not there when it is needed.
+func TestGate5StatesItsOwnSampleSize(t *testing.T) {
+	for _, r := range []Gate5Report{
+		AnalyseGate5(nil, 20, 0, 4, 4),
+		AnalyseGate5([]string{"a b c d e", "a b c d e"}, 20, 12, 4, 1),
+	} {
+		out := r.String()
+		if !strings.Contains(out, "SAMPLE") {
+			t.Errorf("pass=%v: the report never states its sample size:\n%s", r.Pass, out)
+		}
+		if !strings.Contains(out, "live-with-it month") {
+			t.Errorf("pass=%v: the report does not say where the real number comes from", r.Pass)
+		}
+		if !strings.Contains(out, "95% CI") {
+			t.Errorf("pass=%v: the drop rate carries no interval", r.Pass)
+		}
+	}
+}
+
+// TestGate5IntervalStaysInRange is why Wilson is used instead of the normal
+// approximation. At n=20 with zero drops the textbook interval collapses to
+// 0 +/- 0, which reads as certainty; with a small numerator it goes negative.
+func TestGate5IntervalStaysInRange(t *testing.T) {
+	for _, tc := range []struct{ succ, n int }{{0, 20}, {1, 20}, {20, 20}, {0, 1}, {3, 7}} {
+		lo, hi := wilson95(tc.succ, tc.n)
+		if lo < 0 || hi > 1 || lo > hi {
+			t.Errorf("wilson95(%d,%d) = [%.3f,%.3f], outside [0,1] or inverted", tc.succ, tc.n, lo, hi)
+		}
+	}
+	// Zero observed must still admit a real upper bound, or the gate claims to
+	// have proven something it cannot.
+	if _, hi := wilson95(0, 20); hi <= 0.05 {
+		t.Errorf("upper bound %.3f at 0 of 20; that reads as proof of a low rate", hi)
+	}
+}

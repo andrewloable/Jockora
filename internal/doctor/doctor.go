@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -351,12 +352,28 @@ func checkSegmentDir(dir string) Check {
 	probe := filepath.Join(dir, ".jockora-write-probe")
 	if err := os.WriteFile(probe, []byte("x"), 0o644); err != nil {
 		c.Detail = dir + " is not writable: " + err.Error()
-		c.Fix = "fix permissions: chmod +w " + dir
+		c.Fix = notWritableFix(dir)
 		return c
 	}
 	os.Remove(probe)
 	c.OK, c.Detail = true, dir+" writable"
 	return c
+}
+
+// notWritableFix names the fix that actually works, which is usually not the
+// one people try first.
+//
+// In a container this is the FIRST thing an operator hits: the image runs
+// unprivileged as uid 10001, a bind-mounted config directory belongs to whoever
+// created it on the host, and no amount of chmod inside the container changes
+// that. "chmod +w" was the old advice and it is wrong for this case -- the
+// ownership has to be fixed on the HOST, by uid, before the container starts.
+func notWritableFix(dir string) string {
+	if u, err := user.Current(); err == nil && u.Uid != "0" {
+		return fmt.Sprintf("this process runs as uid %s; on the HOST that owns %s run: "+
+			"chown %s %s   (or chmod a+w %s)", u.Uid, dir, u.Uid, dir, dir)
+	}
+	return "fix permissions on " + dir + ": chmod a+w " + dir
 }
 
 func checkDBWritable(dbPath string) Check {
@@ -375,7 +392,7 @@ func checkDBWritable(dbPath string) Check {
 	probe := filepath.Join(dir, ".jockora-db-probe")
 	if err := os.WriteFile(probe, []byte("x"), 0o644); err != nil {
 		c.Detail = dir + " is not writable: " + err.Error()
-		c.Fix = "chmod +w " + dir
+		c.Fix = notWritableFix(dir)
 		return c
 	}
 	os.Remove(probe)
@@ -426,6 +443,35 @@ func checkTTSInterpreter(ctx context.Context, cfg Config, c Check) Check {
 		return c
 	}
 
-	c.OK, c.Detail = true, cfg.TTSPython+" can import kokoro_onnx"
+	// THE WEIGHTS, not just the library. Importing kokoro_onnx proves nothing
+	// about whether there is a model to load: with the weights missing the
+	// sidecar starts, fails, and the supervisor waits out its FULL start
+	// timeout -- three minutes of apparent success -- before the station goes
+	// on air silently with no DJ. That degrades correctly and reads like a
+	// hang, so it is caught here instead, where an operator is already looking.
+	for _, m := range []struct{ what, path string }{
+		{"model", kokoroPath("JOCKORA_KOKORO_MODEL", "models/kokoro-v1.0.onnx")},
+		{"voices", kokoroPath("JOCKORA_KOKORO_VOICES", "models/voices-v1.0.bin")},
+	} {
+		if _, err := os.Stat(m.path); err != nil {
+			c.Detail = fmt.Sprintf("kokoro %s file %s: %v", m.what, m.path, err)
+			c.Fix = "download kokoro-v1.0.onnx and voices-v1.0.bin, then set " +
+				"JOCKORA_KOKORO_MODEL and JOCKORA_KOKORO_VOICES to point at them"
+			return c
+		}
+	}
+
+	c.OK, c.Detail = true, cfg.TTSPython+" can import kokoro_onnx, and the voice models are present"
 	return c
+}
+
+// kokoroPath resolves where the sidecar will look for a weights file. The
+// sidecar reads these env vars itself and falls back to a path relative to its
+// working directory, so the check has to resolve them the same way or it
+// verifies a file the sidecar will never open.
+func kokoroPath(env, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(env)); v != "" {
+		return v
+	}
+	return fallback
 }

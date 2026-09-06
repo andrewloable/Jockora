@@ -341,6 +341,9 @@ func writeDossier(b *strings.Builder, heading string, d *enrich.Dossier, artist,
 	if d.SubjectSummary != "" {
 		b.WriteString("  about: " + d.SubjectSummary + "\n")
 	}
+	if d.Release != "" {
+		b.WriteString("  release: " + d.Release + "\n")
+	}
 	if len(d.StationTags) > 0 {
 		b.WriteString("  genre: " + strings.Join(d.StationTags, ", ") + "\n")
 	}
