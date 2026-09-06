@@ -20,6 +20,8 @@ import (
 // way to reach each other: the persona and validator in internal/dj, the
 // dossiers in internal/enrich, and the length ladder in this package.
 type BreakWriter struct {
+	// Persona is read through persona() rather than directly, because a
+	// listener can change the jock while the station is running.
 	Persona   *dj.Persona
 	Validator *dj.Validator
 	Session   *dj.Session
@@ -28,6 +30,48 @@ type BreakWriter struct {
 	mu                    sync.Mutex
 	prevID, curID, nextID int64
 	prevArtist, prevTitle string
+}
+
+// SetPersona changes the jock mid-session.
+//
+// THREE THINGS MOVE TOGETHER OR NONE DO: the persona the prompt is built from,
+// the said-lines index the validator checks against, and the voice the break is
+// spoken in. A jock swapped in only one of those places speaks as one character
+// in the voice of another, or inherits somebody else's phrase history and gets
+// its own writing rejected as repetition.
+//
+// The break already being generated is not recalled. It was written by the
+// previous jock and will air in that jock's voice, which is correct: yanking a
+// half-rendered break to honour a click is the stutter this design avoids.
+func (w *BreakWriter) SetPersona(p *dj.Persona) {
+	if p == nil {
+		return
+	}
+	w.mu.Lock()
+	w.Persona = p
+	w.mu.Unlock()
+
+	if w.Validator != nil && w.Validator.Said != nil {
+		w.Validator.Said.JockID = p.ID()
+	}
+}
+
+// CurrentPersona is whoever is writing breaks right now.
+func (w *BreakWriter) CurrentPersona() *dj.Persona { return w.persona() }
+
+// persona reads the current jock.
+func (w *BreakWriter) persona() *dj.Persona {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.Persona
+}
+
+// Voice is the TTS voice of the jock currently on air.
+func (w *BreakWriter) Voice() string {
+	if p := w.persona(); p != nil {
+		return p.VoiceID()
+	}
+	return ""
 }
 
 // SetContext tells the writer which tracks surround the coming break.
@@ -86,7 +130,7 @@ func (w *BreakWriter) Write(ctx context.Context, wordTarget int, placement mix.P
 	nextArtist, nextTitle := w.names(ctx, nextID)
 
 	prompt, err := dj.BuildBreakPrompt(dj.PromptInput{
-		Persona:        w.Persona,
+		Persona:        w.persona(),
 		Previous:       prev,
 		Current:        cur,
 		Next:           next,

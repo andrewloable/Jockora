@@ -69,6 +69,9 @@ type Server struct {
 	status StatusSource
 	dial   DialSource
 	tuner  Tuner
+
+	admin      Admin
+	adminToken string
 }
 
 // SetDialSource wires the /stations.json data source. Without one the endpoint
@@ -164,13 +167,29 @@ func (s *Server) Handler() http.Handler {
 		// Only these two paths are diverted: a POST to any OTHER route still
 		// falls through to the 405 below, because "you cannot POST to a
 		// segment" is the true answer and 404 would claim it does not exist.
-		if r.Method == http.MethodPost && (p == "/tune" || p == "/feedback") {
-			if p == "/tune" {
+		if r.Method == http.MethodPost {
+			switch {
+			case p == "/tune":
 				s.serveTune(w, r)
-			} else {
+				return
+			case p == "/feedback":
 				s.serveFeedback(w, r)
+				return
+			case p == "/jock":
+				// NOT behind the admin token. Tuning a station and picking a
+				// jock are LISTENER controls -- they change what is playing
+				// right now, which is what the dial is for. The token guards
+				// operator CONFIGURATION, which outlives the session and is a
+				// different kind of change.
+				s.serveSetJock(w, r)
+				return
+			case isAdminWrite(p):
+				s.serveAdminWrite(w, r, p)
+				return
 			}
-			return
+			// Any other POST falls through to the 405 below, because "you
+			// cannot POST here" is the true answer and 404 would claim the
+			// route does not exist.
 		}
 
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -183,6 +202,12 @@ func (s *Server) Handler() http.Handler {
 			s.serveStatus(w, r)
 		case p == "/stations.json":
 			s.serveDial(w, r)
+		case p == "/jocks.json":
+			s.serveJocks(w, r)
+		case p == "/admin/overview.json":
+			s.serveAdminOverview(w, r)
+		case p == "/admin" || p == "/admin/":
+			s.serveAsset(w, r, "admin.html")
 		case p == "/" || p == "/index.html":
 			s.serveAsset(w, r, "index.html")
 		case strings.HasPrefix(p, "/vendor/"):

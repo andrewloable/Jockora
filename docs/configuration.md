@@ -161,6 +161,35 @@ discarded rather than stored, so a track may legitimately have no tempo. The
 selector widens its matching window until something fits, so those tracks are
 still played.
 
+## The operator page
+
+`GET /admin` renders what the station knows about itself: library and dossier
+progress, loudness and tempo coverage, measured enrichment cost with a
+projection of the time remaining, the advert pool, the break cadence, and the
+listener thumbs-down feed — which was written by `/feedback` and read by nothing
+until this page existed.
+
+**Reads are open; writes are not.** `/now.json` already exposes this class of
+information on a service with no authentication, so gating reads would break the
+player page and protect nothing. Writes change what a listener hears, so they
+require a shared secret:
+
+| Flag | Default | What it changes |
+|---|---|---|
+| `-admin-token` | *(empty)* | Shared secret for operator writes. Prefer `JOCKORA_ADMIN_TOKEN`. |
+
+**An empty token refuses every write**, and that is deliberate: treating unset
+as "allow anyone" would make the default configuration — which the supplied
+compose file publishes on the LAN — the dangerous one. Send it as the
+`X-Jockora-Admin` header. It is compared in constant time.
+
+Two things can be changed without a restart: `POST /admin/cadence` with
+`{"cadence":N}`, and `POST /admin/enriching` with `{"enriching":false}` to hand
+the machine back for an evening without stopping the station.
+
+Tuning a station and picking a jock are **listener** controls and are not behind
+the token — they change what is playing now, which is what the dial is for.
+
 ## The dial
 
 `GET /stations.json` returns the proposed dial: one entry per station with its
@@ -177,6 +206,14 @@ than emptying it.
 **Tuning.** `POST /tune` with `{"tag":"rock"}` switches station. The song
 playing is not interrupted — the change is heard when it ends. A station with no
 playable tracks is refused with a 400 and you stay where you were.
+
+**The roster.** `GET /jocks.json` lists all nine personas with their voices,
+genres and moods, and marks who is on air. `POST /jock` with `{"id":"..."}`
+puts a different one on. The persona, the said-lines index and the TTS voice
+move together — a jock changed in only one of those speaks as one character in
+another's voice, or inherits someone else's phrase history and gets its own
+writing rejected as repetition. A break already being generated airs in the
+previous voice; the change is heard from the next one.
 
 **Feedback.** `POST /feedback` with `{"verdict":"down"}` records what you
 thought of the break that just aired, into `break_feedback`. It stores the

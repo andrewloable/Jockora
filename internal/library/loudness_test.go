@@ -289,3 +289,69 @@ func probeDuration(t *testing.T, path string) float64 {
 	}
 	return d
 }
+
+// TestParseProgressHandlesEveryFfmpegDialect is the regression test for a CI
+// failure that could not be reproduced locally.
+//
+// ffmpeg's -progress block is not the same on every build. Newer ones emit
+// out_time_us; CI's does NOT, and emits only out_time_ms and out_time. Matching
+// out_time_us alone therefore found nothing, silently fell through to scraping
+// stderr, and reported 7.1 seconds for a 10-second file -- which then read as a
+// TRUNCATED track, the one thing this number exists to detect.
+//
+// The out_time_ms trap is the other half: despite its name it carries
+// MICROseconds, so anything treating it as milliseconds is wrong by a thousand.
+// These cases are fixtures rather than live ffmpeg output precisely so the test
+// does not depend on which ffmpeg the machine happens to have.
+func TestParseProgressHandlesEveryFfmpegDialect(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		progress string
+		want     float64
+	}{
+		{
+			name: "modern build with out_time_us",
+			progress: "out_time_us=4000000\nout_time_ms=4000000\nout_time=00:00:04.000000\nprogress=continue\n" +
+				"out_time_us=10000000\nout_time_ms=10000000\nout_time=00:00:10.000000\nprogress=end\n",
+			want: 10,
+		},
+		{
+			// Exactly what CI produced. Before the fix this returned 0.
+			name: "CI build with no out_time_us at all",
+			progress: "out_time_ms=4000000\nout_time=00:00:04.000000\nprogress=continue\n" +
+				"out_time_ms=10000000\nout_time=00:00:10.000000\nprogress=end\n",
+			want: 10,
+		},
+		{
+			name:     "only the microsecond field",
+			progress: "out_time_us=10000000\nprogress=end\n",
+			want:     10,
+		},
+		{
+			name:     "over an hour, so the clock string must be parsed properly",
+			progress: "out_time=01:02:03.500000\nprogress=end\n",
+			want:     3723.5,
+		},
+		{
+			name:     "nothing usable",
+			progress: "bitrate=N/A\nprogress=end\n",
+			want:     0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseProgressSeconds(tc.progress); math.Abs(got-tc.want) > 0.001 {
+				t.Errorf("parseProgressSeconds = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseProgressNeverReadsOutTimeMsAsMilliseconds guards the misnomer
+// directly: out_time_ms holds MICROseconds, so a 10-second file must never be
+// reported as 10000 seconds or as 0.01.
+func TestParseProgressNeverReadsOutTimeMsAsMilliseconds(t *testing.T) {
+	got := parseProgressSeconds("out_time_ms=10000000\nout_time=00:00:10.000000\nprogress=end\n")
+	if math.Abs(got-10) > 0.001 {
+		t.Errorf("parseProgressSeconds = %v, want 10; out_time_ms is microseconds despite its name", got)
+	}
+}

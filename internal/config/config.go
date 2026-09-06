@@ -37,6 +37,12 @@ type Config struct {
 	AdIntervalMin    float64 // floor between adverts, minutes
 	FactConfidence   float64 // dossier confidence a fact must reach to be assertable
 
+	// AdminToken guards the operator WRITE endpoints. Empty refuses every
+	// write, deliberately: treating unset as "allow anyone" would make the
+	// default configuration -- published on the LAN by the supplied compose
+	// file, with no authentication anywhere -- the dangerous one.
+	AdminToken string
+
 	SubsonicURL      string
 	SubsonicUser     string
 	SubsonicPassword string
@@ -140,6 +146,7 @@ func LoadArgs(args []string, register func(*flag.FlagSet)) (*Config, error) {
 	fs.IntVar(&c.AdEveryNBreaks, "ad-every-n-breaks", 4, "one break slot in N becomes an advert (0 disables adverts)")
 	fs.Float64Var(&c.AdIntervalMin, "ad-interval-minutes", 90, "minimum minutes between adverts")
 	fs.Float64Var(&c.FactConfidence, "fact-confidence", 0.6, "dossier confidence a fact must reach before the DJ may assert it")
+	fs.StringVar(&c.AdminToken, "admin-token", "", "shared secret for operator WRITE endpoints (prefer JOCKORA_ADMIN_TOKEN); empty disables them")
 	fs.StringVar(&c.SubsonicURL, "subsonic-url", "", "OpenSubsonic server to read the library from instead of a folder (Navidrome, Airsonic, Gonic)")
 	fs.StringVar(&c.SubsonicUser, "subsonic-user", "", "OpenSubsonic username")
 	fs.StringVar(&c.SubsonicPassword, "subsonic-password", "", "OpenSubsonic password (prefer JOCKORA_SUBSONIC_PASSWORD)")

@@ -53,8 +53,11 @@ type ArtistSource interface {
 // permits one request per second, so concurrency buys nothing and costs the
 // quota.
 type Queue struct {
-	Store   *store.Store
-	LLM     Completer
+	Store *store.Store
+	LLM   Completer
+	// Paused reports whether the worker may run. Nil means always.
+	Paused func() bool
+
 	Artists ArtistSource
 	Lyrics  LyricsSource
 	// Onset derives a ramp from AUDIO when synced lyrics cannot. Optional: nil
@@ -116,6 +119,19 @@ func (q *Queue) Run(ctx context.Context) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+
+		// Paused by the operator. It WAITS rather than returning, because
+		// returning would release the enrichment lock and end the worker: an
+		// operator pausing for an evening expects it to pick up again, not to
+		// need a restart.
+		if q.Paused != nil && !q.Paused() {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(5 * time.Second):
+			}
+			continue
 		}
 
 		w, err := q.nextTrack(ctx)

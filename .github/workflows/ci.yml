@@ -58,6 +58,14 @@ jobs:
       - name: Cross-compile gate
         run: bash scripts/check-crosscompile.sh
 
+      # Build-tagged tests are never compiled by `go test ./...`, so they rot
+      # silently: the soak harness can stop building against the code it tests
+      # and nothing says so until someone tries to run a 24-hour measurement
+      # and it fails in the first second. Compiling is cheap; running it here
+      # is not, and is not the point.
+      - name: Build-tagged tests still compile
+        run: go vet -tags soak ./test/soak/
+
   # ---------------------------------------------------------------------------
   # Release. Tag-only, and it runs AFTER the gates: a tag that fails the licence
   # check must not produce a downloadable artifact, because that artifact is the

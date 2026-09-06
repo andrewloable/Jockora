@@ -76,6 +76,19 @@ func (p *Pipeline) clk() clock.Clock {
 // Announce offers a boundary to the cadence and remembers it if it gets a slot.
 //
 // Call it exactly once per boundary, in order, as the boundary is buffered.
+// SetCadence changes the break cadence while the station is running.
+//
+// The pipeline is read from the mixer goroutine and written from an HTTP
+// handler, so this takes the same lock Announce does.
+func (p *Pipeline) SetCadence(c *Cadence) {
+	if c == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.Cadence = c
+}
+
 func (p *Pipeline) Announce(b Boundary) bool {
 	if !p.Cadence.SlotAt(b.Index, b.Cur != nil && b.Cur.NoCrossfadeNext) {
 		return false

@@ -7,12 +7,12 @@ package web
 
 import "embed"
 
-// Files holds index.html and everything under vendor/.
+// Files holds index.html, admin.html and everything under vendor/.
 //
 // vendor/hls.light.min.js is hls.js v1.5.17, Apache-2.0, with its licence
 // alongside it in vendor/hls.js.LICENSE. It is vendored rather than loaded from
 // a CDN because this is a self-hosted product that has to work on a machine
 // with no internet connection.
 //
-//go:embed index.html vendor
+//go:embed index.html admin.html vendor
 var Files embed.FS

@@ -149,14 +149,38 @@ var timeRE = regexp.MustCompile(`time=(\d+):(\d\d):(\d\d(?:\.\d+)?)`)
 // parseDecodedSeconds reads how much audio ffmpeg actually processed from the
 // LAST progress stamp in its diagnostics. Zero means it could not be found,
 // which callers treat as "unknown" rather than "empty".
-// progressTimeRE matches the microsecond field of an ffmpeg -progress block.
+// progressClockRE matches the UNAMBIGUOUS timestamp field of a -progress block,
+// e.g. "out_time=00:00:10.000000".
+//
+// out_time rather than out_time_us or out_time_ms, and the reason is a trap
+// worth naming. ffmpeg emits all three, but out_time_us exists only on newer
+// builds -- CI's ffmpeg has out_time_ms and not out_time_us, so matching _us
+// found nothing, fell through to scraping stderr, and read 7.1 seconds for a
+// 10-second file. And out_time_ms cannot be used instead: despite its name it
+// carries MICROseconds, a long-standing misnomer, so anything reading it as
+// milliseconds is wrong by a thousand. out_time is a clock string, present in
+// every version that supports -progress, and means only one thing.
+var progressClockRE = regexp.MustCompile(`out_time=(\d+):(\d+):(\d+(?:\.\d+)?)`)
+
+// progressTimeRE matches the microsecond field, used only when out_time is
+// absent or unparseable.
 var progressTimeRE = regexp.MustCompile(`out_time_us=(\d+)`)
 
-// parseProgressSeconds reads the LAST out_time_us from a -progress stream.
+// parseProgressSeconds reads the LAST timestamp from a -progress stream.
 //
 // The last block is emitted with progress=end when ffmpeg finishes, so it is
 // the true total rather than whatever the periodic updates last reached.
 func parseProgressSeconds(progress string) float64 {
+	if all := progressClockRE.FindAllStringSubmatch(progress, -1); len(all) > 0 {
+		m := all[len(all)-1]
+		h, _ := strconv.ParseFloat(m[1], 64)
+		min, _ := strconv.ParseFloat(m[2], 64)
+		sec, _ := strconv.ParseFloat(m[3], 64)
+		if t := h*3600 + min*60 + sec; t > 0 {
+			return t
+		}
+	}
+	// Older or unusual builds: fall back to the microsecond field.
 	all := progressTimeRE.FindAllStringSubmatch(progress, -1)
 	if len(all) == 0 {
 		return 0

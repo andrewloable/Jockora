@@ -19,6 +19,10 @@ type Tuner interface {
 	Tune(tag string) (int, error)
 	// Feedback records a verdict on the break that just aired.
 	Feedback(verdict string) error
+	// Jocks lists the roster and says which one is on air.
+	Jocks() any
+	// SetJock puts a different jock on air by persona id.
+	SetJock(id string) error
 }
 
 // SetTuner wires the dial's controls. Without one both endpoints report 503:
@@ -53,6 +57,45 @@ func (s *Server) serveTune(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"tag": body.Tag, "tracks": tracks})
+}
+
+// serveJocks handles GET /jocks.json and POST /jock.
+//
+// The roster is NINE personas and, until now, a listener could not see any of
+// them: the station picks one from what the library sounds like and that was
+// the end of it. The dial already shows which jock each station drew, so this
+// is the control that pins a different one.
+func (s *Server) serveJocks(w http.ResponseWriter, r *http.Request) {
+	if s.tuner == nil {
+		http.Error(w, "no roster", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "max-age=30")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(s.tuner.Jocks()); err != nil {
+		s.log.Warn("writing jocks", "err", err)
+	}
+}
+
+func (s *Server) serveSetJock(w http.ResponseWriter, r *http.Request) {
+	if s.tuner == nil {
+		http.Error(w, "no roster", http.StatusServiceUnavailable)
+		return
+	}
+	var body struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&body); err != nil {
+		http.Error(w, "expected {\"id\": \"...\"}", http.StatusBadRequest)
+		return
+	}
+	if err := s.tuner.SetJock(strings.TrimSpace(body.ID)); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // serveFeedback handles POST /feedback.

@@ -13,6 +13,14 @@
   #dial button[aria-pressed="true"] { background: currentColor; filter: invert(1); }
   #dial button small { display: block; opacity: .7; font-size: .8em; }
   #thumbsdown { font: inherit; padding: .3rem .6rem; cursor: pointer; }
+  #jocks { display: flex; flex-wrap: wrap; gap: .3rem; margin: .6rem 0; }
+  #jocks button {
+    padding: .35rem .6rem; border: 1px solid currentColor; background: none;
+    color: inherit; cursor: pointer; font: inherit; font-size: .9em;
+    border-radius: .2rem; opacity: .65;
+  }
+  #jocks button[aria-pressed="true"] { opacity: 1; font-weight: 600; }
+  #enrichment { opacity: .75; font-size: .9em; }
 
   :root { color-scheme: light dark; }
   body {
@@ -52,11 +60,20 @@
      radio, you tune it, and Navidrome is a tab away. -->
 <div id="dial"></div>
 
+<!-- The roster. Nine jocks shipped and none of them were visible: the station
+     picked one from what the library sounded like and that was the end of it. -->
+<div id="jocks"></div>
+
 <!-- Now playing, and what the DJ last said. The transcript is free here because
      /now.json already carries it for diagnostics, and it is how you check what
      the jock actually said without reading logs. -->
 <p id="nowplaying"></p>
 <p id="transcript"></p>
+
+<!-- Enrichment progress. /now.json has carried done/total/pct since the spine
+     and NOTHING RENDERED IT. On a fresh library this is the answer to "why is
+     the DJ so quiet": it has nothing to say about a track it has not read yet. -->
+<p id="enrichment" hidden></p>
 
 <!-- The thumbs-down is the ONLY signal the writing ever gets from a real ear.
      Everything else judging a break in this project is a machine checking rules
@@ -153,6 +170,19 @@
         renderNow(d && d.now, d && d.last_break);
         // Offer the thumbs-down only for a break that has actually aired and
         // has not already been rated.
+        // Enrichment progress: why the DJ may have little to say yet.
+        var e = d && d.enrichment;
+        if (e && e.total) {
+          enrichment.hidden = false;
+          var pct = Math.round(e.pct || (100 * e.done / e.total));
+          enrichment.textContent = e.done >= e.total
+            ? 'The DJ has read all ' + e.total + ' tracks.'
+            : 'Reading your library: ' + e.done + ' of ' + e.total + ' tracks (' + pct + '%). '
+              + 'Tracks it has not reached yet get personality, not facts.';
+        } else {
+          enrichment.hidden = true;
+        }
+
         var text = (d && d.last_break && d.last_break.text) || '';
         lastBreakText = text;
         feedback.hidden = !text;
@@ -163,6 +193,7 @@
         renderNow(null, null);
       });
   }
+  var enrichment = document.getElementById('enrichment');
   var lastBreakText = '';
   poll();
   setInterval(poll, 5000);
@@ -217,6 +248,41 @@
       });
     })
     .catch(function () { /* no dial is not an error; the stream still plays */ });
+
+  // ---- the jock picker ----------------------------------------------------
+  var jocks = document.getElementById('jocks');
+
+  function renderJocks(list) {
+    jocks.textContent = '';
+    list.forEach(function (j) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = j.name;
+      b.title = (j.genres || []).join(', ');
+      b.setAttribute('aria-pressed', String(!!j.on_air));
+      b.addEventListener('click', function () {
+        fetch('/jock', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: j.id })
+        }).then(function (r) {
+          if (!r.ok) { throw new Error('could not change jock'); }
+          Array.prototype.forEach.call(jocks.querySelectorAll('button'), function (x) {
+            x.setAttribute('aria-pressed', String(x === b));
+          });
+          // The break already being generated airs in the previous voice, and
+          // saying so stops this reading as a bug.
+          say(j.name + ' is on air from the next break.');
+        }).catch(function (e) { say(String(e.message || e), 'error'); });
+      });
+      jocks.appendChild(b);
+    });
+  }
+
+  fetch('/jocks.json', { cache: 'no-store' })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (d) { if (d && d.jocks && d.jocks.length > 1) { renderJocks(d.jocks); } })
+    .catch(function () { /* no roster is not an error */ });
 
   // ---- the thumbs-down ----------------------------------------------------
   var feedback = document.getElementById('feedback');

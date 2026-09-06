@@ -1,0 +1,148 @@
+<!-- Copyright (C) 2026 Andrew Loable
+     SPDX-License-Identifier: AGPL-3.0-only
+
+     The OPERATOR page. Everything here the station already knew and could not
+     show anyone without a SQLite prompt.
+
+     Reads are open, exactly as /now.json already is on a service with no
+     authentication. WRITES require an operator token, because they change what
+     a listener hears and this product ships no auth at all. -->
+<title>Jockora — operator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 0 auto; padding: 1.5rem; max-width: 52rem; }
+  h1 { font-size: 1.3rem; margin: 0 0 .2rem; }
+  h2 { font-size: 1rem; margin: 1.6rem 0 .4rem; opacity: .8; }
+  .sub { opacity: .65; margin: 0 0 1rem; font-size: .9em; }
+  table { border-collapse: collapse; width: 100%; }
+  td { padding: .25rem .5rem .25rem 0; vertical-align: top; }
+  td:first-child { opacity: .7; width: 14rem; }
+  .bar { height: .5rem; border: 1px solid currentColor; border-radius: .25rem; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: currentColor; }
+  fieldset { border: 1px solid currentColor; border-radius: .3rem; margin: .6rem 0; padding: .6rem .8rem; }
+  legend { opacity: .7; font-size: .85em; padding: 0 .3rem; }
+  input, button { font: inherit; padding: .3rem .5rem; }
+  button { cursor: pointer; }
+  .warn { border-left: 3px solid currentColor; padding-left: .7rem; opacity: .85; }
+  .fb { border-top: 1px solid; border-color: color-mix(in srgb, currentColor 20%, transparent); padding: .5rem 0; }
+  .fb b { opacity: .6; font-weight: 600; font-size: .85em; }
+</style>
+
+<h1>Jockora — operator</h1>
+<p class="sub">Reads are open. Changing anything needs the operator token.</p>
+
+<div id="body">Loading…</div>
+
+<h2>Change something</h2>
+<p class="warn" id="tokenwarn" hidden>
+  Writes are disabled because no <code>JOCKORA_ADMIN_TOKEN</code> is set on the
+  server. Set one and restart; the token is not stored in this page.
+</p>
+<fieldset>
+  <legend>operator token</legend>
+  <input id="token" type="password" placeholder="JOCKORA_ADMIN_TOKEN" size="30" autocomplete="off">
+  <span class="sub">Held in memory for this tab only.</span>
+</fieldset>
+<fieldset>
+  <legend>break cadence</legend>
+  tracks between breaks:
+  <input id="cadence" type="number" min="1" max="100" style="width:5rem">
+  <button id="setcadence" type="button">Set</button>
+  <span class="sub">Raise it if the DJ talks too much. That is the usual complaint.</span>
+</fieldset>
+<fieldset>
+  <legend>enrichment</legend>
+  <button id="pause" type="button">Pause</button>
+  <button id="resume" type="button">Resume</button>
+  <span class="sub">Pausing hands the machine back without stopping the station.</span>
+</fieldset>
+<p id="said" class="sub"></p>
+
+<script>
+(function () {
+  var body = document.getElementById('body');
+  var said = document.getElementById('said');
+  var tokenBox = document.getElementById('token');
+
+  function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+  function row(k, v) { return '<tr><td>' + esc(k) + '</td><td>' + v + '</td></tr>'; }
+  function pct(done, total) {
+    var p = total ? Math.round(100 * done / total) : 0;
+    return '<div class="bar"><i style="width:' + p + '%"></i></div>' + done + ' of ' + total + ' (' + p + '%)';
+  }
+
+  function render(d) {
+    var lib = d.library || {}, cost = d.enrichment_cost || {};
+    var html = '<h2>Library</h2><table>';
+    html += row('tracks', esc(lib.tracks) + ' (' + esc(lib.playable) + ' playable)');
+    html += row('dossiers written', pct(lib.enriched || 0, lib.playable || 0));
+    html += row('loudness measured', pct(lib.loudness_measured || 0, lib.playable || 0));
+    html += row('tempo measured', pct(lib.bpm_measured || 0, lib.playable || 0));
+    if (d.analysis_failures) { html += row('analysis failures', esc(d.analysis_failures) + ' tracks'); }
+    html += '</table><h2>Enrichment cost</h2><table>';
+    html += row('tracks measured', esc(cost.tracks_measured));
+    html += row('seconds per track', (cost.seconds_per_track || 0).toFixed(1));
+    // The projection is the number that actually plans a rollout.
+    if (cost.seconds_per_track && lib.playable) {
+      var hours = (cost.seconds_per_track * (lib.playable - (lib.enriched || 0))) / 3600;
+      html += row('remaining, estimated', hours.toFixed(1) + ' hours at this rate');
+    }
+    html += row('tokens', esc(Math.round(cost.tokens || 0)));
+    html += '</table><h2>The DJ</h2><table>';
+    html += row('breaks recorded', esc(d.said_lines));
+    html += row('adverts in the pool', esc(d.adverts));
+    html += row('cadence', 'a break every ' + esc(d.cadence) + ' tracks');
+    html += row('enrichment', d.enriching ? 'running' : 'PAUSED');
+    html += '</table>';
+
+    var fb = d.feedback || [];
+    html += '<h2>Listener feedback (' + fb.length + ')</h2>';
+    if (!fb.length) {
+      html += '<p class="sub">Nothing yet. The thumbs-down on the player writes here.</p>';
+    } else {
+      fb.forEach(function (f) {
+        html += '<div class="fb"><b>' + esc(f.verdict.toUpperCase()) + ' · ' + esc(f.jock) + '</b><br>' + esc(f.text) + '</div>';
+      });
+    }
+    body.innerHTML = html;
+    document.getElementById('cadence').value = d.cadence || '';
+  }
+
+  function load() {
+    fetch('/admin/overview.json', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { if (d) { render(d); } else { body.textContent = 'No operator data.'; } })
+      .catch(function () { body.textContent = 'Could not reach the server.'; });
+  }
+  load();
+  setInterval(load, 10000);
+
+  function write(path, payload) {
+    said.textContent = '';
+    fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Jockora-Admin': tokenBox.value },
+      body: JSON.stringify(payload)
+    }).then(function (r) {
+      if (r.status === 403) {
+        document.getElementById('tokenwarn').hidden = false;
+        throw new Error('rejected: check the operator token');
+      }
+      if (!r.ok) { return r.text().then(function (t) { throw new Error(t.trim()); }); }
+      said.textContent = 'Done.';
+      load();
+    }).catch(function (e) { said.textContent = String(e.message || e); });
+  }
+
+  document.getElementById('setcadence').addEventListener('click', function () {
+    write('/admin/cadence', { cadence: parseInt(document.getElementById('cadence').value, 10) });
+  });
+  document.getElementById('pause').addEventListener('click', function () {
+    write('/admin/enriching', { enriching: false });
+  });
+  document.getElementById('resume').addEventListener('click', function () {
+    write('/admin/enriching', { enriching: true });
+  });
+})();
+</script>

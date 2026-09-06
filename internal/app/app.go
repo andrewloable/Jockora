@@ -16,6 +16,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"database/sql"
@@ -241,6 +242,10 @@ type App struct {
 	mixer   *mix.Mixer
 
 	dial *cachedDial
+
+	// enriching gates the background worker so an operator can hand the
+	// machine back for an evening without stopping the station.
+	enriching atomic.Bool
 }
 
 // ringSeconds is how much decoded audio is buffered ahead of the mixer. Enough
@@ -348,6 +353,13 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 	a.srv = srv
 	srv.SetStatusSource(a)
 	srv.SetTuner(a)
+	srv.SetAdmin(a)
+	srv.SetAdminToken(cfg.AdminToken)
+	if cfg.AdminToken == "" {
+		log.Info("admin writes are DISABLED",
+			"why", "no JOCKORA_ADMIN_TOKEN is set",
+			"detail", "the operator page reads fine; changing cadence or pausing enrichment needs a token")
+	}
 
 	// The dial is cached and REFRESHED PERIODICALLY, never computed per
 	// request: it reads every dossier in the library, which is fine every few
@@ -560,6 +572,8 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	if a.opts.Enricher != nil {
+		a.enriching.Store(true)
+		a.opts.Enricher.Paused = a.enriching.Load
 		go func() {
 			if err := a.opts.Enricher.Run(ctx); err != nil && ctx.Err() == nil {
 				// Not fatal, and deliberately not retried in a loop here: the
@@ -1041,5 +1055,190 @@ func (a *App) Feedback(verdict string) error {
 		return fmt.Errorf("recording feedback: %w", err)
 	}
 	a.log.Info("break feedback", "verdict", verdict, "text", last.Text)
+	return nil
+}
+
+// Jock is one persona a listener may put on air.
+type Jock struct {
+	ID     string   `json:"id"`
+	Name   string   `json:"name"`
+	Voice  string   `json:"voice"`
+	Genres []string `json:"genres,omitempty"`
+	Moods  []string `json:"moods,omitempty"`
+	OnAir  bool     `json:"on_air"`
+}
+
+// Jocks lists the roster and marks whoever is on air.
+//
+// The roster was invisible until this existed: nine personas shipped, the
+// station chose one from what the library sounded like, and a listener had no
+// way to see the others, let alone pick one.
+func (a *App) Jocks() any {
+	out := make([]Jock, 0, len(a.opts.Personas))
+
+	current := ""
+	if a.opts.Writer != nil {
+		if p := a.opts.Writer.Voice(); p != "" {
+			// Identify by id rather than voice, which two jocks could share.
+			if pp := a.currentPersona(); pp != nil {
+				current = pp.ID()
+			}
+		}
+	}
+	for _, p := range a.opts.Personas {
+		out = append(out, Jock{
+			ID: p.ID(), Name: p.Name(), Voice: p.VoiceID(),
+			Genres: p.GoodForGenres(), Moods: p.GoodForMoods(),
+			OnAir: p.ID() == current,
+		})
+	}
+	return map[string]any{"jocks": out}
+}
+
+// currentPersona is whoever is writing breaks right now.
+func (a *App) currentPersona() *dj.Persona {
+	if a.opts.Writer == nil {
+		return nil
+	}
+	return a.opts.Writer.CurrentPersona()
+}
+
+// SetJock puts a different persona on air.
+//
+// The break already being generated is NOT recalled: it was written by the
+// previous jock and airs in that jock's voice. Cancelling a half-rendered break
+// to honour a click is the stutter this whole design avoids, and the listener
+// hears the change at the next break either way.
+func (a *App) SetJock(id string) error {
+	if a.opts.Writer == nil {
+		return fmt.Errorf("no DJ is running")
+	}
+	for _, p := range a.opts.Personas {
+		if p.ID() == id {
+			a.opts.Writer.SetPersona(p)
+			a.log.Info("jock changed", "jock", p.Name(), "voice", p.VoiceID(),
+				"note", "the break already in flight airs in the previous voice")
+			return nil
+		}
+	}
+	return fmt.Errorf("no jock with id %q", id)
+}
+
+// Overview is everything the operator page renders.
+//
+// Most of this the station already knew and never showed anyone: enrichment
+// cost, which tracks failed analysis, the advert pool, and the thumbs-downs,
+// which were RECORDED AND READ BY NOTHING until this existed.
+func (a *App) Overview() any {
+	out := map[string]any{}
+	if a.opts.Library == nil || a.opts.Library.Store == nil {
+		return out
+	}
+	db := a.opts.Library.Store.DB()
+	ctx := context.Background()
+
+	var tracks, playable, enriched, analysed, withBPM int
+	_ = db.QueryRowContext(ctx, `SELECT count(*), sum(playable) FROM tracks`).Scan(&tracks, &playable)
+	_ = db.QueryRowContext(ctx, `SELECT count(*) FROM dossiers`).Scan(&enriched)
+	_ = db.QueryRowContext(ctx,
+		`SELECT sum(loudness_lufs IS NOT NULL), sum(bpm IS NOT NULL) FROM tracks WHERE playable = 1`).
+		Scan(&analysed, &withBPM)
+
+	var tokens, wallSeconds float64
+	var costed int
+	_ = db.QueryRowContext(ctx,
+		`SELECT count(*), coalesce(sum(tokens),0), coalesce(sum(wall_seconds),0) FROM enrich_cost`).
+		Scan(&costed, &tokens, &wallSeconds)
+
+	out["library"] = map[string]any{
+		"tracks": tracks, "playable": playable,
+		"enriched": enriched, "loudness_measured": analysed, "bpm_measured": withBPM,
+	}
+	// Cost is reported per track as well as in total, because the total is
+	// meaningless for planning and the per-track figure projects to a library.
+	perTrack := 0.0
+	if costed > 0 {
+		perTrack = wallSeconds / float64(costed)
+	}
+	out["enrichment_cost"] = map[string]any{
+		"tracks_measured": costed, "tokens": tokens,
+		"wall_seconds": wallSeconds, "seconds_per_track": perTrack,
+	}
+
+	// Tracks the analyser could not measure. Stored as zero rather than NULL so
+	// they are not retried for ever, which makes them findable exactly this way.
+	var failed int
+	_ = db.QueryRowContext(ctx,
+		`SELECT count(*) FROM tracks WHERE playable = 1 AND loudness_lufs = 0`).Scan(&failed)
+	out["analysis_failures"] = failed
+
+	out["said_lines"] = countOf(ctx, db, `SELECT count(*) FROM said_lines`)
+	out["adverts"] = countOf(ctx, db, `SELECT count(*) FROM ads`)
+	out["feedback"] = recentFeedback(ctx, db)
+	out["cadence"] = a.cfg.BreakEveryNTracks
+	out["enriching"] = a.enriching.Load()
+	return out
+}
+
+func countOf(ctx context.Context, db *sql.DB, q string) int {
+	var n int
+	_ = db.QueryRowContext(ctx, q).Scan(&n)
+	return n
+}
+
+// recentFeedback is the thumbs-down feed.
+//
+// It closes a loop that was open: /feedback has been writing verdicts into
+// break_feedback and NOTHING READ THEM. A signal from a real ear that nobody
+// can see is not a signal.
+func recentFeedback(ctx context.Context, db *sql.DB) []map[string]any {
+	rows, err := db.QueryContext(ctx,
+		`SELECT verdict, coalesce(jock_id,''), text, at FROM break_feedback
+		  ORDER BY at DESC LIMIT 20`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close() //nolint:errcheck // read-only
+
+	// An empty slice rather than nil, so the JSON is [] and not null: every
+	// consumer would otherwise need its own null check.
+	out := []map[string]any{}
+	for rows.Next() {
+		var verdict, jock, text string
+		var at int64
+		if err := rows.Scan(&verdict, &jock, &text, &at); err != nil {
+			return out
+		}
+		out = append(out, map[string]any{"verdict": verdict, "jock": jock, "text": text, "at": at})
+	}
+	return out
+}
+
+// SetCadence changes how many tracks pass between breaks, without a restart.
+//
+// The deferred month named this the single most likely thing to be
+// misconfigured, and until now changing it meant editing a compose file and
+// restarting the station.
+func (a *App) SetCadence(n int) error {
+	if n < 1 || n > 100 {
+		return fmt.Errorf("cadence must be between 1 and 100 tracks, got %d", n)
+	}
+	if a.opts.Breaks == nil {
+		return fmt.Errorf("no DJ is running")
+	}
+	a.opts.Breaks.SetCadence(station.NewCadence(n))
+	a.cfg.BreakEveryNTracks = n
+	a.log.Info("break cadence changed", "every_n_tracks", n)
+	return nil
+}
+
+// SetEnriching pauses or resumes the background enrichment worker.
+//
+// Pausing is a real need rather than a toggle for its own sake: enrichment is
+// the heaviest thing this process does, and an operator who wants the machine
+// back for an evening currently has to stop the station to get it.
+func (a *App) SetEnriching(on bool) error {
+	a.enriching.Store(on)
+	a.log.Info("enrichment", "running", on)
 	return nil
 }

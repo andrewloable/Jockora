@@ -137,8 +137,12 @@ func buildBreaks(ctx context.Context, cfg *config.Config, lib *app.Library, log 
 			Renderer: station.RendererFunc(func(ctx context.Context, text, voice, outPath string) (float64, error) {
 				return tts.Render(ctx, sidecar, text, voice, outPath)
 			}),
-			Dir:   cfg.SegmentDir,
-			Voice: persona.VoiceID(),
+			Dir: cfg.SegmentDir,
+			// Asked at render time, not captured here: a listener can change
+			// the jock while the station runs, and a break must be spoken by
+			// whoever is on air now.
+			Voice:   persona.VoiceID(),
+			VoiceOf: writer.Voice,
 		},
 		FadeSeconds: cfg.CrossfadeSeconds,
 		Clock:       clock.Real{},

@@ -53,7 +53,12 @@ type LengthCheck struct {
 	// Dir is where rendered breaks are written.
 	Dir string
 	// Voice names the TTS voice; empty means the sidecar's default.
-	Voice string
+	//
+	// VoiceOf, when set, wins: it is asked afresh for every render, so a jock
+	// changed mid-session is spoken in the new jock's voice rather than the one
+	// captured when this struct was built.
+	Voice   string
+	VoiceOf func() string
 }
 
 // Rendered is the outcome of the ladder.
@@ -142,11 +147,21 @@ func (lc LengthCheck) attempt(ctx context.Context, target int, placement mix.Pla
 		return "", "", 0, 1, fmt.Errorf("writing break: %w", err)
 	}
 	path := filepath.Join(lc.Dir, fmt.Sprintf("break-%s-%d.wav", placement, n))
-	seconds, err := lc.Renderer.Render(ctx, text, lc.Voice, path)
+	seconds, err := lc.Renderer.Render(ctx, text, lc.voice(), path)
 	if err != nil {
 		return "", "", 0, 1, fmt.Errorf("rendering break: %w", err)
 	}
 	return path, text, seconds, 1, nil
+}
+
+// voice is the voice to speak this break in, asked for at render time.
+func (lc LengthCheck) voice() string {
+	if lc.VoiceOf != nil {
+		if v := lc.VoiceOf(); v != "" {
+			return v
+		}
+	}
+	return lc.Voice
 }
 
 // ctxErr reports only cancellation upwards. Every other failure is a dropped

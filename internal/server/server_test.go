@@ -519,6 +519,7 @@ type fakeTuner struct {
 	tuned   string
 	tracks  int
 	verdict string
+	jock    string
 	err     error
 }
 
@@ -530,6 +531,19 @@ func (f *fakeTuner) Tune(tag string) (int, error) {
 	return f.tracks, nil
 }
 func (f *fakeTuner) Feedback(v string) error { f.verdict = v; return f.err }
+func (f *fakeTuner) Jocks() any {
+	return map[string]any{"jocks": []map[string]any{
+		{"id": "dutch_mahoney", "name": "Dutch", "on_air": true},
+		{"id": "roxy_sinclair", "name": "Roxy", "on_air": false},
+	}}
+}
+func (f *fakeTuner) SetJock(id string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.jock = id
+	return nil
+}
 
 func post(t *testing.T, s *Server, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -613,5 +627,149 @@ func TestServerTuningUnavailableWithoutATuner(t *testing.T) {
 		if rec := post(t, s, p, `{}`); rec.Code != http.StatusServiceUnavailable {
 			t.Errorf("POST %s with no tuner = %d, want 503", p, rec.Code)
 		}
+	}
+}
+
+// TestServerListsAndChangesTheJock.
+//
+// Nine personas shipped and the roster was INVISIBLE: the station picked one
+// from what the library sounded like and a listener could not see the others,
+// let alone choose.
+func TestServerListsAndChangesTheJock(t *testing.T) {
+	s, _ := newServer(t, 0)
+	tuner := &fakeTuner{}
+	s.SetTuner(tuner)
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/jocks.json", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /jocks.json = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "on_air") {
+		t.Error("the roster does not say who is on air")
+	}
+
+	if rec := post(t, s, "/jock", `{"id":"roxy_sinclair"}`); rec.Code != http.StatusNoContent {
+		t.Fatalf("POST /jock = %d, want 204: %s", rec.Code, rec.Body)
+	}
+	if tuner.jock != "roxy_sinclair" {
+		t.Errorf("jock set to %q", tuner.jock)
+	}
+
+	tuner.err = errNoSuchJock
+	if rec := post(t, s, "/jock", `{"id":"nobody"}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("an unknown jock returned %d, want 400", rec.Code)
+	}
+}
+
+var errNoSuchJock = fmt.Errorf("no jock with id \"nobody\"")
+
+type fakeAdmin struct {
+	cadence   int
+	enriching bool
+	err       error
+}
+
+func (f *fakeAdmin) Overview() any { return map[string]any{"cadence": f.cadence} }
+func (f *fakeAdmin) SetCadence(n int) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.cadence = n
+	return nil
+}
+func (f *fakeAdmin) SetEnriching(on bool) error { f.enriching = on; return f.err }
+
+func postAuth(t *testing.T, s *Server, path, body, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set(AdminTokenHeader, token)
+	}
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestAdminWritesRefusedWithoutAToken is the safety property, and the one that
+// matters most on a product shipping no authentication at all.
+//
+// An UNSET token must refuse every write. Treating unset as "allow anyone"
+// would make the default configuration -- the one the supplied compose file
+// publishes on the LAN -- the dangerous one.
+func TestAdminWritesRefusedWithoutAToken(t *testing.T) {
+	s, _ := newServer(t, 0)
+	admin := &fakeAdmin{cadence: 4}
+	s.SetAdmin(admin)
+	// No SetAdminToken call at all: this is the default configuration.
+
+	for _, tc := range []struct{ path, body string }{
+		{"/admin/cadence", `{"cadence":99}`},
+		{"/admin/enriching", `{"enriching":false}`},
+	} {
+		rec := postAuth(t, s, tc.path, tc.body, "")
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("POST %s with no token configured = %d, want 403", tc.path, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "JOCKORA_ADMIN_TOKEN") {
+			t.Errorf("the refusal does not name the fix: %s", rec.Body)
+		}
+	}
+	if admin.cadence != 4 {
+		t.Errorf("cadence was changed to %d despite no token", admin.cadence)
+	}
+}
+
+// TestAdminWritesRejectAWrongToken.
+func TestAdminWritesRejectAWrongToken(t *testing.T) {
+	s, _ := newServer(t, 0)
+	admin := &fakeAdmin{cadence: 4}
+	s.SetAdmin(admin)
+	s.SetAdminToken("correct-horse")
+
+	if rec := postAuth(t, s, "/admin/cadence", `{"cadence":99}`, "wrong"); rec.Code != http.StatusForbidden {
+		t.Errorf("a wrong token = %d, want 403", rec.Code)
+	}
+	if admin.cadence != 4 {
+		t.Errorf("cadence changed to %d on a wrong token", admin.cadence)
+	}
+	if rec := postAuth(t, s, "/admin/cadence", `{"cadence":8}`, "correct-horse"); rec.Code != http.StatusNoContent {
+		t.Fatalf("the right token = %d, want 204: %s", rec.Code, rec.Body)
+	}
+	if admin.cadence != 8 {
+		t.Errorf("cadence = %d after an authorised write, want 8", admin.cadence)
+	}
+}
+
+// TestAdminReadsAreOpen: /now.json already exposes this class of information on
+// an unauthenticated service, so gating reads would break the page and protect
+// nothing new.
+func TestAdminReadsAreOpen(t *testing.T) {
+	s, _ := newServer(t, 0)
+	s.SetAdmin(&fakeAdmin{cadence: 4})
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/overview.json", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /admin/overview.json = %d, want 200", rec.Code)
+	}
+}
+
+// TestListenerControlsAreNotBehindTheAdminToken: tuning and picking a jock
+// change what is playing now, which is what the dial is for. The token guards
+// operator CONFIGURATION, which outlives the session.
+func TestListenerControlsAreNotBehindTheAdminToken(t *testing.T) {
+	s, _ := newServer(t, 0)
+	tuner := &fakeTuner{tracks: 12}
+	s.SetTuner(tuner)
+	s.SetAdmin(&fakeAdmin{})
+	s.SetAdminToken("correct-horse")
+
+	if rec := postAuth(t, s, "/tune", `{"tag":"rock"}`, ""); rec.Code != http.StatusOK {
+		t.Errorf("POST /tune without the admin token = %d, want 200", rec.Code)
+	}
+	if rec := postAuth(t, s, "/jock", `{"id":"roxy_sinclair"}`, ""); rec.Code != http.StatusNoContent {
+		t.Errorf("POST /jock without the admin token = %d, want 204", rec.Code)
 	}
 }
