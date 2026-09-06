@@ -15,3 +15,12 @@ transcripts
 # dual-licensed for commercial sale.
 transcripts/
 download_transcripts.sh
+
+# Local runtime working material: a TTS virtualenv, the HLS segment directory,
+# and the markdown a step-5.5 tuning round writes out for reading.
+.venv-tts/
+segments/
+breaks-round-*.md
+
+# Kokoro model weights: hundreds of MB, operator-supplied, never vendored.
+models/

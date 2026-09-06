@@ -10,7 +10,9 @@ package library
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -40,6 +42,7 @@ type Stats struct {
 	Found      int // audio files seen
 	Added      int // new rows
 	Updated    int // existing rows refreshed
+	Skipped    int // unchanged since the last scan, not re-probed
 	Unplayable int // files ffprobe could not read
 
 	// Rejected carries one wrapped errs.ErrUnsupportedFormat per unplayable
@@ -106,6 +109,21 @@ func ScanWithProgress(ctx context.Context, s *store.Store, root string, progress
 		if progress != nil {
 			progress(stats.Found, path)
 		}
+
+		// Unchanged files are not re-probed. ffprobe is the entire cost of a
+		// scan, and a library is overwhelmingly the same library it was last
+		// time. An os.Stat is already paid for by the walk.
+		if info, statErr := d.Info(); statErr == nil {
+			unchanged, err := unchangedSince(ctx, s, path, info.Size(), info.ModTime().Unix())
+			if err != nil {
+				return err
+			}
+			if unchanged {
+				stats.Skipped++
+				return nil
+			}
+		}
+
 		meta, probeErr := probe(ctx, path)
 		if probeErr != nil {
 			// Detected HERE, at scan time, and never at play time. A scan is
@@ -117,7 +135,25 @@ func ScanWithProgress(ctx context.Context, s *store.Store, root string, progress
 			stats.Rejected = append(stats.Rejected, probeErr)
 		}
 
-		added, upsertErr := upsert(ctx, s, path, meta, probeErr == nil)
+		// A missing tag falls back to the FILENAME, and only to the filename.
+		// Real tags always win: this fills gaps, it never overrides. 519 of
+		// this library's 7,595 playable tracks carry neither an artist nor a
+		// title, and each one was reaching the DJ as an empty dossier.
+		if meta.artist == "" || meta.title == "" {
+			fnArtist, fnTitle := NamesFromPath(path)
+			if meta.artist == "" {
+				meta.artist = fnArtist
+			}
+			if meta.title == "" {
+				meta.title = fnTitle
+			}
+		}
+
+		var size, modified int64
+		if info, statErr := d.Info(); statErr == nil {
+			size, modified = info.Size(), info.ModTime().Unix()
+		}
+		added, upsertErr := upsert(ctx, s, path, meta, probeErr == nil, size, modified)
 		if upsertErr != nil {
 			return upsertErr
 		}
@@ -192,7 +228,33 @@ func probe(ctx context.Context, path string) (metadata, error) {
 // Only the columns the scanner owns are updated. Loudness, ramp, outro, bpm and
 // the gapless flag cost hours of enrichment to produce and a rescan must never
 // discard them.
-func upsert(ctx context.Context, s *store.Store, path string, m metadata, playable bool) (bool, error) {
+// unchangedSince reports whether this exact file was already scanned.
+//
+// Size AND mtime, never one alone: a retag usually preserves the size, and a
+// file copied off a backup usually preserves neither. Both matching is not a
+// proof -- nothing short of hashing every byte is -- but it is the same bet
+// every incremental build tool makes, and the failure mode is a stale tag until
+// the file is touched, not a corrupt library.
+//
+// A row with a NULL size or mtime was written before those columns existed, so
+// it re-probes once and is never asked again.
+func unchangedSince(ctx context.Context, s *store.Store, path string, size, modified int64) (bool, error) {
+	var storedSize, storedMod sql.NullInt64
+	err := s.DB().QueryRowContext(ctx,
+		`SELECT size_bytes, modified_at FROM tracks WHERE path = ?`, path).Scan(&storedSize, &storedMod)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("library: checking %s: %w", path, err)
+	}
+	if !storedSize.Valid || !storedMod.Valid {
+		return false, nil
+	}
+	return storedSize.Int64 == size && storedMod.Int64 == modified, nil
+}
+
+func upsert(ctx context.Context, s *store.Store, path string, m metadata, playable bool, size, modified int64) (bool, error) {
 	playableInt := 0
 	if playable {
 		playableInt = 1
@@ -209,17 +271,19 @@ func upsert(ctx context.Context, s *store.Store, path string, m metadata, playab
 	}
 
 	_, err = s.DB().ExecContext(ctx, `
-		INSERT INTO tracks (path, artist, title, album, year, duration_s, playable, scanned_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO tracks (path, artist, title, album, year, duration_s, playable, scanned_at, size_bytes, modified_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
-			artist     = excluded.artist,
-			title      = excluded.title,
-			album      = excluded.album,
-			year       = excluded.year,
-			duration_s = excluded.duration_s,
-			playable   = excluded.playable,
-			scanned_at = excluded.scanned_at`,
-		path, m.artist, m.title, m.album, m.year, m.duration, playableInt, time.Now().Unix())
+			artist      = excluded.artist,
+			title       = excluded.title,
+			album       = excluded.album,
+			year        = excluded.year,
+			duration_s  = excluded.duration_s,
+			playable    = excluded.playable,
+			scanned_at  = excluded.scanned_at,
+			size_bytes  = excluded.size_bytes,
+			modified_at = excluded.modified_at`,
+		path, m.artist, m.title, m.album, m.year, m.duration, playableInt, time.Now().Unix(), size, modified)
 	if err != nil {
 		return false, fmt.Errorf("library: recording %s: %w", path, err)
 	}

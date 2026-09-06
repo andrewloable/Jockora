@@ -59,6 +59,21 @@ type PromptInput struct {
 	PreviousArtist string
 	PreviousTitle  string
 
+	// CurrentArtist, CurrentTitle, NextArtist and NextTitle name the records on
+	// either side of the break.
+	//
+	// These were missing entirely, and the DJ was never told what it was about
+	// to play. With a thin dossier it filled the gap the only way it could:
+	// asked to introduce an unknown record it announced "Unknown Territory by
+	// The Unseen", a song and a band that do not exist. A name is the one thing
+	// a station always knows -- it comes from the file's tags, or failing that
+	// from the filename -- so withholding it manufactured the exact invention
+	// the whole design exists to prevent.
+	CurrentArtist string
+	CurrentTitle  string
+	NextArtist    string
+	NextTitle     string
+
 	Prohibitions  Prohibitions
 	Placement     string
 	WindowSeconds float64
@@ -163,12 +178,25 @@ func assemble(in PromptInput, next *enrich.Dossier, prohib Prohibitions) string 
 	// Whatever describes the output gets lifted into it, so the prompt says as
 	// little as it can and the validator is the floor.
 	b.WriteString("Every field holds words you say ALOUD, into a microphone.\n")
-	b.WriteString("Never describe a line instead of saying it.\n\n")
+	b.WriteString("Never describe a line instead of saying it, and never say the\n")
+	b.WriteString("name of a field or a fact: those are plumbing, not speech.\n\n")
 
+	// "about N words" reads as permission to overshoot, and it was taken:
+	// measured over 49 breaks, ramps ran 1.5x their target and outros 2.1x.
+	// A ceiling with a number to count against is a different instruction from
+	// an approximation.
 	words := WordTarget(in.WindowSeconds)
-	fmt.Fprintf(&b, "LENGTH: about %d words. This is spoken over %.1f seconds of\n",
-		words, in.WindowSeconds)
-	b.WriteString("music and MUST fit. Going long means talking over a vocal.\n\n")
+	fmt.Fprintf(&b, "LENGTH: %d words MAXIMUM. Count them. Fewer is better.\n", words)
+	fmt.Fprintf(&b, "You are speaking over %.1f seconds of music. Word %d lands as\n",
+		in.WindowSeconds, words+1)
+	b.WriteString("the vocal starts, and the listener hears you talk over the song.\n\n")
+
+	// Padding to a word count by repeating a name is what a model does when it
+	// has run out of things to say. Measured: "Howard Shore, Howard Shore,
+	// Howard Shore, born in 1946, born in 1946, born in 1946." Saying less is
+	// always available and always better.
+	b.WriteString("Say each name, title and year ONCE. If you find yourself repeating\n")
+	b.WriteString("one to fill the time, stop talking instead.\n\n")
 
 	if in.Placement != "" {
 		fmt.Fprintf(&b, "PLACEMENT: %s\n", placementGuidance(in.Placement))
@@ -188,19 +216,26 @@ func assemble(in PromptInput, next *enrich.Dossier, prohib Prohibitions) string 
 			in.PreviousTitle, in.PreviousArtist)
 		b.WriteString("then hand off. You are talking over its tail, so it is still\n")
 		b.WriteString("in the listener's ear.\n")
-		writeDossier(&b, "THE TRACK THAT JUST FINISHED", in.Previous)
+		writeDossier(&b, "THE TRACK THAT JUST FINISHED", in.Previous, in.PreviousArtist, in.PreviousTitle)
 	}
 
-	writeDossier(&b, "THE TRACK NOW ENDING", in.Current)
-	writeDossier(&b, "THE TRACK COMING UP", next)
+	writeDossier(&b, "THE TRACK NOW ENDING", in.Current, in.CurrentArtist, in.CurrentTitle)
+	writeDossier(&b, "THE TRACK COMING UP", next, in.NextArtist, in.NextTitle)
 
 	if in.Current == nil && next == nil && in.Previous == nil {
 		// An empty dossier is a designed outcome, not a failure. The DJ has
 		// personality and nothing else, and must not fill the gap by inventing.
 		b.WriteString("\nYOU HAVE NO FACTS ABOUT EITHER TRACK.\n")
-		b.WriteString("Talk from personality only. Do NOT name a year, a place, a\n")
-		b.WriteString("label, a band member or any other detail: you do not know any,\n")
-		b.WriteString("and inventing one is worse than saying less.\n")
+		b.WriteString("This is not a problem and it is not an apology. Not knowing is\n")
+		b.WriteString("one of the oldest things a radio host does, and it is usually\n")
+		b.WriteString("funnier than knowing. Be entertaining ABOUT the not knowing:\n")
+		b.WriteString("react to the title, to the sound, to what the name makes you\n")
+		b.WriteString("picture, to your own week. Wonder aloud. Be wrong out loud, as\n")
+		b.WriteString("long as everybody can hear that you are guessing.\n\n")
+		b.WriteString("What you may NOT do is state something as though you knew it.\n")
+		b.WriteString("Do not name a year, a place, a label or a band member as fact.\n")
+		b.WriteString("A guess the listener can hear is a guess is entertainment; the\n")
+		b.WriteString("same sentence said flatly is a lie they will repeat.\n")
 	} else {
 		b.WriteString("\nState ONLY the facts listed above. Anything else you think you\n")
 		b.WriteString("know about these records is not available to you.\n")
@@ -214,6 +249,18 @@ func assemble(in PromptInput, next *enrich.Dossier, prohib Prohibitions) string 
 		// dropped.
 		b.WriteString("Say them in YOUR OWN WORDS. Reading a fact out as written is how\n")
 		b.WriteString("two breaks end up sharing a sentence, and the second one is cut.\n")
+		// TRIED AND REVERTED, 2026-09-06. Four more lines here told the writer
+		// that a year is never a sentence of its own. Run against an identical
+		// seed, identical windows and an identical library, it changed the
+		// recited-fact count from 29 to 28 and the collision count from 9 to 9,
+		// while tripling the responses that hit the 200-token output budget and
+		// came back truncated: 3 breaks lost before, 9 after. The pass rate
+		// appeared to RISE, from 45% to 49%, purely because the denominator
+		// shrank. Longer instructions made the writer write longer.
+		//
+		// Recitation is therefore not a wording problem and not fixable by
+		// adding prose. Leave it to a listener at room test B to say whether it
+		// even matters, and if it does, spend the budget rather than the prompt.
 	}
 
 	if len(prohib.Openings) > 0 {
@@ -249,12 +296,48 @@ func placementGuidance(placement string) string {
 
 // writeDossier renders at most MaxFactsInPrompt facts. More than three turns a
 // thirty-second break into a recitation.
-func writeDossier(b *strings.Builder, heading string, d *enrich.Dossier) {
-	if d == nil {
+// TRIED AND REVERTED, 2026-09-06. This withheld recently-used facts from the
+// dossier block, not just from the schema, on the correct observation that the
+// fact cooldown only stops a writer DECLARING a fact and does nothing about it
+// reading one out: three collisions on "howard shore born 1946" came from
+// breaks that declared station_tags and mood and never asserted a year at all.
+//
+// The mechanism fix worked and did not help. Measured over three runs at an
+// identical seed, 50 requests each:
+//
+//	                            breaks  collisions  recited  truncated  would air
+//	schema cooldown only            47           9        9          3         38
+//	also hidden for 10 breaks       38           9        2         12         29
+//	also hidden for 3 breaks        43          11        7          7         32
+//
+// Recitation fell from 9 to 2, exactly as intended, and the collisions simply
+// became generic filler instead -- "rock roll stay tuned", "don t miss beat".
+// Fewer breaks survived, because a writer with less to say pads until it hits
+// the token budget. Adding INSTRUCTIONS did the same thing, in the same
+// direction, for the same reason.
+//
+// THE WRITER'S PROBLEM IS NOT THAT IT REPEATS FACTS. It is that it does not
+// have enough to say. Repetition is the symptom of a thin dossier, so the fix
+// is richer enrichment, not a stricter cooldown.
+func writeDossier(b *strings.Builder, heading string, d *enrich.Dossier, artist, title string) {
+	// The NAME is printed even with no dossier at all. Knowing what is playing
+	// is not the same as knowing anything about it, and a jock that knows the
+	// title has something true to be funny about instead of inventing one.
+	if d == nil && artist == "" && title == "" {
 		return
 	}
 
 	fmt.Fprintf(b, "\n%s\n", heading)
+	if title != "" {
+		b.WriteString("  title: " + title + "\n")
+	}
+	if artist != "" {
+		b.WriteString("  artist: " + artist + "\n")
+	}
+	if d == nil {
+		b.WriteString("  (nothing else is known about this record)\n")
+		return
+	}
 	if d.SubjectSummary != "" {
 		b.WriteString("  about: " + d.SubjectSummary + "\n")
 	}

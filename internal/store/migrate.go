@@ -15,7 +15,7 @@ import (
 // It exists from the very first migration, not from the first time the schema
 // changes. Retrofitting versioning after dossiers exist means either discarding
 // hours of enrichment or hand-writing a recovery script.
-const CurrentSchemaVersion = 3
+const CurrentSchemaVersion = 4
 
 // migrations are applied in order; index i brings the schema to version i+1.
 var migrations = []string{
@@ -95,6 +95,21 @@ var migrations = []string{
 		tokens      INTEGER NOT NULL,
 		wall_seconds REAL   NOT NULL
 	);
+	`,
+
+	// 4: enough to tell whether a file has changed since it was scanned.
+	//
+	// Startup blocks on the scan, and the scan ffprobed every file every time.
+	// Measured on a 7,696-track library over a network mount: eight minutes of
+	// silence before the first note, on EVERY restart, scaling linearly with
+	// the library. Size and mtime answer "has this changed" without opening
+	// the file.
+	//
+	// NULL means "scanned before this column existed", which re-probes once
+	// and then stops. That is the whole upgrade path.
+	`
+	ALTER TABLE tracks ADD COLUMN size_bytes INTEGER;
+	ALTER TABLE tracks ADD COLUMN modified_at INTEGER;
 	`,
 }
 

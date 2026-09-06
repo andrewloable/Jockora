@@ -167,8 +167,70 @@ func TestScanIsIdempotent(t *testing.T) {
 	if stats.Added != 0 {
 		t.Errorf("second scan added %d rows, want 0", stats.Added)
 	}
+	// SKIPPED, not updated. A second scan of an unchanged library must not
+	// re-probe anything: ffprobe is the whole cost, and re-paying it blocked
+	// startup for eight minutes on a 7,696-track library.
+	if stats.Updated != 0 {
+		t.Errorf("second scan re-probed %d unchanged files, want 0", stats.Updated)
+	}
+	if stats.Skipped != 3 {
+		t.Errorf("second scan skipped %d files, want 3", stats.Skipped)
+	}
+}
+
+// TestScanRescansAChangedFile is the other half, and the one that matters more:
+// skipping is only safe if a file that HAS changed is still picked up. A scanner
+// that skips everything is fast and useless.
+func TestScanRescansAChangedFile(t *testing.T) {
+	s := openStore(t)
+	root := library(t)
+
+	if _, err := Scan(context.Background(), s, root); err != nil {
+		t.Fatal(err)
+	}
+
+	// Retagging usually preserves the size, so mtime alone has to carry this.
+	changed := filepath.Join(root, "a.mp3")
+	future := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(changed, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := Scan(context.Background(), s, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Updated != 1 {
+		t.Errorf("re-probed %d files after touching one, want 1", stats.Updated)
+	}
+	if stats.Skipped != 2 {
+		t.Errorf("skipped %d files, want the 2 that did not change", stats.Skipped)
+	}
+}
+
+// TestScanRescansRowsWrittenBeforeSizeWasRecorded: a library scanned by an older
+// build has NULL size and mtime. Those must re-probe once rather than be taken
+// as unchanged, which would freeze every tag in the library forever.
+func TestScanRescansRowsWrittenBeforeSizeWasRecorded(t *testing.T) {
+	s := openStore(t)
+	root := library(t)
+
+	if _, err := Scan(context.Background(), s, root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().Exec(`UPDATE tracks SET size_bytes = NULL, modified_at = NULL`); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := Scan(context.Background(), s, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Skipped != 0 {
+		t.Errorf("skipped %d rows that predate the size column; they can never be refreshed", stats.Skipped)
+	}
 	if stats.Updated != 3 {
-		t.Errorf("second scan updated %d rows, want 3", stats.Updated)
+		t.Errorf("re-probed %d rows, want all 3", stats.Updated)
 	}
 }
 
@@ -410,5 +472,52 @@ func TestScanReportsProgress(t *testing.T) {
 	// Scan without a callback must behave identically.
 	if _, err := Scan(context.Background(), openStore(t), dir); err != nil {
 		t.Errorf("Scan without progress: %v", err)
+	}
+}
+
+// TestScanFallsBackToTheFilename: an untagged file is not an unknowable file.
+func TestScanFallsBackToTheFilename(t *testing.T) {
+	s := openStore(t)
+	root := t.TempDir()
+	makeAudio(t, root, "Agay - Agressive Audio.mp3", "", "", "", 2)
+	makeAudio(t, root, "02. Take A Chance On Me.mp3", "", "", "", 2)
+
+	if _, err := Scan(context.Background(), s, root); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct{ path, artist, title string }{
+		{"Agay - Agressive Audio.mp3", "Agay", "Agressive Audio"},
+		{"02. Take A Chance On Me.mp3", "", "Take A Chance On Me"},
+	} {
+		var artist, title string
+		err := s.DB().QueryRow(`SELECT coalesce(artist,''), coalesce(title,'') FROM tracks WHERE path = ?`,
+			filepath.Join(root, tc.path)).Scan(&artist, &title)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.path, err)
+		}
+		if artist != tc.artist || title != tc.title {
+			t.Errorf("%s recorded as (%q, %q), want (%q, %q)", tc.path, artist, title, tc.artist, tc.title)
+		}
+	}
+}
+
+// TestScanPrefersRealTagsOverTheFilename is the guard on the above. A file
+// tagged "Creep" that happens to be called "01 Untitled.mp3" must stay Creep.
+func TestScanPrefersRealTagsOverTheFilename(t *testing.T) {
+	s := openStore(t)
+	root := t.TempDir()
+	makeAudio(t, root, "99 - Wrong Name.mp3", "Radiohead", "Creep", "Pablo Honey", 2)
+
+	if _, err := Scan(context.Background(), s, root); err != nil {
+		t.Fatal(err)
+	}
+
+	var artist, title string
+	if err := s.DB().QueryRow(`SELECT artist, title FROM tracks`).Scan(&artist, &title); err != nil {
+		t.Fatal(err)
+	}
+	if artist != "Radiohead" || title != "Creep" {
+		t.Errorf("the filename overrode real tags: got (%q, %q)", artist, title)
 	}
 }

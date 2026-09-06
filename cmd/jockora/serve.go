@@ -48,7 +48,7 @@ func buildLibrary(ctx context.Context, cfg *config.Config, log *slog.Logger) (*a
 		return nil, fmt.Errorf("scanning %s: %w", cfg.LibraryPath, err)
 	}
 	log.Info("library scanned", "root", cfg.LibraryPath,
-		"found", stats.Found, "added", stats.Added, "updated", stats.Updated, "unplayable", stats.Unplayable)
+		"found", stats.Found, "added", stats.Added, "updated", stats.Updated, "skipped", stats.Skipped, "unplayable", stats.Unplayable)
 	for _, rejected := range stats.Rejected {
 		log.Warn("file rejected at scan time", "err", rejected.Error())
 	}

@@ -118,15 +118,16 @@ func (q *Queue) Run(ctx context.Context) error {
 			return err
 		}
 
-		id, path, artist, title, duration, err := q.nextTrack(ctx)
+		w, err := q.nextTrack(ctx)
 		if errors.Is(err, errNoWork) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
+		path := w.path
 
-		if err := q.enrichOne(ctx, id, path, artist, title, duration); err != nil {
+		if err := q.enrichOne(ctx, w); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -148,22 +149,46 @@ func (q *Queue) Run(ctx context.Context) error {
 
 var errNoWork = errors.New("enrich: nothing left to do")
 
+// work is one track waiting for a dossier.
+//
+// A struct rather than eight return values, which is what adding album and year
+// to the previous signature would have meant.
+type work struct {
+	id       int64
+	path     string
+	artist   string
+	title    string
+	album    string
+	year     int
+	duration float64
+}
+
 // nextTrack picks the lowest-numbered playable track with no dossier.
-func (q *Queue) nextTrack(ctx context.Context) (id int64, path, artist, title string, duration float64, err error) {
+//
+// ALBUM AND YEAR ARE SELECTED HERE, and they were not before. The scanner reads
+// both from every file's tags and stores them -- 93% of this library has an
+// album and 67% a year -- and the enricher never saw either, so BuildPrompt
+// printed "album:" and "year: 0" into a metadata block that already had lines
+// waiting for them. Produced and never consumed, at the point where it costs
+// the DJ the most: the release is a PER-TRACK fact, and per-track facts are the
+// only ones that do not collide when the same artist comes round again.
+func (q *Queue) nextTrack(ctx context.Context) (work, error) {
+	var w work
 	row := q.Store.DB().QueryRowContext(ctx, `
-		SELECT id, path, COALESCE(artist,''), COALESCE(title,''), COALESCE(duration_s,0)
+		SELECT id, path, COALESCE(artist,''), COALESCE(title,''),
+		       COALESCE(album,''), COALESCE(year,0), COALESCE(duration_s,0)
 		FROM tracks
 		WHERE playable = 1 AND id NOT IN (SELECT track_id FROM dossiers)
 		ORDER BY id
 		LIMIT 1`)
 
-	switch err := row.Scan(&id, &path, &artist, &title, &duration); {
+	switch err := row.Scan(&w.id, &w.path, &w.artist, &w.title, &w.album, &w.year, &w.duration); {
 	case err == nil:
-		return id, path, artist, title, duration, nil
+		return w, nil
 	case errors.Is(err, sql.ErrNoRows):
-		return 0, "", "", "", 0, errNoWork
+		return work{}, errNoWork
 	default:
-		return 0, "", "", "", 0, fmt.Errorf("enrich: selecting work: %w", err)
+		return work{}, fmt.Errorf("enrich: selecting work: %w", err)
 	}
 }
 
@@ -172,8 +197,15 @@ func (q *Queue) nextTrack(ctx context.Context) (id int64, path, artist, title st
 // A dossier row is written even when everything fails, because a missing row is
 // indistinguishable from unfinished work and the queue would pick the same
 // track forever.
-func (q *Queue) enrichOne(ctx context.Context, id int64, path, artist, title string, duration float64) error {
-	in := TrackInput{Artist: artist, Title: title, DurationS: duration}
+func (q *Queue) enrichOne(ctx context.Context, w work) error {
+	id, path, artist, title, duration := w.id, w.path, w.artist, w.title, w.duration
+	in := TrackInput{
+		Artist:    artist,
+		Title:     title,
+		Album:     w.album,
+		Year:      w.year,
+		DurationS: w.duration,
+	}
 
 	// Count what this track costs. RecordEnrichmentCost has existed since the
 	// coverage report was built and was called by NOTHING, which is why every

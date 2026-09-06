@@ -140,8 +140,14 @@ func TestPromptDurationBudgetInPrompt(t *testing.T) {
 	if want := WordTarget(9.0); want != 22 && want != 23 {
 		t.Fatalf("WordTarget(9.0) = %d, want about 22", want)
 	}
-	if !strings.Contains(got, fmt.Sprintf("about %d words", WordTarget(9.0))) {
-		t.Errorf("the prompt does not state the word target:\n%s", got)
+	// A CEILING, not an approximation. "about N words" was measured over 49
+	// breaks as permission to overshoot -- ramps ran 1.5x their target and
+	// outros 2.1x -- so the wording is part of the contract, not decoration.
+	if !strings.Contains(got, fmt.Sprintf("%d words MAXIMUM", WordTarget(9.0))) {
+		t.Errorf("the prompt does not state the word target as a ceiling:\n%s", got)
+	}
+	if strings.Contains(got, fmt.Sprintf("about %d words", WordTarget(9.0))) {
+		t.Error("the prompt approximates the length again; that is the thing that overran")
 	}
 	if !strings.Contains(got, "9.0 seconds") {
 		t.Error("the prompt does not state the speaking window")
@@ -163,11 +169,19 @@ func TestPromptEmptyDossierProducesPersonalityOnlyPrompt(t *testing.T) {
 	if !strings.Contains(low, "no facts") {
 		t.Error("the prompt does not say the DJ has no facts")
 	}
-	if !strings.Contains(low, "personality only") {
-		t.Error("the prompt does not instruct personality-only talk")
+	// Asserted by MEANING, not by phrase. The empty-dossier block was rewritten
+	// to let the jock be entertaining about not knowing rather than merely
+	// terse, and pinning its exact wording would make every future rewrite look
+	// like a regression. What must never change is the last clause: a guess the
+	// listener can hear is a guess is entertainment, and the same sentence said
+	// flatly is a lie they will repeat.
+	if !strings.Contains(low, "may not do is state something as though you knew it") {
+		t.Error("the prompt does not forbid stating an invented detail as fact")
 	}
-	if !strings.Contains(low, "inventing") {
-		t.Error("the prompt does not forbid inventing a detail")
+	for _, forbidden := range []string{"year", "place", "label", "band member"} {
+		if !strings.Contains(low, forbidden) {
+			t.Errorf("the prompt does not name %q among the details that may not be invented", forbidden)
+		}
 	}
 	if strings.Contains(got, "  fact: ") {
 		t.Error("the prompt lists facts despite there being no dossier")

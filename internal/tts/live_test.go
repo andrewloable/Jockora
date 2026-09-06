@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/andrewloable/jockora/internal/dj"
 	"github.com/andrewloable/jockora/internal/mix"
 )
 
@@ -201,6 +202,54 @@ func TestLiveKokoroRender(t *testing.T) {
 		// bound means the resample or the synthesis went wrong.
 		if d < 0.5 || d > 20 {
 			t.Errorf("line %d rendered %.2fs, which is not a break length", i, d)
+		}
+	}
+}
+
+// TestLiveKokoroSpeaksEveryPersonaVoice checks that every voice the roster names
+// actually exists in the operator's voice pack.
+//
+// A voice id that Kokoro does not recognise fails the synthesis with a 503 and
+// the break is dropped. That is invisible: the station stays on air, plays
+// music, and simply never talks. It happened once, for twenty breaks out of
+// twenty, and the test that was supposed to catch it passed throughout. So the
+// check is by NAME, per persona, and it fails loudly.
+//
+// It cannot be an ordinary unit test: the voice pack is operator-supplied and
+// deliberately not vendored, so it lives behind the same env var as the rest of
+// the live tests.
+func TestLiveKokoroSpeaksEveryPersonaVoice(t *testing.T) {
+	python := os.Getenv("JOCKORA_LIVE_TTS")
+	if python == "" {
+		t.Skip("set JOCKORA_LIVE_TTS to a python3.10 interpreter with kokoro-onnx installed")
+	}
+
+	personas, err := dj.LoadPersonas("../../personas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(personas) == 0 {
+		t.Fatal("no personas loaded; this test would pass by having nothing to check")
+	}
+
+	s, err := Start(context.Background(), Config{
+		Command:      []string{python, "../../sidecar/kokoro_server.py"},
+		StartTimeout: 120 * time.Second,
+		Log:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close() //nolint:errcheck // test teardown
+
+	for _, p := range personas {
+		wav, err := s.Synthesize(context.Background(), "Testing one two.", p.VoiceID())
+		if err != nil {
+			t.Errorf("%s: voice %q cannot speak: %v", p.ID(), p.VoiceID(), err)
+			continue
+		}
+		if len(wav) == 0 {
+			t.Errorf("%s: voice %q produced no audio", p.ID(), p.VoiceID())
 		}
 	}
 }

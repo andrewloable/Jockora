@@ -40,7 +40,7 @@ func runScan(ctx context.Context, dbPath, root string, log *slog.Logger) error {
 		return err
 	}
 	log.Info("scan complete", "root", root,
-		"found", stats.Found, "added", stats.Added, "updated", stats.Updated, "unplayable", stats.Unplayable)
+		"found", stats.Found, "added", stats.Added, "updated", stats.Updated, "skipped", stats.Skipped, "unplayable", stats.Unplayable)
 	return nil
 }
 
@@ -65,7 +65,7 @@ func runCoverage(ctx context.Context, dbPath, root string, sample int, log *slog
 	if err != nil {
 		return err
 	}
-	log.Info("scanned", "root", root, "found", stats.Found, "added", stats.Added, "updated", stats.Updated, "unplayable", stats.Unplayable)
+	log.Info("scanned", "root", root, "found", stats.Found, "added", stats.Added, "updated", stats.Updated, "skipped", stats.Skipped, "unplayable", stats.Unplayable)
 
 	// Random, not the first N. An alphabetical prefix is one artist and one
 	// language, and the whole point is to sample the material LRCLIB is WORST
