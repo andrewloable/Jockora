@@ -6,6 +6,8 @@ package encode
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -285,4 +287,67 @@ func kill(t *testing.T, s *Supervisor) {
 	}
 	// Give the OS a moment to tear the pipe down, so the next write really fails.
 	time.Sleep(100 * time.Millisecond)
+}
+
+// TestSupervisorDiskFullDegradesAndRecovers is the invariant this whole file
+// protects, at its hardest moment. A full disk must not crash the server, must
+// be visible to an operator, and must resolve itself the moment space returns.
+func TestSupervisorDiskFullDegradesAndRecovers(t *testing.T) {
+	s := &Supervisor{
+		cfg: Config{SegmentDir: t.TempDir()},
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	// A writable directory: a failed write is not the disk's fault.
+	s.classifyLocked(errors.New("write |1: broken pipe"))
+	if got := s.Degraded(); got != "" {
+		t.Errorf("Degraded = %q on a writable directory, want none", got)
+	}
+
+	// A directory that cannot be written to at all.
+	s.cfg.SegmentDir = filepath.Join(t.TempDir(), "does-not-exist")
+	s.classifyLocked(errors.New("write |1: broken pipe"))
+	if got := s.Degraded(); got == "" {
+		t.Error("Degraded is empty with an unwritable segment directory")
+	}
+
+	// ffmpeg's own words, arriving across the process boundary where the errno
+	// did not survive.
+	s.cfg.SegmentDir = ""
+	s.classifyLocked(errors.New("av_interleaved_write_frame(): No space left on device"))
+	if got := s.Degraded(); got != "disk full" {
+		t.Errorf("Degraded = %q for ffmpeg's ENOSPC message, want %q", got, "disk full")
+	}
+
+	// And it clears the moment a write succeeds again, without a restart.
+	s.mu.Lock()
+	s.degraded = "disk full"
+	s.mu.Unlock()
+	s.cfg.SegmentDir = t.TempDir()
+	s.classifyLocked(nil)
+	if got := s.Degraded(); got != "" {
+		t.Errorf("Degraded = %q after the disk cleared, want none", got)
+	}
+}
+
+// TestSupervisorProbeChecksTheSegmentDirectory covers what can actually be
+// checked here: a healthy directory passes, a missing one fails, and an unset
+// one is not an error.
+//
+// It does NOT cover the case the probe was written for. probeWritable writes
+// 4096 bytes rather than only creating the file, because a full filesystem can
+// still hand out an inode and a probe that only opened one would report health
+// on a disk with no space at all. Simulating ENOSPC portably needs a loopback
+// filesystem and root, so THAT LINE IS DEFENSIVE AND UNTESTED -- said plainly
+// here rather than hidden behind a test name that implies otherwise.
+func TestSupervisorProbeChecksTheSegmentDirectory(t *testing.T) {
+	if err := probeWritable(t.TempDir()); err != nil {
+		t.Errorf("probeWritable on a healthy directory: %v", err)
+	}
+	if err := probeWritable(filepath.Join(t.TempDir(), "nope")); err == nil {
+		t.Error("probeWritable said a missing directory was fine")
+	}
+	if err := probeWritable(""); err != nil {
+		t.Errorf("probeWritable with no directory configured: %v", err)
+	}
 }

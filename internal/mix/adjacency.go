@@ -13,6 +13,10 @@ const (
 	PlacementRamp
 	// PlacementOutro talks over the instrumental tail of the outgoing one.
 	PlacementOutro
+	// PlacementSpan runs from the outgoing track's tail, through the crossfade,
+	// into the incoming track's intro. The classic segue, and the longest
+	// window available: its budget is outro + fade + ramp.
+	PlacementSpan
 )
 
 func (p Placement) String() string {
@@ -21,6 +25,8 @@ func (p Placement) String() string {
 		return "ramp"
 	case PlacementOutro:
 		return "outro"
+	case PlacementSpan:
+		return "span"
 	default:
 		return "between"
 	}
@@ -80,9 +86,15 @@ func (t Transition) WithDroppedBreak() Transition {
 // PlaceBreak resolves where a break can actually go, given the transition it
 // was scheduled against.
 //
-// A gapless splice has no fade window to talk over, so ramp and outro are not
-// available there. The break is relocated rather than dropped: breaks are
+// A gapless splice has no fade window to talk over, so ramp, outro and span are
+// not available there. The break is relocated rather than dropped: breaks are
 // optional, but silently losing one is not the same as moving it.
+//
+// In practice station.Cadence refuses to create a slot at a gapless boundary at
+// all, so this branch should never be reached for a slot the scheduler made --
+// moving the break to a different BOUNDARY is a better answer than moving it
+// within one, because "between" at a gapless boundary would insert exactly the
+// gap the flag exists to prevent. This stays as a second line of defence.
 func PlaceBreak(want Placement, t Transition) Placement {
 	if t.Adjacent() {
 		return PlacementBetween

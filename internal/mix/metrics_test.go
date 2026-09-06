@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -265,5 +266,54 @@ func TestMixerPrebufferCanBeDisabled(t *testing.T) {
 	}
 	if m.SamplePos() < SampleRate {
 		t.Error("the mixer did not run with the prebuffer disabled")
+	}
+}
+
+// TestMixerLogsUnderrunsAsTheyHappen: silence-fill is this system's signature
+// failure -- nothing sounds broken. Reporting it only in the shutdown summary
+// makes a decoder falling behind invisible for the whole run, which is exactly
+// the silent degradation the observability contract exists to surface.
+func TestMixerLogsUnderrunsAsTheyHappen(t *testing.T) {
+	var logs bytes.Buffer
+	m := newMetricsMixer(t, nil, 4800)
+	m.Log = slog.New(slog.NewJSONHandler(&logs, nil))
+	m.PrebufferFrames = -1 // go on air immediately, with a dry ring
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m.stopAfterFrames(cancel, SampleRate)
+	if err := m.Run(ctx); err != nil && ctx.Err() == nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	out := logs.String()
+	if !strings.Contains(out, `"event":"ring_underrun"`) {
+		t.Fatalf("a dry ring produced no ring_underrun record:\n%s", out)
+	}
+	if !strings.Contains(out, "frames_filled") {
+		t.Error("the record does not say how many real frames were available")
+	}
+
+	// Logged once per episode, not once per block: a sustained stall would
+	// otherwise emit a dozen lines a second and drown everything else.
+	if n := strings.Count(out, `"event":"ring_underrun"`); n > 3 {
+		t.Errorf("%d underrun records for one continuous stall; it should log the episode, not every block", n)
+	}
+}
+
+// TestMixerDoesNotLogUnderrunsWhenHealthy keeps the log quiet on a good run, or
+// the record stops meaning anything.
+func TestMixerDoesNotLogUnderrunsWhenHealthy(t *testing.T) {
+	var logs bytes.Buffer
+	m := newMetricsMixer(t, nil, 4800)
+	m.Log = slog.New(slog.NewJSONHandler(&logs, nil))
+	m.Ring.Write(sine(4*SampleRate, 440, 0.3))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m.stopAfterFrames(cancel, 2*SampleRate)
+	if err := m.Run(ctx); err != nil && ctx.Err() == nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(logs.String(), "ring_underrun") {
+		t.Errorf("a healthy run logged an underrun:\n%s", logs.String())
 	}
 }

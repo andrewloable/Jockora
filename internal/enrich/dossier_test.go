@@ -513,3 +513,118 @@ func TestDossierNoLyricsMeansNoStripping(t *testing.T) {
 		t.Error("stripping ran with no lyrics supplied")
 	}
 }
+
+func TestLoadDossierRoundTrips(t *testing.T) {
+	s := queueStore(t, 1)
+	want := Dossier{
+		SubjectSummary: "a song about leaving somewhere in a hurry",
+		StationTags:    []string{"synthwave"},
+		Confidence:     ConfidenceHigh,
+	}
+	if err := StoreDossier(context.Background(), s, 1, want); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := LoadDossier(context.Background(), s, 1)
+	if err != nil || !ok {
+		t.Fatalf("LoadDossier: ok=%v err=%v", ok, err)
+	}
+	if got.SubjectSummary != want.SubjectSummary || got.Confidence != want.Confidence {
+		t.Errorf("round trip lost data: %+v", got)
+	}
+}
+
+// A track mid-enrichment has no dossier, which means personality-only talk --
+// a normal state, not a failure.
+func TestLoadDossierMissingIsNotAnError(t *testing.T) {
+	s := queueStore(t, 1)
+	got, ok, err := LoadDossier(context.Background(), s, 1)
+	if err != nil {
+		t.Fatalf("LoadDossier on an unenriched track: %v", err)
+	}
+	if ok {
+		t.Error("reported a dossier for a track that has none")
+	}
+	if got.Confidence != ConfidenceNone {
+		t.Errorf("confidence = %q, want %q", got.Confidence, ConfidenceNone)
+	}
+}
+
+// TestLoadDossierUnreadableRowIsAnError: a row that will not parse must not
+// quietly become an empty dossier, or the DJ talks as if the track were
+// unenriched with nothing anywhere saying why.
+func TestLoadDossierUnreadableRowIsAnError(t *testing.T) {
+	s := queueStore(t, 1)
+	if _, err := s.DB().Exec(
+		`INSERT INTO dossiers (track_id, json, confidence, created_at) VALUES (1, '{not json', 'high', 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadDossier(context.Background(), s, 1); err == nil {
+		t.Fatal("an unparseable dossier row was reported as no dossier")
+	}
+}
+
+// TestPlaceholderEchoIsStripped guards a hole that only a live run found.
+// Every value here was actually produced by gemma-4-E4B-it against the real
+// prompt, at confidence "high" -- so each one would have cleared the 0.6
+// groundedness gate and been asserted on air as a fact.
+func TestPlaceholderEchoIsStripped(t *testing.T) {
+	in := Dossier{
+		SubjectSummary: "A summary of the song.",
+		ArtistFacts:    []string{"<a complete sentence from the researched facts below>", "Linkin Park is an American rock band."},
+		Themes:         []string{"station tags", "isolation"},
+		NotableLine:    "<a line from the lyrics>",
+		Confidence:     ConfidenceHigh,
+	}
+	got := stripPlaceholderEcho(in)
+
+	if got.SubjectSummary != "" {
+		t.Errorf("SubjectSummary = %q, want blank", got.SubjectSummary)
+	}
+	if got.NotableLine != "" {
+		t.Errorf("NotableLine = %q, want blank", got.NotableLine)
+	}
+	if len(got.ArtistFacts) != 1 || got.ArtistFacts[0] != "Linkin Park is an American rock band." {
+		t.Errorf("ArtistFacts = %q, want only the real fact kept", got.ArtistFacts)
+	}
+	if len(got.Themes) != 1 || got.Themes[0] != "isolation" {
+		t.Errorf("Themes = %q, want only the real theme kept", got.Themes)
+	}
+}
+
+// A real fact that merely mentions the words must survive. Over-stripping would
+// silence a DJ that had something true to say.
+func TestPlaceholderEchoKeepsRealContent(t *testing.T) {
+	in := Dossier{
+		SubjectSummary: "A summary of the song would not begin like this, but a real one about grief and distance does.",
+		ArtistFacts:    []string{"The band's artist facts page lists three founding members who met at school."},
+		Themes:         []string{"grief", "distance"},
+	}
+	got := stripPlaceholderEcho(in)
+	if got.SubjectSummary == "" {
+		t.Error("blanked a real summary that happens to contain the phrase")
+	}
+	if len(got.ArtistFacts) != 1 {
+		t.Errorf("dropped a real fact: %q", got.ArtistFacts)
+	}
+	if len(got.Themes) != 2 {
+		t.Errorf("dropped real themes: %q", got.Themes)
+	}
+}
+
+// TestEmptyDossierCannotClaimConfidence: the enrichment report counts a
+// high-confidence dossier as a well-enriched track, so a library that produced
+// nothing useful would look fully enriched and the one number an operator would
+// check is the one that lies. Observed on real gemma-4-E4B-it output.
+func TestEmptyDossierCannotClaimConfidence(t *testing.T) {
+	got := stripPlaceholderEcho(Dossier{Confidence: ConfidenceHigh})
+	if got.Confidence != ConfidenceNone {
+		t.Errorf("an empty dossier reported confidence %q, want %q", got.Confidence, ConfidenceNone)
+	}
+
+	// A single real field is enough to keep the model's own judgement.
+	got = stripPlaceholderEcho(Dossier{StationTags: []string{"rock"}, Confidence: ConfidenceHigh})
+	if got.Confidence != ConfidenceHigh {
+		t.Errorf("confidence = %q on a dossier with a station tag, want it left alone", got.Confidence)
+	}
+}

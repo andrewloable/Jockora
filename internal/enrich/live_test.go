@@ -6,10 +6,14 @@ package enrich
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/andrewloable/jockora/internal/tts"
 )
 
 // TestLiveDossier runs the real client against a real llama-server.
@@ -119,5 +123,52 @@ and none of them were kind`,
 	if strings.Contains(strings.ToLower(d.SubjectSummary), "harbour lights") &&
 		len(d.SubjectSummary) < 40 {
 		t.Errorf("subject_summary is still just the title: %q", d.SubjectSummary)
+	}
+}
+
+// TestLiveOnsetEndpoint exercises the real sidecar's /onset against a real
+// file. The unit tests above run against a fake HTTP server and prove the Go
+// arithmetic; they cannot tell whether librosa is installed, whether ffmpeg can
+// decode the container, or whether the endpoint is even wired up.
+//
+//	JOCKORA_LIVE_TTS=/path/to/venv/bin/python \
+//	JOCKORA_LIVE_ONSET_TRACK=/path/to/a/song.mp3 \
+//	go test ./internal/enrich/ -run TestLiveOnset -v -timeout 10m
+func TestLiveOnsetEndpoint(t *testing.T) {
+	python := os.Getenv("JOCKORA_LIVE_TTS")
+	track := os.Getenv("JOCKORA_LIVE_ONSET_TRACK")
+	if python == "" || track == "" {
+		t.Skip("set JOCKORA_LIVE_TTS and JOCKORA_LIVE_ONSET_TRACK to run")
+	}
+
+	s, err := tts.Start(context.Background(), tts.Config{
+		Command:      []string{python, "../../sidecar/kokoro_server.py"},
+		StartTimeout: 180 * time.Second,
+		Log:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("starting sidecar: %v", err)
+	}
+	defer s.Close() //nolint:errcheck // test teardown
+
+	start := time.Now()
+	ramp, err := NewOnsetClient("http://"+s.Addr(), nil).
+		FetchRamp(context.Background(), track, 0)
+	if err != nil {
+		t.Fatalf("FetchRamp: %v", err)
+	}
+	t.Logf("LIVE ONSET: ramp %.2fs outro %.2fs confidence %q in %s",
+		ramp.RampS, ramp.OutroS, ramp.Confidence, time.Since(start).Round(time.Millisecond))
+
+	if ramp.Confidence != ConfidenceAnalysis && ramp.Confidence != ConfidenceNone {
+		t.Errorf("confidence = %q, want %q or %q", ramp.Confidence, ConfidenceAnalysis, ConfidenceNone)
+	}
+	if ramp.Confidence == ConfidenceAnalysis {
+		if ramp.RampS <= 0 || ramp.RampS > MaxAnalysisRamp {
+			t.Errorf("RampS = %v, outside (0, %v]", ramp.RampS, MaxAnalysisRamp)
+		}
+		if ramp.OutroS <= 0 || ramp.OutroS > MaxAnalysisRamp {
+			t.Errorf("OutroS = %v, outside (0, %v]", ramp.OutroS, MaxAnalysisRamp)
+		}
 	}
 }

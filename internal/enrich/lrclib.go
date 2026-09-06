@@ -80,6 +80,16 @@ type lrcResponse struct {
 func (c *LRCLib) FetchRamp(ctx context.Context, artist, title string, duration float64) (Ramp, error) {
 	none := Ramp{Confidence: ConfidenceNone}
 
+	// An untagged track is an ANSWER, not a failed lookup. LRCLIB needs both an
+	// artist and a title and returns 400 without them, which a caller reads as
+	// an error and skips -- silently dropping that track out of the coverage
+	// denominator. On a real library that flatters the coverage figure, and it
+	// flatters it in the wrong direction: a track with no tags is precisely one
+	// that only audio analysis can ever place a break on.
+	if strings.TrimSpace(artist) == "" || strings.TrimSpace(title) == "" {
+		return none, nil
+	}
+
 	q := url.Values{}
 	q.Set("artist_name", artist)
 	q.Set("track_name", title)
@@ -125,6 +135,11 @@ func (c *LRCLib) FetchRamp(ctx context.Context, artist, title string, duration f
 // and no caller should ever put it in a struct that does.
 func (c *LRCLib) FetchLyrics(ctx context.Context, artist, title string, duration float64) (string, Ramp, error) {
 	none := Ramp{Confidence: ConfidenceNone}
+
+	// Same reason as FetchRamp: nothing to ask about.
+	if strings.TrimSpace(artist) == "" || strings.TrimSpace(title) == "" {
+		return "", none, nil
+	}
 
 	q := url.Values{}
 	q.Set("artist_name", artist)
@@ -207,9 +222,18 @@ func DeriveRamp(syncedLyrics string, duration float64) Ramp {
 	}
 
 	first, last := stamps[0], stamps[len(stamps)-1]
-	ramp := first - SafetyMargin
-	outro := duration - last
+	return clampRamp(first-SafetyMargin, duration-last, duration, ConfidenceLRC)
+}
 
+// clampRamp validates two derived numbers and stamps their provenance.
+//
+// Shared by the LRC path and the audio-analysis path deliberately. Both feed
+// placement maths directly, for different reasons -- one is community-submitted
+// data, the other is a spectral guess -- and a copy of these rules in each would
+// eventually disagree with itself. Any failure yields ConfidenceNone, which
+// means personality-only talk rather than a guess about when the singing starts.
+func clampRamp(ramp, outro, duration float64, confidence string) Ramp {
+	none := Ramp{Confidence: ConfidenceNone}
 	switch {
 	case duration <= 0:
 		return none
@@ -221,12 +245,14 @@ func DeriveRamp(syncedLyrics string, duration float64) Ramp {
 		return none
 	case outro >= duration:
 		return none
+	case ramp+outro >= duration: // the two windows would overlap
+		return none
 	}
 
 	return Ramp{
 		RampS:      round2(ramp),
 		OutroS:     round2(outro),
-		Confidence: ConfidenceLRC,
+		Confidence: confidence,
 	}
 }
 

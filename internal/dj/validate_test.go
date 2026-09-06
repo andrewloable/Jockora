@@ -311,3 +311,78 @@ func TestValidateGoldenCollisionOutsideInjectionWindow(t *testing.T) {
 			"the validator and the prompt are looking at the same narrow window", err)
 	}
 }
+
+// TestGenerateNamesTheRealDropReason: reporting a malformed response as
+// repetition points a reader at the wrong half of the system -- a caller
+// checking errors.Is(err, ErrBreakRepetitive) would treat a broken model as a
+// chatty one.
+func TestGenerateNamesTheRealDropReason(t *testing.T) {
+	v := &Validator{
+		Writer: &scriptedWriter{replies: []string{"not json at all", "still not json"}},
+		Said:   saidStore(t),
+	}
+	_, err := v.Generate(context.Background(), "prompt", nil, nil, nil)
+	if err == nil {
+		t.Fatal("accepted two malformed responses")
+	}
+	if errors.Is(err, ErrBreakRepetitive) {
+		t.Errorf("error = %v, reported as repetition when nothing was repeated", err)
+	}
+	if !errors.Is(err, ErrBreakDropped) {
+		t.Errorf("error = %v, want ErrBreakDropped", err)
+	}
+	if !strings.Contains(err.Error(), string(DropBadJSON)) {
+		t.Errorf("error = %v, want it to name %q", err, DropBadJSON)
+	}
+}
+
+// TestBreakSchemaForbidsAnEmptyBody: required-but-empty is what the schema
+// allowed, and the model took that option on 12 of 35 live attempts.
+func TestBreakSchemaForbidsAnEmptyBody(t *testing.T) {
+	schema := BreakSchema(nil, nil, nil)
+	props, _ := schema["properties"].(map[string]any)
+	body, _ := props["body"].(map[string]any)
+	if body["minLength"] != 1 {
+		t.Errorf("body minLength = %v, want 1: without it an empty break is schema-valid", body["minLength"])
+	}
+}
+
+// TestGenerateRejectsInstructionEcho: the said-lines index catches the SECOND
+// occurrence as repetition, which means the first one airs. Measured live, this
+// was the single largest source of drops -- and every one of those would have
+// been a listener hearing the prompt read out in a DJ voice.
+func TestGenerateRejectsInstructionEcho(t *testing.T) {
+	for _, text := range []string{
+		"State only facts listed above.",
+		"I will state only the facts listed above and not invent anything.",
+		"Return only the JSON object.",
+	} {
+		if _, echoed := echoesInstructions(text); !echoed {
+			t.Errorf("echoesInstructions(%q) = false, want true", text)
+		}
+	}
+	for _, text := range []string{
+		"That was Linkin Park, and the state of things is about to get louder.",
+		"Three in the morning and nobody is listening but you.",
+	} {
+		if phrase, echoed := echoesInstructions(text); echoed {
+			t.Errorf("echoesInstructions(%q) matched %q on a real break", text, phrase)
+		}
+	}
+}
+
+// TestGenerateRejectsModelScaffolding. A break that is chat-template tokens
+// rather than English aired in a live run -- "}<tool_call|>```json" -- because
+// every existing check passed: it parsed, asserted no facts, collided with
+// nothing, and was the right length.
+func TestGenerateRejectsModelScaffolding(t *testing.T) {
+	for _, text := range []string{
+		"}<tool_call|>```json }<tool_call|>```json",
+		"```json {\"opening\": \"hi\"}",
+		"<start_of_turn>model",
+	} {
+		if _, echoed := echoesInstructions(text); !echoed {
+			t.Errorf("echoesInstructions(%q) = false; this would have aired", text)
+		}
+	}
+}

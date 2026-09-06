@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/andrewloable/jockora/internal/enrich"
@@ -19,6 +20,16 @@ import (
 // about it is audible as a fault.
 var ErrBreakRepetitive = errors.New("dj: break repeated something already said")
 
+// ErrBreakDropped means a break could not be produced, for a reason the wrapped
+// error names.
+//
+// It exists because Generate used to report EVERY failure as ErrBreakRepetitive,
+// including malformed JSON and model errors. A caller asking errors.Is(err,
+// ErrBreakRepetitive) would then treat a broken model as a chatty one, and the
+// log line said "break repeated something already said: not valid json" -- an
+// answer that points at the wrong half of the system.
+var ErrBreakDropped = errors.New("dj: break dropped")
+
 // MaxAttempts is the ceiling on generation attempts per break.
 //
 // Two, not three. A third call pushes past the lookahead budget and the break
@@ -30,9 +41,12 @@ type DropReason string
 
 const (
 	DropRepetitive DropReason = "repetitive"
-	DropUngrounded DropReason = "ungrounded"
-	DropBadJSON    DropReason = "bad_json"
-	DropLLMError   DropReason = "llm_error"
+	// DropInstructionEcho means the model spoke the prompt back instead of
+	// writing a break.
+	DropInstructionEcho DropReason = "instruction_echo"
+	DropUngrounded      DropReason = "ungrounded"
+	DropBadJSON         DropReason = "bad_json"
+	DropLLMError        DropReason = "llm_error"
 )
 
 // Writer produces one break from an assembled prompt and schema.
@@ -149,6 +163,17 @@ func (v *Validator) Generate(ctx context.Context, prompt string, prev, cur, next
 			continue
 		}
 
+		// The model sometimes recites the instructions instead of following
+		// them. The said-lines index catches the SECOND occurrence as
+		// repetition, which means the first one airs -- a listener hearing
+		// "state only facts listed above" in a DJ voice. Measured live, this
+		// was the single largest source of drops.
+		if phrase, echoed := echoesInstructions(b.Text()); echoed {
+			lastReason = DropInstructionEcho
+			lastErr = fmt.Errorf("%w: the break recites the prompt: %q", ErrBreakDropped, phrase)
+			continue
+		}
+
 		hit, gram, err := v.Said.CheckCollision(ctx, b.Text())
 		if err != nil {
 			return nil, err
@@ -173,5 +198,51 @@ func (v *Validator) Generate(ctx context.Context, prompt string, prev, cur, next
 		}
 		return nil, ErrBreakRepetitive
 	}
-	return nil, fmt.Errorf("%w: %v", ErrBreakRepetitive, lastErr)
+	return nil, fmt.Errorf("%w (%s): %v", ErrBreakDropped, lastReason, lastErr)
+}
+
+// instructionPhrases are fragments of the writing prompt that must never be
+// spoken on air. Kept deliberately short and specific: a phrase here is one no
+// DJ would say and every prompt does.
+var instructionPhrases = []string{
+	"only facts listed",
+	"facts listed above",
+	"state only",
+	"do not invent",
+	"asserted_facts",
+	"the following facts",
+	"return only the json",
+	"json object",
+	"word target",
+	"speaking window",
+	// Persona-card scaffolding. A small model hands these back as content when
+	// the card is in the prompt at all.
+	"you never do these things",
+	"never mentions the weather",
+	"backsells like a person",
+	"like someone talking to one person",
+	"announcer's script",
+	"brand name",
+	"the name of the business",
+	// Model scaffolding that is not English at all. Observed live: a break came
+	// back as "}<tool_call|>```json }<tool_call|>```json" and aired, because
+	// nothing checked that a break was made of words.
+	"<tool_call",
+	"</tool_call",
+	"```",
+	"<|im_start|",
+	"<|im_end|",
+	"<start_of_turn>",
+	"<end_of_turn>",
+}
+
+// echoesInstructions reports whether a break is reciting its own prompt.
+func echoesInstructions(text string) (string, bool) {
+	lower := strings.ToLower(text)
+	for _, phrase := range instructionPhrases {
+		if strings.Contains(lower, phrase) {
+			return phrase, true
+		}
+	}
+	return "", false
 }

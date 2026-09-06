@@ -14,6 +14,9 @@ import (
 	"regexp"
 	"strconv"
 	"sync"
+
+	"github.com/andrewloable/jockora/internal/errs"
+	"github.com/andrewloable/jockora/internal/obs"
 )
 
 // ErrSupervisorStopped is returned once the stream has been shut down.
@@ -35,6 +38,7 @@ type Supervisor struct {
 	enc      *Encoder
 	restarts int
 	stopped  bool
+	degraded string
 }
 
 // StartSupervisor cold-starts a stream and supervises it.
@@ -71,20 +75,87 @@ func (s *Supervisor) Write(p []byte) (int, error) {
 
 	if s.enc != nil {
 		if _, err := s.enc.Writer().Write(p); err == nil {
+			s.degraded = ""
 			return len(p), nil
 		} else {
 			s.log.Warn("encoder write failed; restarting ffmpeg", "err", err)
+			s.classifyLocked(err)
 		}
 	}
 
 	if err := s.restartLocked(); err != nil {
 		s.log.Error("could not restart the encoder", "err", err)
+		s.classifyLocked(err)
 		return len(p), nil // the mixer keeps going regardless
 	}
 	if _, err := s.enc.Writer().Write(p); err != nil {
 		s.log.Warn("first write to the new encoder failed", "err", err)
 	}
 	return len(p), nil
+}
+
+// classifyLocked works out WHY the encoder failed, so /now.json can say.
+//
+// A dead encoder always looks the same from here -- a broken pipe -- because
+// ffmpeg is the process that touches the disk, and its errno does not cross the
+// boundary. So the segment directory is probed directly. That is not a
+// heuristic: it is the same question ffmpeg just failed to answer, asked by the
+// process that can still report it.
+//
+// A full disk MUST NOT crash the server. A disk that fills and is then cleared
+// -- by logrotate, by a cleanup job, by somebody noticing -- should find the
+// stream still running and resume. Crashing turns a five-minute problem into a
+// listener who left.
+func (s *Supervisor) classifyLocked(err error) {
+	if probeErr := probeWritable(s.cfg.SegmentDir); probeErr != nil {
+		if errs.IsDiskFull(probeErr) {
+			if s.degraded == "" {
+				// Error, not warn: this one needs a person, and it is the only
+				// failure here that does not fix itself.
+				s.log.Error("SEGMENT DIRECTORY IS FULL; the stream keeps mixing and will resume when space is freed",
+					"dir", s.cfg.SegmentDir, "err", probeErr)
+			}
+			s.degraded = "disk full"
+			return
+		}
+		s.degraded = "segment directory not writable"
+		return
+	}
+	if errs.IsDiskFull(err) {
+		s.degraded = "disk full"
+		return
+	}
+	s.degraded = ""
+}
+
+// probeWritable asks the segment directory whether it can still take bytes.
+func probeWritable(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	f, err := os.CreateTemp(dir, ".probe-*")
+	if err != nil {
+		return fmt.Errorf("%w: %v", errs.ErrSegmentWrite, err)
+	}
+	name := f.Name()
+	defer os.Remove(name) //nolint:errcheck // best effort
+	// A probe that writes nothing proves nothing: an inode is available on a
+	// full filesystem, and CreateTemp alone would report health.
+	if _, err := f.Write(make([]byte, 4096)); err != nil {
+		f.Close() //nolint:errcheck // already failing
+		return fmt.Errorf("%w: %v", errs.ErrSegmentWrite, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("%w: %v", errs.ErrSegmentWrite, err)
+	}
+	return nil
+}
+
+// Degraded reports why the encoder is unhealthy, or "" when it is fine.
+func (s *Supervisor) Degraded() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.degraded
 }
 
 // Restarts reports how many times ffmpeg has been replaced.
@@ -134,7 +205,7 @@ func (s *Supervisor) restartLocked() error {
 
 	s.enc = enc
 	s.restarts++
-	s.log.Warn("ffmpeg restarted", "start_number", cfg.StartNumber, "restarts", s.restarts)
+	obs.New(s.log).EncoderRestart(s.restarts, "start_number", cfg.StartNumber)
 	return nil
 }
 

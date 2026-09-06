@@ -340,3 +340,37 @@ func TestLRCFetchLyricsNotFoundIsEmpty(t *testing.T) {
 		t.Errorf("text=%q ramp=%+v, want empty", text, ramp)
 	}
 }
+
+// TestLRCUntaggedTrackIsNoCoverageNotAnError is a measurement correctness test,
+// not a politeness one.
+//
+// A track with no artist or title tag cannot be looked up: LRCLIB answers 400,
+// which the caller reads as a FAILURE and skips, which quietly drops that track
+// out of the coverage denominator. Measured on a real 7,595-track library, 15
+// of a 200-track sample were untagged -- enough to move the coverage figure by
+// several points, and it moves it the wrong way: untagged tracks are exactly
+// the ones audio analysis would rescue, so hiding them argues against building
+// the feature that would help them.
+func TestLRCUntaggedTrackIsNoCoverageNotAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("asked LRCLIB about an untagged track: %s", r.URL)
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv.Close()
+	c := NewLRCLib(srv.URL, srv.Client())
+
+	for _, tc := range []struct{ artist, title string }{
+		{"", ""},
+		{"Some Artist", ""},
+		{"", "Some Title"},
+		{"   ", "  "},
+	} {
+		ramp, err := c.FetchRamp(context.Background(), tc.artist, tc.title, 200)
+		if err != nil {
+			t.Errorf("FetchRamp(%q, %q) = error %v, want a clean ConfidenceNone: an untagged track is a known answer, not a failed lookup", tc.artist, tc.title, err)
+		}
+		if ramp.Confidence != ConfidenceNone {
+			t.Errorf("FetchRamp(%q, %q) confidence = %q, want %q", tc.artist, tc.title, ramp.Confidence, ConfidenceNone)
+		}
+	}
+}

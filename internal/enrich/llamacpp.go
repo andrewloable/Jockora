@@ -58,13 +58,18 @@ type llamaResponse struct {
 
 // Complete runs one completion.
 func (l *LlamaCPP) Complete(ctx context.Context, req CompletionRequest) (Completion, error) {
-	body, err := json.Marshal(llamaRequest{
-		Prompt:     req.Prompt,
-		JSONSchema: req.JSONSchema,
-		NPredict:   req.NPredict,
+	temperature := req.Temperature
+	if temperature <= 0 {
 		// Cataloguing facts is not a creative task, and a low temperature also
-		// makes re-enrichment reproducible.
-		Temperature: 0.2,
+		// makes re-enrichment reproducible. Callers that are WRITING rather
+		// than extracting must say so.
+		temperature = DefaultTemperature
+	}
+	body, err := json.Marshal(llamaRequest{
+		Prompt:      req.Prompt,
+		JSONSchema:  req.JSONSchema,
+		NPredict:    req.NPredict,
+		Temperature: temperature,
 	})
 	if err != nil {
 		return Completion{}, fmt.Errorf("enrich: encoding llama request: %w", err)

@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andrewloable/jockora/internal/errs"
 	"github.com/andrewloable/jockora/internal/store"
 )
 
@@ -29,12 +30,23 @@ var audioExtensions = map[string]bool{
 	".ogg": true, ".opus": true, ".wav": true,
 }
 
+// IsAudio reports whether a path is one of the containers this program ingests.
+func IsAudio(path string) bool {
+	return audioExtensions[strings.ToLower(filepath.Ext(path))]
+}
+
 // Stats summarises a scan.
 type Stats struct {
 	Found      int // audio files seen
 	Added      int // new rows
 	Updated    int // existing rows refreshed
 	Unplayable int // files ffprobe could not read
+
+	// Rejected carries one wrapped errs.ErrUnsupportedFormat per unplayable
+	// file, so a caller can report WHICH files were refused rather than only
+	// how many. A count alone sends an operator hunting through ten thousand
+	// files for the four that failed.
+	Rejected []error
 }
 
 // probeResult is the subset of ffprobe's JSON this scanner reads.
@@ -79,7 +91,13 @@ func Scan(ctx context.Context, s *store.Store, root string) (Stats, error) {
 		stats.Found++
 		meta, probeErr := probe(ctx, path)
 		if probeErr != nil {
+			// Detected HERE, at scan time, and never at play time. A scan is
+			// allowed to take an hour; a stream is not allowed to discover
+			// mid-transition that the next track was a video file somebody
+			// dropped into the folder.
 			stats.Unplayable++
+			probeErr = fmt.Errorf("%w: %s: %v", errs.ErrUnsupportedFormat, path, probeErr)
+			stats.Rejected = append(stats.Rejected, probeErr)
 		}
 
 		added, upsertErr := upsert(ctx, s, path, meta, probeErr == nil)

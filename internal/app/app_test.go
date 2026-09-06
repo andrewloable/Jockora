@@ -438,3 +438,16 @@ func TestSingleBreakIsStillTheDefault(t *testing.T) {
 		t.Errorf("PendingBreaks() = %d, want 1 with no interval set", got)
 	}
 }
+
+// TestStatusReportsADegradedEncoder. A full disk keeps the mixer running and
+// the restart counter climbing while no new segment is ever written, so every
+// other number on this endpoint reads healthy. This is the only field that
+// says otherwise.
+func TestStatusReportsADegradedEncoder(t *testing.T) {
+	if got := ffmpegHealth(""); got != "ok" {
+		t.Errorf("healthy encoder reported as %q", got)
+	}
+	if got := ffmpegHealth("disk full"); got != "disk full" {
+		t.Errorf("degraded encoder reported as %q, want the reason itself", got)
+	}
+}

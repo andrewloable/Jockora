@@ -47,8 +47,17 @@ type Config struct {
 	DBPath      string
 	LLMBaseURL  string
 	TTSAddr     string
-	FFmpegPath  string
-	HTTPClient  *http.Client
+	// TTSPython and TTSScript describe the sidecar Jockora starts ITSELF.
+	//
+	// When these are set the address check does not apply: the sidecar is
+	// spawned on a port chosen at start-up, so nothing is listening anywhere
+	// predictable and probing a fixed address always fails. What matters
+	// instead is whether the interpreter exists and can import kokoro-onnx,
+	// which is the precondition that actually goes wrong.
+	TTSPython  string
+	TTSScript  string
+	FFmpegPath string
+	HTTPClient *http.Client
 
 	// RequireLLM makes the llama-server check a HARD failure.
 	//
@@ -183,7 +192,12 @@ func checkLLM(ctx context.Context, cfg Config) Check {
 			"properties": map[string]any{"ok": map[string]any{"type": "boolean"}},
 			"required":   []any{"ok"},
 		},
-		"n_predict": 16,
+		// 16 was too tight and produced a FALSE FAILURE: the model emitted
+		// whitespace-formatted JSON, ran out of budget mid-object, and the
+		// truncated text did not parse -- which this check then reported as
+		// "json_schema was ignored", telling an operator to upgrade llama.cpp
+		// over a working server. 64 is ample for {"ok":true} in any formatting.
+		"n_predict": 64,
 	})
 
 	url := strings.TrimSuffix(cfg.LLMBaseURL, "/") + "/completion"
@@ -214,7 +228,8 @@ func checkLLM(ctx context.Context, cfg Config) Check {
 	}
 
 	var reply struct {
-		Content string `json:"content"`
+		Content  string `json:"content"`
+		StopType string `json:"stop_type"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
 		c.Detail = "reply was not JSON: " + err.Error()
@@ -224,6 +239,14 @@ func checkLLM(ctx context.Context, cfg Config) Check {
 
 	var shaped map[string]any
 	if err := json.Unmarshal([]byte(strings.TrimSpace(reply.Content)), &shaped); err != nil {
+		// Truncation and a disregarded schema look identical in the text and
+		// have completely different fixes, so they are distinguished here
+		// rather than guessed at by whoever reads the report.
+		if reply.StopType == "limit" {
+			c.Detail = fmt.Sprintf("the probe ran out of token budget; got %.60q", reply.Content)
+			c.Fix = "this is a doctor bug, not a server fault: raise n_predict in checkLLM"
+			return c
+		}
 		c.Detail = fmt.Sprintf("json_schema was ignored; got %.60q", reply.Content)
 		c.Fix = "server reachable but json_schema was ignored; upgrade llama.cpp."
 		return c
@@ -242,6 +265,14 @@ func checkLLM(ctx context.Context, cfg Config) Check {
 // breaks, not the stream.
 func checkTTS(ctx context.Context, cfg Config) Check {
 	c := Check{Name: "tts sidecar", Hard: cfg.RequireTTS}
+
+	// A managed sidecar is checked by whether it COULD start, not by whether
+	// it is already running. Probing a fixed address here reported a healthy
+	// managed sidecar as unreachable and refused to start the server.
+	if cfg.TTSPython != "" {
+		return checkTTSInterpreter(ctx, cfg, c)
+	}
+
 	if cfg.TTSAddr == "" {
 		c.Detail = "no TTS URL configured"
 		c.Fix = "set --tts-url or JOCKORA_TTS_URL; without it the DJ never speaks"
@@ -371,5 +402,30 @@ func checkDisk(dir string) Check {
 		return c
 	}
 	c.OK = true
+	return c
+}
+
+// checkTTSInterpreter asks the sidecar's own python whether it can do the job.
+//
+// This catches the failure that actually happens -- kokoro-onnx installed into
+// the wrong interpreter, or not at all -- at startup, instead of at the first
+// break, where it looks like a DJ that has nothing to say.
+func checkTTSInterpreter(ctx context.Context, cfg Config, c Check) Check {
+	if _, err := os.Stat(cfg.TTSScript); err != nil {
+		c.Detail = fmt.Sprintf("sidecar script %s: %v", cfg.TTSScript, err)
+		c.Fix = "set --tts-script to sidecar/kokoro_server.py"
+		return c
+	}
+
+	probe, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(probe, cfg.TTSPython, "-c", "import kokoro_onnx").CombinedOutput()
+	if err != nil {
+		c.Detail = fmt.Sprintf("%s cannot import kokoro_onnx: %v", cfg.TTSPython, strings.TrimSpace(string(out)))
+		c.Fix = "python3.10 -m venv .venv-tts && .venv-tts/bin/pip install kokoro-onnx, then --tts-python .venv-tts/bin/python"
+		return c
+	}
+
+	c.OK, c.Detail = true, cfg.TTSPython+" can import kokoro_onnx"
 	return c
 }

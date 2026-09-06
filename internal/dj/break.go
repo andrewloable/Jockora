@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/andrewloable/jockora/internal/enrich"
 )
@@ -71,6 +72,23 @@ func nonEmpty(parts ...string) []string {
 	return out
 }
 
+// A break must be made of words rather than punctuation. Two words and eight
+// letters, NOT a word count on its own: "Midnight Vale." is a legitimate
+// two-word station ID and a rule that rejected it would be measuring the wrong
+// thing. What it does reject is "... ... ...", which has no letters at all.
+const (
+	MinBreakWords   = 2
+	MinBreakLetters = 8
+)
+
+// contentWordsIn returns the runs of letters in a string, which is what
+// separates speech from punctuation a model emitted to fill a schema.
+func contentWordsIn(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+}
+
 // ParseBreak decodes a model response into a Break.
 func ParseBreak(raw string) (*Break, error) {
 	trimmed := strings.TrimSpace(raw)
@@ -81,6 +99,31 @@ func ParseBreak(raw string) (*Break, error) {
 	var b Break
 	if err := json.Unmarshal([]byte(trimmed), &b); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrBreakBadJSON, err)
+	}
+
+	// A break with nothing to say is schema-valid and useless. Every field is
+	// optional in the grammar, so {"opening":"","body":"","handoff":""} parses,
+	// resolves no facts, collides with nothing in the said-lines index, gets
+	// RECORDED as aired, and then fails at the TTS sidecar with a 400 on empty
+	// text. Measured live, that was 4 breaks in 20 -- each one reported as an
+	// unavailable sidecar, which is the wrong diagnosis entirely.
+	if strings.TrimSpace(b.Text()) == "" {
+		return nil, fmt.Errorf("%w: the break has no spoken text", ErrBreakBadJSON)
+	}
+
+	// A break must be made of WORDS. minLength on the schema stops an empty
+	// string; it cannot stop "... ... ...", which is what actually aired in a
+	// live run -- schema-valid, non-empty, the right length, colliding with
+	// nothing, and completely content-free. Four real words is a low bar that
+	// no genuine break fails.
+	words := contentWordsIn(b.Text())
+	letters := 0
+	for _, w := range words {
+		letters += len(w)
+	}
+	if len(words) < MinBreakWords || letters < MinBreakLetters {
+		return nil, fmt.Errorf("%w: the break is %d words and %d letters, which is punctuation rather than speech",
+			ErrBreakBadJSON, len(words), letters)
 	}
 
 	// GBNF enforces set membership but not uniqueness, so the same fact can come
@@ -219,7 +262,12 @@ func BreakSchema(prev, cur, next *enrich.Dossier) map[string]any {
 
 	props := map[string]any{
 		"opening": map[string]any{"type": "string", "maxLength": 200},
-		"body":    map[string]any{"type": "string", "maxLength": 600},
+		// minLength makes an EMPTY break unrepresentable at the sampler rather
+		// than merely rejected afterwards -- the same move that makes an
+		// ungrounded fact id impossible. Required-but-empty is what the schema
+		// allowed before, and measured live the model took that option on 12 of
+		// 35 attempts: a perfectly valid break with nothing in it.
+		"body":    map[string]any{"type": "string", "minLength": 1, "maxLength": 600},
 		"handoff": map[string]any{"type": "string", "maxLength": 200},
 	}
 	required := []any{"opening", "body", "handoff"}

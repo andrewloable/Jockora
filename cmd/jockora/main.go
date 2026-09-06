@@ -9,43 +9,174 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"slices"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/andrewloable/jockora/internal/app"
 	"github.com/andrewloable/jockora/internal/config"
 	"github.com/andrewloable/jockora/internal/doctor"
+	"github.com/andrewloable/jockora/internal/errs"
+	"github.com/andrewloable/jockora/internal/library"
 )
 
+// Version is the release this binary reports. Semver, so an operator can tell
+// two builds apart in a bug report.
+const Version = "0.1.0"
+
+// subcommands is the WHOLE surface, named once and deliberately.
+//
+// Naming it here rather than letting it accrue is the point of this list: a
+// tool whose commands arrived one at a time feels arbitrary to use, and every
+// one of them is a promise that has to keep working.
+var subcommands = []string{"serve", "scan", "enrich", "doctor", "version"}
+
+// usageExit is what an unusable command line exits with. Two, not one, so a
+// script can tell "you asked for something that does not exist" from "the thing
+// you asked for failed".
+const usageExit = 2
+
 func main() {
-	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "jockora:", err)
-		os.Exit(1)
+	os.Exit(dispatch(context.Background(), os.Args[1:], os.Stderr))
+}
+
+// dispatch runs one subcommand and returns its exit code.
+//
+// It takes its arguments and its output rather than reaching for os.Args and
+// os.Stderr, which is the difference between ASSERTING that an unknown
+// subcommand exits 2 and hoping it does.
+func dispatch(ctx context.Context, args []string, out io.Writer) int {
+	if len(args) == 0 {
+		printUsage(out, "")
+		return usageExit
 	}
+
+	// The subcommand comes first. A flag before it is a mistake worth naming:
+	// silently accepting `jockora -db-path x serve` would teach an ordering
+	// that stops working the moment two subcommands want the same flag name.
+	name := args[0]
+	if strings.HasPrefix(name, "-") {
+		printUsage(out, name)
+		return usageExit
+	}
+	if !slices.Contains(subcommands, name) {
+		printUsage(out, name)
+		return usageExit
+	}
+
+	if name == "version" {
+		fmt.Fprintf(out, "jockora %s\n", Version)
+		return 0
+	}
+
+	if err := runSubcommand(ctx, name, args[1:], out); err != nil {
+		fmt.Fprintln(os.Stderr, "jockora:", err)
+		return 1
+	}
+	return 0
+}
+
+func printUsage(out io.Writer, unknown string) {
+	if unknown != "" {
+		fmt.Fprintf(out, "jockora: unknown subcommand %q\n\n", unknown)
+	}
+	fmt.Fprint(out, `usage: jockora <command> [flags]
+
+  serve     stream the station
+  scan      read the music library into the database
+  enrich    build dossiers for scanned tracks
+  doctor    check that everything this needs is present
+  version   print the version
+
+Every flag has a JOCKORA_-prefixed environment equivalent.
+Run `+"`jockora <command> -h`"+` for a command's flags.
+`)
+}
+
+// newHandler picks the log format.
+//
+// JSON when stderr is not a terminal, text when it is. That is not a style
+// preference: a container's logs are collected and parsed by something else --
+// this host runs Seq for exactly that -- and text records lose their structure
+// on the way in. A human at a terminal wants the readable form. Neither should
+// have to remember a flag, so the default is inferred and the flag exists to
+// override it.
+func newHandler(w *os.File, format string) slog.Handler {
+	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
+	switch format {
+	case "json":
+		return slog.NewJSONHandler(w, opts)
+	case "text":
+		return slog.NewTextHandler(w, opts)
+	default:
+		if fi, err := w.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+			return slog.NewTextHandler(w, opts)
+		}
+		return slog.NewJSONHandler(w, opts)
+	}
+}
+
+// expandTracks turns any directory argument into the audio files beneath it,
+// leaving plain file arguments untouched.
+func expandTracks(args []string) ([]string, error) {
+	var out []string
+	for _, arg := range args {
+		fi, err := os.Stat(arg)
+		if err != nil {
+			return nil, fmt.Errorf("track %s: %w", arg, err)
+		}
+		if !fi.IsDir() {
+			out = append(out, arg)
+			continue
+		}
+		err = filepath.WalkDir(arg, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil //nolint:nilerr // an unreadable subdirectory must not end the walk
+			}
+			if !d.IsDir() && library.IsAudio(p) {
+				out = append(out, p)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("scanning %s: %w", arg, err)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no audio files found in %v", args)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // ringSecondsForStall mirrors the app's ring depth, so a SIGUSR2 stall is
 // guaranteed to outlast the buffer rather than being absorbed by it.
 const ringSecondsForStall = 10 * time.Second
 
-func run() error {
+func runSubcommand(ctx context.Context, name string, args []string, out io.Writer) error {
 	// Run-specific flags live here rather than in config, which describes the
 	// server rather than one spike run.
 	var breakPath string
-	var breakAt, breakEvery int
-	cfg, err := config.LoadWith(func(fs *flag.FlagSet) {
+	var breakAt, breakEvery, sample int
+	cfg, err := config.LoadArgs(args, func(fs *flag.FlagSet) {
 		fs.StringVar(&breakPath, "break", "", "WAV to splice into the stream (48kHz 16-bit)")
 		fs.IntVar(&breakAt, "break-at", 30, "when the first break should be heard, seconds from start")
 		fs.IntVar(&breakEvery, "break-every", 0, "repeat the break every N seconds (0 = once)")
+		fs.IntVar(&sample, "sample", 0, "with `enrich`, measure synced-lyric coverage over N sampled tracks")
 	})
 	if err != nil {
 		return err
 	}
 
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	log := slog.New(newHandler(os.Stderr, cfg.LogFormat))
 
 	doctorCfg := doctor.Config{
 		LibraryPath: cfg.LibraryPath,
@@ -53,54 +184,129 @@ func run() error {
 		DBPath:      cfg.DBPath,
 		LLMBaseURL:  cfg.LLMBaseURL,
 		TTSAddr:     cfg.TTSAddr,
-		// The spike calls no model and speaks no TTS: it plays tracks and a
-		// pre-rendered WAV. These become required when the DJ brain is wired.
-		RequireLLM: false,
-		RequireTTS: false,
+		TTSPython:   cfg.TTSPython,
+		TTSScript:   cfg.TTSScript,
+		// Required only when a DJ is actually asked for. The spike path calls
+		// no model and speaks no TTS, and demanding them there would refuse to
+		// start the one mode that needs nothing -- which is the mode GATE 2 and
+		// room test A run against.
+		RequireLLM: cfg.LibraryPath != "" && cfg.PersonaPath != "",
+		RequireTTS: cfg.LibraryPath != "" && cfg.PersonaPath != "",
 	}
 
 	tracks := cfg.Args
 
-	// `jockora doctor` reports and exits, so an operator can diagnose without
-	// starting a stream.
-	if len(tracks) == 1 && tracks[0] == "doctor" {
-		checks := doctor.Run(context.Background(), doctorCfg)
-		fmt.Print(doctor.Report(checks))
+	switch name {
+	case "doctor":
+		// Reports and exits, so an operator can diagnose without starting a
+		// stream.
+		checks := doctor.Run(ctx, doctorCfg)
+		fmt.Fprint(out, doctor.Report(checks))
 		if failed := doctor.Failed(checks); len(failed) > 0 {
 			return fmt.Errorf("%d hard check(s) failed", len(failed))
 		}
 		return nil
+
+	case "scan":
+		root := cfg.LibraryPath
+		if len(tracks) == 1 {
+			root = tracks[0]
+		}
+		if root == "" {
+			return fmt.Errorf("scan needs a library: jockora scan -library-path PATH")
+		}
+		return runScan(ctx, cfg.DBPath, root, log)
+
+	case "enrich":
+		// Coverage measurement lives under enrich rather than as a sixth
+		// subcommand: the surface is deliberately five, and measuring
+		// synced-lyric coverage is enrichment work that stops early.
+		if sample > 0 {
+			root := cfg.LibraryPath
+			if len(tracks) == 1 {
+				root = tracks[0]
+			}
+			if root == "" {
+				return fmt.Errorf("enrich -sample needs a library: jockora enrich -sample 200 -library-path PATH")
+			}
+			return runCoverage(ctx, cfg.DBPath, root, sample, log)
+		}
+		return fmt.Errorf("full enrichment is not wired to the CLI yet (Jockora-q4q); " +
+			"use -sample N to measure synced-lyric coverage")
 	}
 
-	if len(tracks) == 0 {
-		return fmt.Errorf("usage: jockora [flags] <track> [track...]\n" +
-			"       jockora -break voice.wav -break-at 30 a.mp3 b.mp3\n" +
-			"       jockora doctor")
+	// PREFLIGHT FIRST, before anything is opened, scanned or spawned.
+	//
+	// It used to run after the library and the DJ were built, which meant a
+	// failed check exited having already scanned a library and started a Python
+	// process -- work thrown away, and a sidecar left to be cleaned up by a
+	// deferred close that had not been registered yet.
+	if checks := doctor.Run(ctx, doctorCfg); len(doctor.Failed(checks)) > 0 {
+		// Fail loudly at startup rather than quietly at airtime. Wrapped as
+		// ErrToolMissing so a caller can tell "you have not installed ffmpeg"
+		// from "your configuration is wrong" -- the first is the single most
+		// likely first-run problem this program has.
+		fmt.Fprint(out, doctor.Report(checks))
+		return fmt.Errorf("%w: preflight failed; fix the checks above or run: jockora doctor",
+			errs.ErrToolMissing)
 	}
 
-	// The spike runs against explicit track files rather than a scanned library,
-	// so the library check does not apply to it.
-	doctorCfg.LibraryPath = ""
-	if checks := doctor.Run(context.Background(), doctorCfg); len(doctor.Failed(checks)) > 0 {
-		// Fail loudly at startup rather than quietly at airtime.
-		fmt.Print(doctor.Report(checks))
-		return fmt.Errorf("preflight failed; fix the checks above or run: jockora doctor")
-	}
-
-	a, err := app.New(cfg, app.Options{
-		Tracks:        tracks,
+	// serve, in one of two modes.
+	//
+	// A library, if one is configured: scan it, select from the database, run
+	// the DJ and enrich in the background. Otherwise the spike path -- a list
+	// of files, no database, no model, no sidecar -- which is what GATE 2 and
+	// room test A run against and which must keep working.
+	opts := app.Options{
 		BreakPath:     breakPath,
 		BreakAtSec:    breakAt,
 		BreakEverySec: breakEvery,
 		Log:           log,
-	})
+	}
+
+	if cfg.LibraryPath != "" {
+		lib, err := buildLibrary(ctx, cfg, log)
+		if err != nil {
+			return err
+		}
+		defer lib.Store.Close() //nolint:errcheck // closing at shutdown
+
+		opts.Library = lib
+		opts.Enricher = buildEnricher(ctx, cfg, lib, log)
+		pipeline, writer, sidecar := buildBreaks(ctx, cfg, lib, log)
+		opts.Breaks, opts.Writer = pipeline, writer
+		if sidecar != nil {
+			defer sidecar.Close() //nolint:errcheck // closing at shutdown
+		}
+	} else {
+		if len(tracks) == 0 {
+			return fmt.Errorf("serve needs something to play:\n" +
+				"       jockora serve -library-path /music\n" +
+				"       jockora serve <track|directory>...")
+		}
+		// A directory argument expands to the audio files beneath it.
+		expanded, err := expandTracks(tracks)
+		if err != nil {
+			return err
+		}
+		opts.Tracks = expanded
+		log.Info("file list", "tracks", len(expanded))
+	}
+
+	// The spike runs against explicit track files rather than a scanned library,
+	// so the library check does not apply to it.
+	if cfg.LibraryPath == "" {
+		doctorCfg.LibraryPath = ""
+	}
+
+	a, err := app.New(cfg, opts)
 	if err != nil {
 		return err
 	}
 
 	// SIGINT must reach the encoder so ffmpeg flushes its final segment. An
 	// orphaned ffmpeg keeps the segment directory and the next start fails.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	// Decoder-stall fault injection. Test hooks, not features.

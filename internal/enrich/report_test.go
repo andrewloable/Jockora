@@ -170,3 +170,58 @@ func TestReportStringIsReadable(t *testing.T) {
 	}
 	fmt.Println(out)
 }
+
+// TestReportCoverageIgnoresUnlookedTracks is the arithmetic that decides
+// whether vocal-onset detection is v0.1 scope. The sample is deliberately 200
+// answers inside a 2000-track library, which is exactly how the operator is
+// told to measure -- and dividing by the library instead of the sample would
+// report 9% for a library with 90% and add a whole task to the release.
+func TestReportCoverageIgnoresUnlookedTracks(t *testing.T) {
+	s := queueStore(t, 2000)
+	for i := 1; i <= 180; i++ {
+		if _, err := s.DB().Exec(`UPDATE tracks SET ramp_confidence = ?, ramp_s = 12.0, outro_s = 8.0 WHERE id = ?`,
+			ConfidenceLRC, i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 181; i <= 200; i++ {
+		if _, err := s.DB().Exec(`UPDATE tracks SET ramp_confidence = ? WHERE id = ?`, ConfidenceNone, i); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r, err := BuildReport(context.Background(), s)
+	if err != nil {
+		t.Fatalf("BuildReport: %v", err)
+	}
+	if r.Tracks != 2000 {
+		t.Errorf("Tracks = %d, want the whole library, 2000", r.Tracks)
+	}
+	if r.LookedUp != 200 {
+		t.Errorf("LookedUp = %d, want 200", r.LookedUp)
+	}
+	if r.CoveragePct != 90.0 {
+		t.Errorf("CoveragePct = %v, want 90.0 (180 of 200 looked up), not %.1f (180 of 2000)",
+			r.CoveragePct, 180*100.0/2000)
+	}
+	if r.NeedsVocalOnsetFallback {
+		t.Error("NeedsVocalOnsetFallback set at 90% coverage: a division error would add a task to v0.1")
+	}
+	if r.SampleTooSmall {
+		t.Error("SampleTooSmall at 200 looked-up tracks, which is the stated minimum")
+	}
+}
+
+func TestReportNoLookupsIsNoEvidence(t *testing.T) {
+	s := queueStore(t, 500)
+	r, err := BuildReport(context.Background(), s)
+	if err != nil {
+		t.Fatalf("BuildReport: %v", err)
+	}
+	if r.NeedsVocalOnsetFallback {
+		t.Error("a library nobody has looked up must not decide a scope question")
+	}
+	if !strings.Contains(r.String(), "No track has been looked up") {
+		t.Errorf("report does not say why it is silent:\n%s", r)
+	}
+}

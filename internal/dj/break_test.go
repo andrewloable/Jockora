@@ -211,7 +211,7 @@ func TestBreakPersonalityOnlyIsStillGenerable(t *testing.T) {
 }
 
 func TestBreakDuplicateFactsAreDeduped(t *testing.T) {
-	b, err := ParseBreak(`{"opening":"a","body":"b","handoff":"c",
+	b, err := ParseBreak(`{"opening":"Midnight Vale.","body":"That was loud.","handoff":"Stay there.",
 		"asserted_facts":["cur.artist_facts[0]","cur.artist_facts[0]"]}`)
 	if err != nil {
 		t.Fatal(err)
@@ -242,4 +242,54 @@ func containsStr(hay []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// TestParseBreakRejectsEmptySpokenText: every field is optional in the grammar,
+// so a break with nothing in it parses cleanly, resolves no facts, collides
+// with nothing, is recorded as aired, and then fails at the TTS sidecar with a
+// 400 -- reported as an unavailable sidecar, which is the wrong diagnosis
+// entirely. Measured live, that was 4 breaks in 20.
+func TestParseBreakRejectsEmptySpokenText(t *testing.T) {
+	for _, raw := range []string{
+		`{"opening":"","body":"","handoff":"","asserted_facts":[]}`,
+		`{"opening":"   ","body":"\n","handoff":""}`,
+		`{"asserted_facts":["artist_facts.0"]}`,
+	} {
+		if _, err := ParseBreak(raw); err == nil {
+			t.Errorf("ParseBreak(%s) accepted a break with no spoken text", raw)
+		} else if !errors.Is(err, ErrBreakBadJSON) {
+			t.Errorf("ParseBreak(%s) error = %v, want ErrBreakBadJSON", raw, err)
+		}
+	}
+
+	// Any one populated field is enough.
+	if _, err := ParseBreak(`{"opening":"Midnight Vale.","body":"","handoff":""}`); err != nil {
+		t.Errorf("rejected a break that has an opening: %v", err)
+	}
+}
+
+// TestParseBreakRejectsWordlessText. "... ... ..." aired in a live run: it was
+// schema-valid, non-empty, the right length, and collided with nothing. A break
+// has to be made of words, and nothing checked that.
+func TestParseBreakRejectsWordlessText(t *testing.T) {
+	for _, raw := range []string{
+		`{"opening":"... ... ...","body":"","handoff":""}`,
+		`{"opening":"","body":"---","handoff":"..."}`,
+		`{"opening":"a b","body":"","handoff":""}`,
+		`{"opening":"?! ?!","body":"","handoff":""}`,
+	} {
+		if _, err := ParseBreak(raw); err == nil {
+			t.Errorf("ParseBreak(%s) accepted a break with no words in it", raw)
+		}
+	}
+
+	// A terse but real break must survive: this is a station ID, not noise.
+	for _, ok := range []string{
+		`{"opening":"Three in the morning.","body":"","handoff":""}`,
+		`{"opening":"Midnight Vale.","body":"","handoff":""}`,
+	} {
+		if _, err := ParseBreak(ok); err != nil {
+			t.Errorf("rejected a real break %s: %v", ok, err)
+		}
+	}
 }

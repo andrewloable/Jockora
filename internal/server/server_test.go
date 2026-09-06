@@ -411,3 +411,61 @@ func mustServer(t *testing.T) *Server {
 	s, _ := newServer(t, 20)
 	return s
 }
+
+// TestNonLoopbackRequiresExplicitOptIn: containers need 0.0.0.0 because
+// 127.0.0.1 is reachable only inside their own network namespace. That is a
+// real need, and it must still be a decision rather than a default: this
+// program has no authentication.
+func TestNonLoopbackRequiresExplicitOptIn(t *testing.T) {
+	for _, addr := range []string{"0.0.0.0:0", ":0", "192.168.1.10:0"} {
+		if _, err := New(Config{ListenAddr: addr, SegmentDir: t.TempDir()}, nil); err == nil {
+			t.Errorf("New accepted %q without the opt-in", addr)
+		}
+	}
+
+	s, err := New(Config{
+		ListenAddr: "0.0.0.0:0", SegmentDir: t.TempDir(), AllowNonLoopback: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("the opt-in did not permit 0.0.0.0: %v", err)
+	}
+	defer s.ln.Close()
+}
+
+// TestNonLoopbackIsLoggedLoudly: a posture chosen once and forgotten is how an
+// unauthenticated service ends up somewhere nobody meant it to be.
+func TestNonLoopbackIsLoggedLoudly(t *testing.T) {
+	var buf bytes.Buffer
+	s, err := New(Config{
+		ListenAddr: "0.0.0.0:0", SegmentDir: t.TempDir(), AllowNonLoopback: true,
+	}, slog.New(slog.NewTextHandler(&buf, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.ln.Close()
+
+	out := buf.String()
+	if !strings.Contains(out, "WITHOUT AUTHENTICATION") {
+		t.Errorf("binding off-host was not warned about:\n%s", out)
+	}
+	if !strings.Contains(out, "allow-lan") {
+		t.Error("the warning does not name the flag that enabled it")
+	}
+}
+
+// TestLoopbackNeverWarns: the safe default must stay quiet, or the warning
+// becomes noise and stops being read.
+func TestLoopbackNeverWarns(t *testing.T) {
+	var buf bytes.Buffer
+	s, err := New(Config{
+		ListenAddr: "127.0.0.1:0", SegmentDir: t.TempDir(), AllowNonLoopback: true,
+	}, slog.New(slog.NewTextHandler(&buf, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.ln.Close()
+
+	if strings.Contains(buf.String(), "WITHOUT AUTHENTICATION") {
+		t.Error("a loopback bind warned anyway; the warning will be tuned out")
+	}
+}

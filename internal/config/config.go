@@ -23,6 +23,16 @@ type Config struct {
 	ListenAddr  string // host:port for the HTTP server; loopback by default
 	LLMBaseURL  string // llama-server base URL, native /completion API
 	TTSAddr     string // Kokoro sidecar base URL
+	PersonaPath string // persona TOML describing the jock
+	// TTSPython is the interpreter the speech sidecar runs under.
+	//
+	// PINNED, not inherited. onnxruntime has no wheels for the system python3
+	// on the development host, and relying on whatever python3 resolves to is
+	// exactly what made the voice epic look unbuildable. The sidecar is a
+	// separate process anyway, so a dedicated 3.10 venv costs nothing.
+	TTSPython   string
+	TTSScript   string // the sidecar entry point
+	StationName string // which station to broadcast
 
 	SampleRate        int // canonical bus sample rate
 	Channels          int // canonical bus channel count
@@ -31,6 +41,15 @@ type Config struct {
 	BreakEveryNTracks int // schedule a DJ break after this many tracks
 
 	CrossfadeSeconds float64 // default crossfade length at a track boundary
+
+	// LogFormat is "text", "json", or empty to infer from whether stderr is a
+	// terminal.
+	LogFormat string
+
+	// AllowLAN permits a non-loopback listen address. Off by default: this
+	// program has no authentication, so binding off-host is a decision, never
+	// an accident.
+	AllowLAN bool
 
 	// Args holds the positional arguments left after flag parsing, so a command
 	// can read them without parsing os.Args a second time.
@@ -48,6 +67,15 @@ func Load() (*Config, error) { return LoadWith(nil) }
 // its own flags on flag.CommandLine would have them rejected here as unknown,
 // which is a failure that only appears when the binary is actually run.
 func LoadWith(register func(*flag.FlagSet)) (*Config, error) {
+	return LoadArgs(os.Args[1:], register)
+}
+
+// LoadArgs is LoadWith over an explicit argument list.
+//
+// It exists so the command surface can be tested without reaching into
+// os.Args, which is the difference between asserting that an unknown
+// subcommand exits 2 and hoping it does.
+func LoadArgs(args []string, register func(*flag.FlagSet)) (*Config, error) {
 	var c Config
 
 	fs := flag.NewFlagSet("jockora", flag.ContinueOnError)
@@ -64,6 +92,10 @@ func LoadWith(register func(*flag.FlagSet)) (*Config, error) {
 	// listens there. Start llama-server with --port 8081 or set JOCKORA_LLM_URL.
 	fs.StringVar(&c.LLMBaseURL, "llm-url", "http://127.0.0.1:8081", "llama-server base URL")
 	fs.StringVar(&c.TTSAddr, "tts-url", "http://127.0.0.1:8090", "TTS sidecar base URL")
+	fs.StringVar(&c.PersonaPath, "persona", "", "persona TOML for the jock")
+	fs.StringVar(&c.TTSPython, "tts-python", "python3.10", "python interpreter for the speech sidecar (needs kokoro-onnx)")
+	fs.StringVar(&c.TTSScript, "tts-script", "sidecar/kokoro_server.py", "speech sidecar entry point")
+	fs.StringVar(&c.StationName, "station", "", "station to broadcast")
 
 	fs.IntVar(&c.SampleRate, "sample-rate", 48000, "canonical bus sample rate")
 	fs.IntVar(&c.Channels, "channels", 2, "canonical bus channel count")
@@ -73,7 +105,13 @@ func LoadWith(register func(*flag.FlagSet)) (*Config, error) {
 
 	fs.Float64Var(&c.CrossfadeSeconds, "crossfade-seconds", 2.0, "crossfade length at a track boundary")
 
-	if err := fs.Parse(os.Args[1:]); err != nil {
+	fs.StringVar(&c.LogFormat, "log-format", "",
+		`"text", "json", or empty to infer (json when not a terminal)`)
+
+	fs.BoolVar(&c.AllowLAN, "allow-lan", false,
+		"permit a non-loopback listen address (NO AUTHENTICATION: anyone who can reach it can listen)")
+
+	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
 

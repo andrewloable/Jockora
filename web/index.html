@@ -16,6 +16,13 @@
   audio { width: min(90vw, 32rem); }
   #status { min-height: 1.5em; opacity: .7; font-size: .875rem; }
   #status[data-state="error"] { opacity: 1; color: #c0392b; }
+  #nowplaying { margin: 0; font-size: 1rem; text-align: center; max-width: min(90vw, 32rem); }
+  #nowplaying .artist { opacity: .7; }
+  #transcript {
+    margin: 0; max-width: min(90vw, 32rem); font-size: .875rem;
+    opacity: .7; font-style: italic; text-align: center;
+  }
+  #transcript:empty { display: none; }
 </style>
 </head>
 <body>
@@ -29,6 +36,12 @@
 <!-- No skip control and no playlist view. There is no skip in this product by
      design; changing station is the escape hatch. -->
 <p id="status">Press play to tune in.</p>
+
+<!-- Now playing, and what the DJ last said. The transcript is free here because
+     /now.json already carries it for diagnostics, and it is how you check what
+     the jock actually said without reading logs. -->
+<p id="nowplaying"></p>
+<p id="transcript"></p>
 
 <!-- Vendored, not a CDN: this is a self-hosted product that has to work on a
      machine with no internet connection. -->
@@ -74,6 +87,54 @@
     say('This browser cannot play HLS.', 'error');
     return;
   }
+
+  // Now playing, polled from /now.json.
+  //
+  // The TAB TITLE is the point: this is a thing you leave running for hours,
+  // and a tab called "Jockora" is unfindable among twenty others. A tab called
+  // "Alice In Chains - Rooster" is not.
+  var STATIC_TITLE = 'Jockora';
+  var nowplaying = document.getElementById('nowplaying');
+  var transcript = document.getElementById('transcript');
+
+  function renderNow(now, lastBreak) {
+    if (!now || (!now.artist && !now.title)) {
+      // Degrade to the static name. A stale track title is worse than none:
+      // it says the stream is fine when it may have stopped minutes ago.
+      document.title = STATIC_TITLE;
+      nowplaying.textContent = '';
+      transcript.textContent = '';
+      return;
+    }
+    var artist = now.artist || '';
+    var title = now.title || '';
+    document.title = artist ? artist + ' - ' + title : title;
+
+    nowplaying.textContent = '';
+    if (artist) {
+      var a = document.createElement('span');
+      a.className = 'artist';
+      a.textContent = artist + ' — ';
+      nowplaying.appendChild(a);
+    }
+    // textContent, never innerHTML: this is model-written text arriving over
+    // the network, and the one place it must not be able to become markup.
+    nowplaying.appendChild(document.createTextNode(title));
+    transcript.textContent = lastBreak && lastBreak.text ? '"' + lastBreak.text + '"' : '';
+  }
+
+  function poll() {
+    // Nothing here changes faster than a track, so five seconds is generous.
+    fetch('/now.json', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { renderNow(d && d.now, d && d.last_break); })
+      .catch(function () {
+        // A failed fetch must never throw and must never leave a stale title.
+        renderNow(null, null);
+      });
+  }
+  poll();
+  setInterval(poll, 5000);
 
   player.addEventListener('playing', function () { say('On air.'); });
   player.addEventListener('waiting', function () { say('Buffering…'); });

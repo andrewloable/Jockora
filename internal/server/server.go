@@ -43,6 +43,15 @@ type Config struct {
 	ListenAddr     string
 	SegmentDir     string
 	RetainSegments int // default DefaultRetainSegments
+
+	// AllowNonLoopback permits binding an address reachable from off-host.
+	//
+	// It exists for containers, where 127.0.0.1 is reachable only inside the
+	// container's own network namespace and a published port would never
+	// connect. It is an EXPLICIT opt-in and not a default, because this program
+	// still ships no authentication of any kind: turning it on publishes an
+	// unauthenticated server to whatever network can reach the bind address.
+	AllowNonLoopback bool
 }
 
 // segmentName allows exactly the two filename shapes this program produces.
@@ -80,7 +89,16 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 		return nil, errors.New("server: no segment directory")
 	}
 	if err := checkLoopback(cfg.ListenAddr); err != nil {
-		return nil, err
+		if !cfg.AllowNonLoopback {
+			return nil, err
+		}
+		// Say it loudly, every start, in the operator's log. A security posture
+		// chosen once and then forgotten is how an unauthenticated service ends
+		// up somewhere nobody meant it to be.
+		log.Warn("SERVING WITHOUT AUTHENTICATION ON A NON-LOOPBACK ADDRESS",
+			"listen", cfg.ListenAddr,
+			"detail", "anyone who can reach this address can listen to the stream and read /now.json",
+			"enabled_by", "--allow-lan / JOCKORA_ALLOW_LAN")
 	}
 
 	ln, err := net.Listen("tcp", cfg.ListenAddr)

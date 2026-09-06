@@ -5,6 +5,7 @@ package enrich
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -88,7 +89,28 @@ type CompletionRequest struct {
 	Prompt     string
 	JSONSchema map[string]any
 	NPredict   int
+	// Temperature is the sampling temperature. Zero means DefaultTemperature.
+	//
+	// It is per-request because the two things this model is asked to do want
+	// opposite settings. Cataloguing facts into a dossier wants determinism, so
+	// re-enrichment reproduces. WRITING wants variety -- and running the writer
+	// at the cataloguing temperature is not a small mistake: measured live, a
+	// hardcoded 0.2 collapsed a ten-advert rotation to ONE brand across forty
+	// attempts, and made the break writer repeat itself often enough that
+	// repetition was the single largest drop reason.
+	Temperature float64
 }
+
+// Sampling temperatures, by what is being asked for.
+const (
+	// DefaultTemperature suits fact extraction: low, and reproducible.
+	DefaultTemperature = 0.2
+	// WritingTemperature suits a DJ break. Enough variety that two breaks about
+	// the same track are not the same break.
+	WritingTemperature = 0.8
+	// InventionTemperature suits adverts, which must be ten different things.
+	InventionTemperature = 1.0
+)
 
 // Completion is what came back.
 type Completion struct {
@@ -134,7 +156,7 @@ func GenerateDossier(ctx context.Context, llm Completer, in TrackInput) (Dossier
 
 		d, err := parseDossier(resp, in)
 		if err == nil {
-			return stripQuotedLyrics(d, in.Lyrics), nil
+			return stripPlaceholderEcho(stripQuotedLyrics(d, in.Lyrics)), nil
 		}
 		// Empty and refusal are not retried: retrying a refusal just refuses
 		// again, and retrying a truncation just truncates again. Both point at
@@ -193,6 +215,107 @@ func isRefusal(content string) bool {
 // quotedRunWords is how many consecutive words shared with the source lyrics
 // marks a field as a quotation rather than a description.
 const quotedRunWords = 6
+
+// placeholderRE matches an angle-bracket placeholder copied out of the prompt.
+//
+// The prompt describes each field with a placeholder like
+// "<a complete sentence from the researched facts below>" rather than a worked
+// example, because a live probe showed a small model copying a concrete example
+// verbatim into two unrelated tracks. Placeholders fixed that -- and introduced
+// their own failure, which only a live run found: the model copies the
+// PLACEHOLDER verbatim instead.
+//
+// Observed on gemma-4-E4B-it, at confidence "high":
+//
+//	artist_facts: ["<a complete sentence from the researched facts below>"]
+//	subject_summary: "A summary of the song."
+//
+// The first would have been asserted on air as a fact about the artist, since
+// it resolves like any other fact id and clears the 0.6 confidence gate. The
+// whole anti-hallucination design rests on the dossier containing facts, and a
+// restatement of the instructions is not a fact.
+var placeholderRE = regexp.MustCompile(`<[^>]{4,}>`)
+
+// instructionEcho matches a field that restates what the field is for instead
+// of filling it in. These are short, generic and always wrong.
+var instructionEcho = []string{
+	"a summary of the song",
+	"a summary of what the song is about",
+	"summary of the song",
+	"a complete sentence",
+	"the researched facts",
+	"a notable line",
+	"artist facts",
+	"station tags",
+	"station tag",
+}
+
+// stripPlaceholderEcho blanks any field that is prompt scaffolding rather than
+// content.
+//
+// It runs AFTER schema validation on purpose: the sampler can guarantee shape
+// and vocabulary, but nothing in a grammar can tell a real sentence from the
+// instruction that asked for one.
+func stripPlaceholderEcho(d Dossier) Dossier {
+
+	if isEcho(d.SubjectSummary) {
+		d.SubjectSummary = ""
+	}
+	if isEcho(d.NotableLine) {
+		d.NotableLine = ""
+	}
+	d.ArtistFacts = keepReal(d.ArtistFacts)
+	d.Themes = keepReal(d.Themes)
+	return downgradeEmpty(d)
+}
+
+// downgradeEmpty refuses to let an empty dossier claim confidence.
+//
+// Confidence is meant to describe how much the DJ may lean on what is here.
+// A dossier with nothing in it saying "high" is not a small inaccuracy: the
+// enrichment report counts it as a well-enriched track, so a library that
+// produced nothing useful looks fully enriched, and the one number an operator
+// would use to notice is the one that lies. Observed on real output -- an
+// entirely empty dossier came back at "high".
+func downgradeEmpty(d Dossier) Dossier {
+	if len(d.StationTags) == 0 && len(d.Mood) == 0 && len(d.Themes) == 0 &&
+		len(d.ArtistFacts) == 0 &&
+		strings.TrimSpace(d.SubjectSummary) == "" && strings.TrimSpace(d.NotableLine) == "" {
+		d.Confidence = ConfidenceNone
+	}
+	return d
+}
+
+func keepReal(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	out := in[:0]
+	for _, v := range in {
+		if !isEcho(v) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func isEcho(s string) bool {
+	t := strings.ToLower(strings.TrimSpace(s))
+	if t == "" {
+		return false
+	}
+	if placeholderRE.MatchString(t) {
+		return true
+	}
+	for _, phrase := range instructionEcho {
+		// Equality or near-equality only. A real fact may well contain the
+		// words "artist facts"; a field that IS those words is scaffolding.
+		if t == phrase || t == phrase+"." || strings.HasPrefix(t, phrase+" ") && len(t) < len(phrase)+12 {
+			return true
+		}
+	}
+	return false
+}
 
 // stripQuotedLyrics blanks any field that quotes the supplied lyrics.
 //
@@ -546,4 +669,35 @@ func StoreDossier(ctx context.Context, s *store.Store, trackID int64, d Dossier)
 		return fmt.Errorf("enrich: storing dossier for track %d: %w", trackID, err)
 	}
 	return nil
+}
+
+// LoadDossier reads a track's dossier back.
+//
+// The read side of StoreDossier, which shipped without one: everything that
+// needs a dossier at AIRTIME -- the break writer, backselling, fact resolution
+// -- reads it from here, and until now each of those would have had to write
+// its own query against the json column.
+//
+// A track with no dossier is not an error. It is the normal state of a library
+// mid-enrichment, and it means personality-only talk: the DJ may say nothing
+// factual about a track it knows nothing about.
+func LoadDossier(ctx context.Context, s *store.Store, trackID int64) (Dossier, bool, error) {
+	var raw string
+	err := s.DB().QueryRowContext(ctx,
+		`SELECT json FROM dossiers WHERE track_id = ?`, trackID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return emptyDossier(), false, nil
+	}
+	if err != nil {
+		return emptyDossier(), false, fmt.Errorf("enrich: reading dossier for track %d: %w", trackID, err)
+	}
+
+	var d Dossier
+	if err := json.Unmarshal([]byte(raw), &d); err != nil {
+		// A row that will not parse is worse than no row: it would silently
+		// become an empty dossier and the DJ would talk as if the track were
+		// unenriched, with nothing anywhere saying why.
+		return emptyDossier(), false, fmt.Errorf("enrich: dossier for track %d is unreadable: %w", trackID, err)
+	}
+	return d, true, nil
 }

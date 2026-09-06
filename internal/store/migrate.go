@@ -109,8 +109,15 @@ func (s *Store) migrate(ctx context.Context) error {
 		// Refuse before touching anything. A newer Jockora may have reshaped
 		// these tables, and writing into a shape this build does not understand
 		// is how a library's enrichment gets silently corrupted.
-		return fmt.Errorf("%w: found version %d, this build understands %d",
-			ErrSchemaTooNew, have, CurrentSchemaVersion)
+		// The message names the fix, not just the problem. An operator meeting
+		// this has already lost a stream and needs to know that the answer is
+		// to upgrade the binary, NOT to delete the database -- which is what
+		// people do to an error that only says "incompatible", and which throws
+		// away every dossier the library ever built.
+		return fmt.Errorf("%w: found version %d, this build understands %d. "+
+			"Upgrade jockora to a build that understands version %d; do not delete the database, "+
+			"it holds every dossier already enriched",
+			ErrSchemaTooNew, have, CurrentSchemaVersion, have)
 	}
 	if have == CurrentSchemaVersion {
 		return nil

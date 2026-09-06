@@ -13,17 +13,24 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
+
+	"database/sql"
 
 	"github.com/andrewloable/jockora/internal/clock"
 	"github.com/andrewloable/jockora/internal/config"
 	"github.com/andrewloable/jockora/internal/decode"
 	"github.com/andrewloable/jockora/internal/encode"
+	"github.com/andrewloable/jockora/internal/enrich"
 	"github.com/andrewloable/jockora/internal/mix"
+	"github.com/andrewloable/jockora/internal/obs"
 	"github.com/andrewloable/jockora/internal/sched"
 	"github.com/andrewloable/jockora/internal/server"
+	"github.com/andrewloable/jockora/internal/station"
+	"github.com/andrewloable/jockora/internal/store"
 )
 
 // Options are the run-specific choices the config file does not cover.
@@ -40,6 +47,60 @@ type Options struct {
 	// what makes the seam actually observable.
 	BreakEverySec int
 	Log           *slog.Logger
+
+	// Library, when set, replaces Tracks as the source of music: the app
+	// selects from the scanned database instead of looping a list of files.
+	//
+	// Optional on purpose. The spike path is what GATE 2 and the room test run
+	// against, and it must keep working with no database at all.
+	Library *Library
+
+	// Breaks, when set, generates and airs DJ breaks. Optional for the same
+	// reason, and independently: a library without a language model is a
+	// perfectly good shuffle, and that is the state Jockora must degrade to
+	// whenever the model or the sidecar is not there.
+	Breaks *station.Pipeline
+
+	// Writer is told which tracks surround each break. Set with Breaks.
+	Writer *station.BreakWriter
+
+	// Enricher runs dossier generation in the background. Optional.
+	Enricher *enrich.Queue
+}
+
+// Library is the scanned music source.
+type Library struct {
+	Store    *store.Store
+	Selector *station.Selector
+}
+
+// track is one item chosen for the broadcast.
+type track struct {
+	id            int64
+	path          string
+	artist, title string
+	// noCrossfadeNext marks gapless material, which the cadence refuses to
+	// interrupt.
+	noCrossfadeNext bool
+}
+
+// next chooses the following track from the database.
+func (l *Library) next(ctx context.Context) (track, error) {
+	id, err := l.Selector.Next()
+	if err != nil {
+		return track{}, err
+	}
+	var t = track{id: id}
+	var artist, title sql.NullString
+	var gapless int
+	err = l.Store.DB().QueryRowContext(ctx,
+		`SELECT path, artist, title, no_crossfade_next FROM tracks WHERE id = ?`, id).
+		Scan(&t.path, &artist, &title, &gapless)
+	if err != nil {
+		return track{}, fmt.Errorf("reading track %d: %w", id, err)
+	}
+	t.artist, t.title, t.noCrossfadeNext = artist.String, title.String, gapless != 0
+	return t, nil
 }
 
 // App is one running station.
@@ -61,6 +122,7 @@ type App struct {
 
 	nowMu               sync.Mutex
 	nowArtist, nowTitle string
+	lastBreak           *server.LastBreak
 
 	mixerMu sync.Mutex
 	mixer   *mix.Mixer
@@ -84,21 +146,48 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	if len(opts.Tracks) == 0 {
+	// One source or the other. A Library carries its own tracks and they are
+	// not stat-ed here: the scan already refused what ffprobe could not read,
+	// and re-checking ten thousand paths at startup would add minutes to a boot
+	// for a question already answered.
+	switch {
+	case opts.Library != nil:
+		if opts.Library.Store == nil || opts.Library.Selector == nil {
+			return nil, errors.New("app: the library has no store or no selector")
+		}
+	case len(opts.Tracks) == 0:
 		return nil, errors.New("app: no tracks to play")
-	}
-	for _, p := range opts.Tracks {
-		if _, err := os.Stat(p); err != nil {
-			return nil, fmt.Errorf("app: track %s: %w", p, err)
+	default:
+		for _, p := range opts.Tracks {
+			if _, err := os.Stat(p); err != nil {
+				return nil, fmt.Errorf("app: track %s: %w", p, err)
+			}
 		}
 	}
+
+	// The pipeline enqueues into the SAME queue the mixer drains, and it is
+	// wired here rather than by the caller because there is no way for the
+	// caller to have it: the queue is created below. Leaving it to be passed in
+	// produced a nil-pointer panic in the break goroutine that took the whole
+	// station off air.
+	queue := &sched.Queue{}
 
 	a := &App{
 		cfg:   cfg,
 		opts:  opts,
 		log:   log,
 		ring:  mix.NewRing(ringSeconds * mix.SampleRate),
-		queue: &sched.Queue{},
+		queue: queue,
+	}
+
+	// The pipeline enqueues into the SAME queue the mixer drains, and reports
+	// what it scheduled. Wired HERE rather than by the caller, because the
+	// caller cannot have the queue -- it is created above. Leaving it to be
+	// passed in produced a nil-pointer panic in the break goroutine that took
+	// the whole station off air.
+	if opts.Breaks != nil {
+		opts.Breaks.Queue = queue
+		opts.Breaks.OnScheduled = a.recordBreak
 	}
 
 	if opts.BreakPath != "" {
@@ -129,8 +218,9 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 	}
 
 	srv, err := server.New(server.Config{
-		ListenAddr: cfg.ListenAddr,
-		SegmentDir: cfg.SegmentDir,
+		ListenAddr:       cfg.ListenAddr,
+		SegmentDir:       cfg.SegmentDir,
+		AllowNonLoopback: cfg.AllowLAN,
 	}, log)
 	if err != nil {
 		return nil, err
@@ -155,6 +245,35 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 	return a, nil
 }
 
+// dependencyHealth says whether an optional dependency is in use.
+//
+// "not configured" is a real and common answer here: a library with no model is
+// a working shuffle, and reporting that as a fault would send an operator
+// looking for a problem they chose.
+func dependencyHealth(inUse bool) string {
+	if inUse {
+		return "ok"
+	}
+	return "not configured"
+}
+
+// recordBreak remembers what the DJ last said, for /now.json and the page.
+func (a *App) recordBreak(text string, placement mix.Placement) {
+	a.nowMu.Lock()
+	a.lastBreak = &server.LastBreak{
+		Text:      text,
+		Placement: placement.String(),
+		AiredAt:   time.Now().Unix(),
+	}
+	a.nowMu.Unlock()
+
+	if a.opts.Writer != nil {
+		// Clears the cold open: the next break is no longer the first thing a
+		// listener hears after pressing play.
+		a.opts.Writer.Aired()
+	}
+}
+
 // Addr is the address the server is listening on.
 func (a *App) Addr() string { return a.srv.Addr() }
 
@@ -173,16 +292,31 @@ func (a *App) Metrics() mix.MetricsSnapshot { return a.metrics.Snapshot() }
 // Fields the spike genuinely does not know are left EMPTY rather than filled
 // with plausible-looking values: a status endpoint that invents its answers is
 // worse than one that admits what it cannot see.
+// ffmpegHealth turns the supervisor's degraded reason into a health string.
+func ffmpegHealth(degraded string) string {
+	if degraded == "" {
+		return "ok"
+	}
+	return degraded
+}
+
 func (a *App) Status() server.Status {
 	m := a.metrics.Snapshot()
 
 	st := server.Status{
 		Health: server.Health{
 			// ffmpeg is proven working by the fact that segments exist at all,
-			// and the supervisor reports restarts separately.
-			FFmpeg: "ok",
-			LLM:    "not used by the spike",
-			TTS:    "not used by the spike",
+			// and the supervisor reports restarts separately -- EXCEPT for the
+			// one failure that neither of those makes visible. A full disk
+			// keeps the mixer running and the restart counter climbing while
+			// no new segment is ever written, which reads as healthy right up
+			// until a listener says the stream stopped.
+			FFmpeg: ffmpegHealth(a.sup.Degraded()),
+			// Reported by what is actually WIRED, not by what the spike used
+			// to do. These read "not used by the spike" long after both were
+			// in use, which is a status endpoint inventing an answer.
+			LLM: dependencyHealth(a.opts.Breaks != nil || a.opts.Enricher != nil),
+			TTS: dependencyHealth(a.opts.Breaks != nil),
 		},
 		Metrics: server.Metrics{
 			RingOccupancyS:    a.ring.Occupancy().Seconds(),
@@ -199,6 +333,7 @@ func (a *App) Status() server.Status {
 	if a.nowArtist != "" || a.nowTitle != "" {
 		st.Now = &server.Track{Artist: a.nowArtist, Title: a.nowTitle}
 	}
+	st.LastBreak = a.lastBreak
 	a.nowMu.Unlock()
 
 	return st
@@ -253,10 +388,34 @@ func (a *App) Run(ctx context.Context) error {
 
 	go a.feedTracks(ctx)
 
+	// Enrichment runs alongside the stream, never in front of it. A library of
+	// ten thousand tracks takes many hours to enrich and the station has to be
+	// listenable from the first minute -- an unenriched track simply gets
+	// personality-only talk, which is what the empty dossier means everywhere
+	// else in this design.
+	if a.opts.Breaks != nil {
+		go a.generateBreaks(ctx)
+	}
+
+	if a.opts.Enricher != nil {
+		go func() {
+			if err := a.opts.Enricher.Run(ctx); err != nil && ctx.Err() == nil {
+				// Not fatal, and deliberately not retried in a loop here: the
+				// worker already survives one bad track, and a failure that
+				// reaches this line means the model or the lock is wrong,
+				// which is an operator problem, not a stream problem.
+				a.log.Error("enrichment stopped", "err", err)
+			}
+		}()
+	}
+
 	a.log.Info("on air",
 		"listen", "http://"+a.Addr(),
 		"segments", a.cfg.SegmentDir,
-		"tracks", len(a.opts.Tracks))
+		"tracks", a.trackCount(),
+		"source", a.sourceName(),
+		"breaks", a.opts.Breaks != nil,
+		"enriching", a.opts.Enricher != nil)
 
 	// One mixer goroutine, owning the bus clock, sole writer to the encoder.
 	m := &mix.Mixer{
@@ -296,6 +455,164 @@ func (a *App) Run(ctx context.Context) error {
 // feedTracks decodes the track list into the ring, looping forever. A track that
 // will not decode is logged and skipped: one bad file must not end the stream.
 func (a *App) feedTracks(ctx context.Context) {
+	if a.opts.Library != nil {
+		a.feedFromLibrary(ctx)
+		return
+	}
+	a.feedFromList(ctx)
+}
+
+// feedFromLibrary plays the scanned database and schedules breaks between
+// tracks.
+//
+// Every part of the break machinery is optional here and each degrades on its
+// own: no pipeline is a shuffle, a failed selection is one skipped track, a
+// dropped break is silence where speech would have been. None of them stops the
+// music, which is the invariant this whole program is arranged around.
+func (a *App) feedFromLibrary(ctx context.Context) {
+	blocks := make(chan []mix.Frame, 8)
+	var boundary int
+	var prev, cur track
+
+	// One track is chosen AHEAD of the one playing. Without it the boundary is
+	// only known at the instant it arrives, which leaves the lookahead no time
+	// at all -- ShouldTrigger requires now < insertionAt, so a break announced
+	// at its own boundary can never be generated and none would ever air.
+	upcoming, err := a.opts.Library.next(ctx)
+	if err != nil {
+		a.log.Error("could not choose a first track", "err", err)
+		return
+	}
+
+	for ctx.Err() == nil {
+		cur = upcoming
+		var chooseErr error
+		upcoming, chooseErr = a.opts.Library.next(ctx)
+		if chooseErr != nil {
+			a.log.Error("could not choose the next track", "err", chooseErr)
+			upcoming = track{}
+		}
+
+		// The boundary at the END of the track now starting. Announced here,
+		// a whole track early, which is exactly the room the lookahead needs.
+		if upcoming.path != "" {
+			boundary++
+			a.announceBoundary(ctx, boundary, prev, cur, upcoming)
+		}
+
+		done := a.startFeeder(ctx, blocks)
+		a.setNowPlayingTrack(cur)
+		decodeErr := decode.Decode(ctx, cur.path, blocks)
+		blocks = a.finishFeeder(ctx, blocks, done)
+
+		if decodeErr != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			obs.New(a.log).DecoderSkip(cur.path, decodeErr.Error())
+			a.markUnplayable(ctx, cur)
+			continue
+		}
+		prev = cur
+	}
+}
+
+// generateBreaks polls the pipeline so a slot announced a track ago is acted on
+// when its lookahead finally fires.
+//
+// A timer rather than the boundary loop, because those are the same thing only
+// on a station whose tracks are all shorter than T. Announce decides WHICH
+// boundary; this decides WHEN, and they are minutes apart by design.
+func (a *App) generateBreaks(ctx context.Context) {
+	// The break machinery must NEVER take the station off air, and a panic in
+	// any goroutine ends the process regardless of where it happened. The mixer
+	// has the same guard for the same reason; this one exists because a nil
+	// queue here already did exactly that once.
+	defer func() {
+		if r := recover(); r != nil {
+			a.log.Error("break generation panicked and has been stopped; music continues",
+				"panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+		}
+	}()
+
+	tick := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			if _, err := a.opts.Breaks.Tick(ctx, a.secondsPlayed()); err != nil && ctx.Err() == nil {
+				a.log.Warn("break generation failed", "err", err)
+			}
+		}
+	}
+}
+
+// announceBoundary offers one transition to the cadence and lets the pipeline
+// generate anything it decides to.
+func (a *App) announceBoundary(ctx context.Context, boundary int, prev, cur, next track) {
+	if a.opts.Breaks == nil {
+		return
+	}
+	if a.opts.Writer != nil {
+		a.opts.Writer.SetContext(prev.id, cur.id, next.id, prev.artist, prev.title)
+	}
+
+	curTrack := a.trackFor(ctx, cur)
+	nextTrack := a.trackFor(ctx, next)
+
+	// The boundary is when the track now STARTING will end, not now. Measured
+	// from the mixer's position rather than the wall clock, because that is the
+	// clock the break will be spliced against.
+	at := a.secondsPlayed() + curTrack.DurationS
+	a.opts.Breaks.Announce(station.Boundary{
+		Index:           boundary,
+		Cur:             curTrack,
+		Next:            nextTrack,
+		InsertionAt:     at,
+		InsertionSample: a.samplePos() + int64(curTrack.DurationS*mix.SampleRate),
+	})
+}
+
+// trackFor reads the placement numbers a break needs about one track.
+func (a *App) trackFor(ctx context.Context, t track) *station.Track {
+	out := &station.Track{NoCrossfadeNext: t.noCrossfadeNext}
+	if t.id == 0 || a.opts.Library == nil {
+		return out
+	}
+	var ramp, outro, duration sql.NullFloat64
+	var confidence sql.NullString
+	err := a.opts.Library.Store.DB().QueryRowContext(ctx,
+		`SELECT ramp_s, outro_s, duration_s, ramp_confidence FROM tracks WHERE id = ?`, t.id).
+		Scan(&ramp, &outro, &duration, &confidence)
+	if err != nil {
+		// No placement data is a normal state mid-enrichment. It means the
+		// break goes between the tracks rather than over an intro.
+		return out
+	}
+	out.RampS, out.OutroS, out.DurationS = ramp.Float64, outro.Float64, duration.Float64
+	out.RampConfidence = confidence.String
+	return out
+}
+
+// markUnplayable records a track the decoder could not read, so selection never
+// offers it again. This is the play-time half of the scan-time check.
+func (a *App) markUnplayable(ctx context.Context, t track) {
+	if t.id == 0 || a.opts.Library == nil {
+		return
+	}
+	if _, err := a.opts.Library.Store.DB().ExecContext(ctx,
+		`UPDATE tracks SET playable = 0 WHERE id = ?`, t.id); err != nil {
+		a.log.Warn("could not mark a track unplayable", "id", t.id, "err", err)
+	}
+}
+
+// feedFromList is the spike path: a fixed list of files, looped.
+//
+// Kept because GATE 2 and room test A run against it, and because it is the one
+// mode that needs no database, no model and no sidecar.
+func (a *App) feedFromList(ctx context.Context) {
 	blocks := make(chan []mix.Frame, 8)
 
 	for ctx.Err() == nil {
@@ -305,41 +622,16 @@ func (a *App) feedTracks(ctx context.Context) {
 				return
 			}
 
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				for b := range blocks {
-					// Honour an injected stall here, between decode and the
-					// ring, so the decoder is what pauses and the mixer is left
-					// to ride it out on silence-fill.
-					for d := a.feederStall(); d > 0; d = a.feederStall() {
-						select {
-						case <-ctx.Done():
-							return
-						case <-time.After(min(d, 100*time.Millisecond)):
-						}
-					}
-					if err := feedRing(ctx, a.ring, b); err != nil {
-						return
-					}
-				}
-			}()
-
+			done := a.startFeeder(ctx, blocks)
 			a.setNowPlaying(path)
 			err := decode.Decode(ctx, path, blocks)
-			// The consumer must finish before the next track reuses the channel.
-			for len(blocks) > 0 && ctx.Err() == nil {
-				time.Sleep(time.Millisecond)
-			}
-			close(blocks)
-			<-done
-			blocks = make(chan []mix.Frame, 8)
+			blocks = a.finishFeeder(ctx, blocks, done)
 
 			if err != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				a.log.Warn("skipping track", "path", path, "err", err)
+				obs.New(a.log).DecoderSkip(path, err.Error())
 				continue
 			}
 			played++
@@ -349,6 +641,86 @@ func (a *App) feedTracks(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// startFeeder moves decoded blocks into the ring until the channel closes.
+func (a *App) startFeeder(ctx context.Context, blocks chan []mix.Frame) chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for b := range blocks {
+			// Honour an injected stall here, between decode and the ring, so
+			// the decoder is what pauses and the mixer is left to ride it out
+			// on silence-fill.
+			for d := a.feederStall(); d > 0; d = a.feederStall() {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(min(d, 100*time.Millisecond)):
+				}
+			}
+			if err := feedRing(ctx, a.ring, b); err != nil {
+				return
+			}
+		}
+	}()
+	return done
+}
+
+// finishFeeder drains the current track and returns a fresh channel.
+func (a *App) finishFeeder(ctx context.Context, blocks chan []mix.Frame, done chan struct{}) chan []mix.Frame {
+	// The consumer must finish before the next track reuses the channel.
+	for len(blocks) > 0 && ctx.Err() == nil {
+		time.Sleep(time.Millisecond)
+	}
+	close(blocks)
+	<-done
+	return make(chan []mix.Frame, 8)
+}
+
+// setNowPlayingTrack reports a track the library knows the tags for.
+func (a *App) setNowPlayingTrack(t track) {
+	a.nowMu.Lock()
+	defer a.nowMu.Unlock()
+	a.nowArtist, a.nowTitle = t.artist, t.title
+	if a.nowTitle == "" {
+		// An untagged file still has to be called something, and its filename
+		// is the only honest answer. Never the full path: the status endpoint
+		// must not leak the library layout.
+		a.nowTitle = strings.TrimSuffix(filepath.Base(t.path), filepath.Ext(t.path))
+	}
+}
+
+// secondsPlayed is the mixer's position on the bus clock, in seconds.
+func (a *App) secondsPlayed() float64 {
+	return float64(a.samplePos()) / mix.SampleRate
+}
+
+// samplePos is the mixer's absolute bus position, or zero before it starts.
+func (a *App) samplePos() int64 {
+	a.mixerMu.Lock()
+	defer a.mixerMu.Unlock()
+	if a.mixer == nil {
+		return 0
+	}
+	return a.mixer.SamplePos()
+}
+
+// trackCount is how many tracks are available to play.
+func (a *App) trackCount() int {
+	if a.opts.Library != nil {
+		return a.opts.Library.Selector.Len()
+	}
+	return len(a.opts.Tracks)
+}
+
+// sourceName says which of the two playback paths is running, because "why is
+// it playing the same five files" is otherwise answered by reading the code.
+func (a *App) sourceName() string {
+	if a.opts.Library != nil {
+		return "library"
+	}
+	return "file list"
 }
 
 // setNowPlaying records what is being decoded, for /now.json.

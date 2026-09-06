@@ -5,13 +5,16 @@ package library
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/andrewloable/jockora/internal/errs"
 	"github.com/andrewloable/jockora/internal/store"
 )
 
@@ -329,5 +332,44 @@ func TestScanRecordsScannedAt(t *testing.T) {
 	}
 	if at < start-5 || at > time.Now().Unix()+5 {
 		t.Errorf("scanned_at = %d, want about %d", at, start)
+	}
+}
+
+// TestScanNamesTheFilesItRejected. A count of unplayable files sends an
+// operator hunting through ten thousand of them for the four that failed. The
+// class is errs.ErrUnsupportedFormat so a caller can tell a bad file from an
+// I/O error, and it is detected at SCAN time -- a scan may take an hour, a
+// stream may not discover mid-transition that the next track is a video file.
+func TestScanNamesTheFilesItRejected(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "not-audio.mp3"), []byte("this is not an mp3"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := openStore(t)
+	stats, err := Scan(context.Background(), s, dir)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if stats.Unplayable != 1 {
+		t.Fatalf("Unplayable = %d, want 1", stats.Unplayable)
+	}
+	if len(stats.Rejected) != 1 {
+		t.Fatalf("Rejected has %d entries, want 1", len(stats.Rejected))
+	}
+	if !errors.Is(stats.Rejected[0], errs.ErrUnsupportedFormat) {
+		t.Errorf("rejection = %v, want ErrUnsupportedFormat", stats.Rejected[0])
+	}
+	if !strings.Contains(stats.Rejected[0].Error(), "not-audio.mp3") {
+		t.Errorf("rejection does not name the file: %v", stats.Rejected[0])
+	}
+
+	// And it is recorded as unplayable, so selection never offers it.
+	var playable int
+	if err := s.DB().QueryRow(`SELECT playable FROM tracks WHERE path LIKE '%not-audio.mp3'`).Scan(&playable); err != nil {
+		t.Fatal(err)
+	}
+	if playable != 0 {
+		t.Error("a file ffprobe could not read is still marked playable")
 	}
 }

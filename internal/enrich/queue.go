@@ -57,8 +57,12 @@ type Queue struct {
 	LLM     Completer
 	Artists ArtistSource
 	Lyrics  LyricsSource
-	Log     *slog.Logger
-	Clock   clock.Clock
+	// Onset derives a ramp from AUDIO when synced lyrics cannot. Optional: nil
+	// means LRC or nothing. Measured coverage on the real library is 41.5%, so
+	// nil leaves most tracks with no ramp at all.
+	Onset OnsetSource
+	Log   *slog.Logger
+	Clock clock.Clock
 
 	// Owner identifies this worker in the lock row.
 	Owner string
@@ -182,9 +186,10 @@ func (q *Queue) enrichOne(ctx context.Context, id int64, path, artist, title str
 		in.ArtistFacts = facts
 	}
 
+	var ramp Ramp
 	if q.Lyrics != nil && artist != "" && title != "" {
 		// The text is used and dropped. Only the ramp is persisted.
-		text, ramp, err := q.Lyrics.FetchLyrics(ctx, artist, title, duration)
+		text, r, err := q.Lyrics.FetchLyrics(ctx, artist, title, duration)
 		if err != nil && ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -192,10 +197,25 @@ func (q *Queue) enrichOne(ctx context.Context, id int64, path, artist, title str
 			q.logger().Debug("lyrics lookup failed", "title", title, "err", err)
 		} else {
 			in.Lyrics = text
-			in.HasSyncedLyrics = ramp.Confidence == ConfidenceLRC
-			if err := StoreRamp(ctx, q.Store, path, ramp); err != nil {
-				return err
-			}
+			ramp = r
+		}
+	}
+	in.HasSyncedLyrics = ramp.Confidence == ConfidenceLRC
+
+	// Audio analysis rescues what LRCLIB could not answer. That is most of the
+	// library -- coverage measured 41.5% -- and it INCLUDES the untagged tracks
+	// skipped above, which can never have an LRC entry and so are exactly the
+	// ones only analysis can place a break on.
+	ramp, rerr := ResolveRamp(ctx, ramp, q.Onset, path, duration)
+	if rerr != nil {
+		return rerr
+	}
+	// An empty confidence means nothing looked: neither source was configured,
+	// or the lookup failed. Storing that would put the track in the coverage
+	// denominator as a track LRCLIB does not know, which is a different claim.
+	if ramp.Confidence != "" {
+		if err := StoreRamp(ctx, q.Store, path, ramp); err != nil {
+			return err
 		}
 	}
 

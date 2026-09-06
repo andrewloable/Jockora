@@ -33,6 +33,7 @@ const ProjectionLibrarySize = 5000
 // Report is the measured basis for a scope decision.
 type Report struct {
 	Tracks           int
+	LookedUp         int
 	WithSyncedLyrics int
 	CoveragePct      float64
 
@@ -55,15 +56,24 @@ func BuildReport(ctx context.Context, s *store.Store) (Report, error) {
 		`SELECT count(*) FROM tracks WHERE playable = 1`).Scan(&r.Tracks); err != nil {
 		return r, fmt.Errorf("enrich: counting tracks: %w", err)
 	}
+	// The denominator is tracks that were actually LOOKED UP, not every track
+	// in the library. ramp_confidence is NULL until LRCLIB has been asked, so
+	// counting the whole library would divide 200 answers by ten thousand
+	// tracks and report 2% coverage for a library with 90%. That would force
+	// vocal-onset detection into v0.1 on the strength of an arithmetic error --
+	// the same misdiagnosis this report exists to prevent, in the other
+	// direction. A full pass makes the two denominators identical.
 	if err := s.DB().QueryRowContext(ctx,
-		`SELECT count(*) FROM tracks WHERE playable = 1 AND ramp_confidence = ?`,
-		ConfidenceLRC).Scan(&r.WithSyncedLyrics); err != nil {
+		`SELECT count(*), coalesce(sum(ramp_confidence = ?), 0)
+		   FROM tracks WHERE playable = 1 AND ramp_confidence IS NOT NULL`,
+		ConfidenceLRC).Scan(&r.LookedUp, &r.WithSyncedLyrics); err != nil {
 		return r, fmt.Errorf("enrich: counting synced lyrics: %w", err)
 	}
 
-	if r.Tracks > 0 {
-		r.CoveragePct = float64(r.WithSyncedLyrics) * 100 / float64(r.Tracks)
-		// An empty library is no evidence either way, so the flag stays off.
+	if r.LookedUp > 0 {
+		r.CoveragePct = float64(r.WithSyncedLyrics) * 100 / float64(r.LookedUp)
+		// A library nobody has looked up is no evidence either way, so the flag
+		// stays off.
 		r.NeedsVocalOnsetFallback = r.CoveragePct < VocalOnsetThresholdPct
 	}
 
@@ -76,7 +86,7 @@ func BuildReport(ctx context.Context, s *store.Store) (Report, error) {
 	r.AvgTokens = tokens.Float64
 	r.AvgWallSeconds = seconds.Float64
 
-	r.SampleTooSmall = r.Tracks < MinSampleForProjection
+	r.SampleTooSmall = r.LookedUp < MinSampleForProjection
 	if !r.SampleTooSmall && r.Enriched > 0 {
 		r.Projected5kTokens = r.AvgTokens * ProjectionLibrarySize
 		r.Projected5kHours = r.AvgWallSeconds * ProjectionLibrarySize / 3600
@@ -104,6 +114,7 @@ func (r Report) String() string {
 
 	b.WriteString("ENRICHMENT REPORT\n")
 	fmt.Fprintf(&b, "  playable tracks         %d\n", r.Tracks)
+	fmt.Fprintf(&b, "  looked up on LRCLIB     %d\n", r.LookedUp)
 	fmt.Fprintf(&b, "  with synced lyrics      %d\n", r.WithSyncedLyrics)
 	fmt.Fprintf(&b, "  coverage                %.1f%%\n", r.CoveragePct)
 	b.WriteString("\n")
@@ -119,7 +130,7 @@ func (r Report) String() string {
 	switch {
 	case r.SampleTooSmall:
 		fmt.Fprintf(&b, "\n  projection for %d      WITHHELD: %d tracks is under the %d-track\n",
-			ProjectionLibrarySize, r.Tracks, MinSampleForProjection)
+			ProjectionLibrarySize, r.LookedUp, MinSampleForProjection)
 		b.WriteString("                          minimum, and extrapolating from fewer is a\n")
 		b.WriteString("                          confident fiction.\n")
 	case r.Enriched > 0:
@@ -129,8 +140,8 @@ func (r Report) String() string {
 
 	b.WriteString("\nDECISION\n")
 	switch {
-	case r.Tracks == 0:
-		b.WriteString("  No tracks scanned. No evidence either way.\n")
+	case r.LookedUp == 0:
+		b.WriteString("  No track has been looked up. No evidence either way.\n")
 	case r.NeedsVocalOnsetFallback:
 		fmt.Fprintf(&b, "  Coverage %.1f%% is under %.0f%%. VOCAL-ONSET DETECTION BECOMES v0.1\n",
 			r.CoveragePct, VocalOnsetThresholdPct)
