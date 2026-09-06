@@ -151,6 +151,20 @@ func assemble(in PromptInput, next *enrich.Dossier, prohib Prohibitions) string 
 	b.WriteString(in.Persona.PromptBlock())
 	b.WriteString("\n\nYOU ARE WRITING ONE SPOKEN RADIO BREAK.\n\n")
 
+	// What the three fields ARE. Without this the model is asked for a JSON
+	// object whose keys it has never been told the meaning of, and it fills
+	// them with plausible placeholders -- "Your radio break sentence goes
+	// here", "TEXT OF YOUR RADIO BREAK HERE" -- which then AIR, because they
+	// are grammatical, the right length, and collide with nothing.
+	// Kept SHORT and free of anything that reads like content. Describing the
+	// three fields in prose made the model copy the descriptions -- "Opening
+	// line, if any. Up to 15 words." -- exactly as an earlier version, which
+	// described nothing, made it invent "Your radio break sentence goes here".
+	// Whatever describes the output gets lifted into it, so the prompt says as
+	// little as it can and the validator is the floor.
+	b.WriteString("Every field holds words you say ALOUD, into a microphone.\n")
+	b.WriteString("Never describe a line instead of saying it.\n\n")
+
 	words := WordTarget(in.WindowSeconds)
 	fmt.Fprintf(&b, "LENGTH: about %d words. This is spoken over %.1f seconds of\n",
 		words, in.WindowSeconds)

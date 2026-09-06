@@ -114,7 +114,44 @@ func (s *SaidLines) Record(ctx context.Context, text string) error {
 // prompt and the check, which is precisely the repetition a listener notices
 // over weeks.
 func (s *SaidLines) CheckCollision(ctx context.Context, text string) (bool, string, error) {
+	return s.CheckCollisionIgnoring(ctx, text, nil)
+}
+
+// CheckCollisionIgnoring is CheckCollision with the words of some proper nouns
+// excused.
+//
+// NAMING THE RECORD IS THE JOB. Consecutive breaks legitimately share tracks --
+// one break's NEXT is the following break's CURRENT -- so a DJ that says what
+// is coming and then says what just played will repeat the artist and title
+// every single time. GATE 5 measured this directly: after the fact cooldown
+// removed the recited-fact collisions, EVERY remaining one was a proper noun --
+// "parokya ni edgar wag mo", "laurindo almeida bossa nova", "jack costanzo born
+// 1919".
+//
+// The index is meant to catch a DJ reusing its own PHRASING, not to forbid it
+// from saying what is playing. Grams built entirely out of name words are
+// therefore not collisions.
+//
+// It is deliberately not the whole gram: a gram mixing a name with ordinary
+// words -- "almeida is the finest" -- is still phrasing and still counts.
+func (s *SaidLines) CheckCollisionIgnoring(ctx context.Context, text string, names []string) (bool, string, error) {
+	nameWords := make(map[string]bool)
+	for _, n := range names {
+		for _, w := range ContentWords(n) {
+			nameWords[w] = true
+		}
+	}
+
 	grams := NGrams(ContentWords(text), GramSize)
+	if len(nameWords) > 0 {
+		kept := grams[:0]
+		for _, g := range grams {
+			if !allNameWords(g, nameWords) {
+				kept = append(kept, g)
+			}
+		}
+		grams = kept
+	}
 	if len(grams) == 0 {
 		// Too short to form a run. A three-word sign-off is allowed to repeat.
 		return false, "", nil
@@ -164,4 +201,14 @@ func (s *SaidLines) OpeningUsed(ctx context.Context, text string) (bool, error) 
 		return false, fmt.Errorf("dj: checking opening: %w", err)
 	}
 	return n > 0, nil
+}
+
+// allNameWords reports whether every word in a gram came from a proper noun.
+func allNameWords(gram string, nameWords map[string]bool) bool {
+	for _, w := range strings.Fields(gram) {
+		if !nameWords[w] {
+			return false
+		}
+	}
+	return true
 }

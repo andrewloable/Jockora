@@ -23,6 +23,7 @@ import (
 
 	"github.com/andrewloable/jockora/internal/config"
 	"github.com/andrewloable/jockora/internal/mix"
+	"github.com/andrewloable/jockora/internal/sched"
 )
 
 // toneFile writes a real audio file the decoder can read, using ffmpeg so the
@@ -449,5 +450,59 @@ func TestStatusReportsADegradedEncoder(t *testing.T) {
 	}
 	if got := ffmpegHealth("disk full"); got != "disk full" {
 		t.Errorf("degraded encoder reported as %q, want the reason itself", got)
+	}
+}
+
+// TestTopUpBreaksKeepsTheScheduleFilled. The spike used to enqueue one window
+// of repeating breaks at startup and never refill: a station left running went
+// silent after two hours, with no log line and every health check still green.
+// It did exactly that on the deployed station for over three hours.
+func TestTopUpBreaksKeepsTheScheduleFilled(t *testing.T) {
+	every := int64(240) * mix.SampleRate // -break-every 240
+	a := &App{
+		queue:     &sched.Queue{},
+		opts:      Options{BreakPath: "/config/voice.wav", BreakEverySec: 240},
+		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nextBreak: 45 * mix.SampleRate,
+	}
+
+	// One window, as New would have queued.
+	first := a.topUpOnce(int64(scheduleAhead.Seconds())*mix.SampleRate, every)
+	if first < 25 {
+		t.Fatalf("filled %d breaks for a two-hour window at 240s, want about 30", first)
+	}
+
+	// Two hours later the mixer has drained them and the schedule must refill.
+	// This is the call that never used to happen.
+	twoHoursOn := int64(2*3600) * mix.SampleRate
+	again := a.topUpOnce(twoHoursOn+int64(scheduleAhead.Seconds())*mix.SampleRate, every)
+	if again == 0 {
+		t.Fatal("the schedule was not refilled; the DJ goes silent from here")
+	}
+
+	// And it keeps moving forward rather than re-queuing the same slots.
+	if a.nextBreak <= twoHoursOn {
+		t.Errorf("nextBreak = %d is behind the mixer at %d", a.nextBreak, twoHoursOn)
+	}
+}
+
+// TestTopUpBreaksIsIdempotent: calling it repeatedly must not double-book a
+// boundary, because the ticker calls it every minute regardless.
+func TestTopUpBreaksIsIdempotent(t *testing.T) {
+	every := int64(240) * mix.SampleRate
+	a := &App{
+		queue:     &sched.Queue{},
+		opts:      Options{BreakPath: "/config/voice.wav", BreakEverySec: 240},
+		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nextBreak: 45 * mix.SampleRate,
+	}
+	horizon := int64(scheduleAhead.Seconds()) * mix.SampleRate
+
+	n := a.topUpOnce(horizon, every)
+	if extra := a.topUpOnce(horizon, every); extra != 0 {
+		t.Errorf("a second pass over the same horizon added %d more breaks", extra)
+	}
+	if got := a.queue.Pending(); got != n {
+		t.Errorf("queue holds %d entries after %d added", got, n)
 	}
 }

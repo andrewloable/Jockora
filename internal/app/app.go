@@ -120,6 +120,10 @@ type App struct {
 	stallMu    sync.Mutex
 	stallUntil time.Time
 
+	// nextBreak is the sample the next repeating break is owed at. The spike
+	// schedules one window at startup and topUpBreaks continues from here.
+	nextBreak int64
+
 	nowMu               sync.Mutex
 	nowArtist, nowTitle string
 	lastBreak           *server.LastBreak
@@ -200,8 +204,7 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 		every := opts.BreakEverySec
 		count := 1
 		if every > 0 {
-			// Enough to cover a long listening session without scheduling
-			// forever.
+			// One window's worth now; topUpBreaks keeps it filled from here.
 			count = int(scheduleAhead.Seconds()) / every
 		}
 		for i := 0; i < count; i++ {
@@ -214,6 +217,7 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 			}); err != nil {
 				return nil, fmt.Errorf("app: scheduling break: %w", err)
 			}
+			a.nextBreak = at + int64(every)*mix.SampleRate
 		}
 	}
 
@@ -397,6 +401,17 @@ func (a *App) Run(ctx context.Context) error {
 		go a.generateBreaks(ctx)
 	}
 
+	// Keep the spike's repeating break schedule filled.
+	//
+	// It used to be enqueued ONCE at startup, covering scheduleAhead and no
+	// further. A station left running simply went quiet after two hours, with
+	// no log line and every health check still green -- which is precisely the
+	// quiet degradation this program is least able to notice, and it happened
+	// on the deployed station for three hours before anyone asked.
+	if a.opts.BreakPath != "" && a.opts.BreakEverySec > 0 {
+		go a.topUpBreaks(ctx)
+	}
+
 	if a.opts.Enricher != nil {
 		go func() {
 			if err := a.opts.Enricher.Run(ctx); err != nil && ctx.Err() == nil {
@@ -557,6 +572,13 @@ func (a *App) announceBoundary(ctx context.Context, boundary int, prev, cur, nex
 	}
 	if a.opts.Writer != nil {
 		a.opts.Writer.SetContext(prev.id, cur.id, next.id, prev.artist, prev.title)
+		// Every name in play at this boundary. Repeating these is not
+		// repetition, it is announcing the record.
+		a.opts.Writer.SetTrackNames(
+			prev.artist, prev.title,
+			cur.artist, cur.title,
+			next.artist, next.title,
+		)
 	}
 
 	curTrack := a.trackFor(ctx, cur)
@@ -721,6 +743,62 @@ func (a *App) sourceName() string {
 		return "library"
 	}
 	return "file list"
+}
+
+// topUpBreaks keeps the repeating spike break schedule ahead of the mixer.
+//
+// The queue rejects anything already played past, so this only ever adds
+// entries in the future; it can be called as often as it likes without
+// double-booking a boundary.
+func (a *App) topUpBreaks(ctx context.Context) {
+	every := int64(a.opts.BreakEverySec) * mix.SampleRate
+	if every <= 0 {
+		return
+	}
+
+	tick := time.NewTicker(time.Minute)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+
+		horizon := a.samplePos() + int64(scheduleAhead.Seconds())*mix.SampleRate
+		if added := a.topUpOnce(horizon, every); added > 0 {
+			a.log.Info("break schedule topped up", "added", added,
+				"through_seconds", float64(a.nextBreak)/mix.SampleRate)
+		}
+	}
+}
+
+// topUpOnce enqueues every repeating break owed before horizon, and reports how
+// many were added.
+//
+// Separated from the ticker so the arithmetic can be tested without starting a
+// mixer: this is the loop that silently stopped filling and took the DJ off a
+// live station for three hours.
+func (a *App) topUpOnce(horizon, every int64) int {
+	if every <= 0 {
+		return 0
+	}
+	added := 0
+	for a.nextBreak < horizon {
+		if err := a.queue.Enqueue(sched.Entry{
+			AfterSample: a.nextBreak,
+			Action:      sched.ActionSpliceAudio,
+			Path:        a.opts.BreakPath,
+			Placement:   mix.PlacementBetween.String(),
+		}); err != nil {
+			// Already played past. Skip it rather than retrying forever.
+			a.log.Debug("break top-up skipped an elapsed slot", "sample", a.nextBreak, "err", err)
+		} else {
+			added++
+		}
+		a.nextBreak += every
+	}
+	return added
 }
 
 // setNowPlaying records what is being decoded, for /now.json.

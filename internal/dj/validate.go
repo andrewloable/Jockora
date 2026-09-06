@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -68,7 +69,25 @@ type Validator struct {
 	breaks   int
 	drops    int
 	reasons  map[DropReason]int
+
+	// trackNames are the artist and title of the records this break is about.
+	// Grams made entirely of these words are not collisions: naming the record
+	// is the job, and consecutive breaks share tracks by design.
+	trackNames []string
+
+	// recentFacts maps a fact id to the break number it was last asserted in.
+	// A fact used inside FactCooldown breaks is withheld from the next
+	// schema, so the DJ cannot recite it twice in quick succession.
+	recentFacts map[string]int
 }
+
+// FactCooldown is how many breaks must pass before a fact may be asserted
+// again.
+//
+// Ten, which at the default cadence is roughly forty tracks. Long enough that a
+// listener will not hear the same sentence about a band twice in a session,
+// short enough that a small library does not run out of things to say.
+const FactCooldown = 10
 
 // Stats is a snapshot of validator counters.
 type Stats struct {
@@ -130,7 +149,7 @@ func (v *Validator) countAttempt() {
 // poison the index against future good breaks that happen to reuse a phrase the
 // DJ never actually aired.
 func (v *Validator) Generate(ctx context.Context, prompt string, prev, cur, next *enrich.Dossier) (*Break, error) {
-	schema := BreakSchema(prev, cur, next)
+	schema := BreakSchemaExcluding(prev, cur, next, v.cooledFacts())
 	lastReason := DropRepetitive
 	var lastErr error
 
@@ -174,7 +193,7 @@ func (v *Validator) Generate(ctx context.Context, prompt string, prev, cur, next
 			continue
 		}
 
-		hit, gram, err := v.Said.CheckCollision(ctx, b.Text())
+		hit, gram, err := v.Said.CheckCollisionIgnoring(ctx, b.Text(), v.names())
 		if err != nil {
 			return nil, err
 		}
@@ -187,6 +206,7 @@ func (v *Validator) Generate(ctx context.Context, prompt string, prev, cur, next
 		if err := v.Said.Record(ctx, b.Text()); err != nil {
 			return nil, err
 		}
+		v.rememberFacts(b.AssertedFacts)
 		v.record("", true)
 		return b, nil
 	}
@@ -234,10 +254,92 @@ var instructionPhrases = []string{
 	"<|im_end|",
 	"<start_of_turn>",
 	"<end_of_turn>",
+	// Template placeholders. The model is filling a form rather than talking,
+	// and every one of these AIRED in a live run: they are grammatical, the
+	// right length, and collide with nothing in the said-lines index.
+	"goes here",
+	"your radio break",
+	"your spoken",
+	"your dialogue",
+	"text of your",
+	"your words here",
+	"insert ",
+	"must fit within",
+	"word limit",
+	"[your",
+	// The FIELD NAMES themselves. Describing the fields in the prompt stopped
+	// the model inventing placeholders and started it copying the
+	// descriptions -- "Opening line, if any. Up to 15 words." -- which is the
+	// same failure wearing the new wording.
+	//
+	// No DJ says "handoff" into a microphone. This is a structural rule, not
+	// another entry in a list of phrases: a break that names the parts of a
+	// break is describing itself rather than being one.
+	"handoff",
+	"opening line",
+	"opening text",
+	"body text",
+	"if any.",
+	"if any,",
+	"up to 15 words",
+	"line to greet",
+	// Stage directions. The model describes the DELIVERY instead of
+	// performing it: "Loudly and enthusiastically." aired as a break.
+	"loudly and",
+	"enthusiastically.",
+	"excitedly.",
+	"with enthusiasm",
+	"in a booming voice",
+	"[shouting",
+	"(shouting",
+	"line that transitions",
+	"fits the context",
 }
 
+// Structural placeholder signatures.
+//
+// A phrase list is whack-a-mole and it lost: blocking "your radio break
+// sentence goes here" produced "YOUR SPEECH HERE", then "YOUR 30 WORDS HERE",
+// then "YOUR LINES HERE". These match the SHAPE instead, which is what a
+// placeholder actually is.
+var (
+	// "your <anything> here" -- the possessive-you placeholder, in any casing
+	// and with any filler between the two words.
+	placeholderYourHere = regexp.MustCompile(`(?i)\byour\b[^.!?]{0,40}\bhere\b`)
+
+	// A run of three or more SHOUTED words. A DJ does not speak in capitals;
+	// template markers are written that way. Two is allowed so a real break can
+	// say "OK" or name a band like "AC DC".
+	placeholderShouting = regexp.MustCompile(`\b[A-Z][A-Z]+\b(?:[^\w\n]+\b[A-Z][A-Z]+\b){2,}`)
+
+	// A dotted schema reference that leaked into speech: next.genre,
+	// cur.artist_facts, prev.title.
+	placeholderFieldRef = regexp.MustCompile(`(?i)\b(prev|cur|next)\.[a-z_]+`)
+
+	// A snake_case identifier. Nobody says "3am_listening" or
+	// "radio_intro_music" out loud; both aired, lifted from tag vocabularies.
+	placeholderSnakeCase = regexp.MustCompile(`\b[a-z0-9]+_[a-z0-9_]+\b`)
+)
+
 // echoesInstructions reports whether a break is reciting its own prompt.
+//
+// Two layers, and the order matters only for the message: the structural rules
+// catch the shape of a placeholder, and the phrase list catches the specific
+// wordings that have actually been observed on air.
 func echoesInstructions(text string) (string, bool) {
+	if m := placeholderYourHere.FindString(text); m != "" {
+		return m, true
+	}
+	if m := placeholderShouting.FindString(text); m != "" {
+		return m, true
+	}
+	if m := placeholderFieldRef.FindString(text); m != "" {
+		return m, true
+	}
+	if m := placeholderSnakeCase.FindString(text); m != "" {
+		return m, true
+	}
+
 	lower := strings.ToLower(text)
 	for _, phrase := range instructionPhrases {
 		if strings.Contains(lower, phrase) {
@@ -245,4 +347,43 @@ func echoesInstructions(text string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// cooledFacts lists the fact ids still inside their cooldown.
+func (v *Validator) cooledFacts() []string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	var out []string
+	for id, at := range v.recentFacts {
+		if v.breaks-at < FactCooldown {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// rememberFacts records what a break asserted, so the next one cannot repeat it.
+func (v *Validator) rememberFacts(ids []string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.recentFacts == nil {
+		v.recentFacts = make(map[string]int, len(ids))
+	}
+	for _, id := range ids {
+		v.recentFacts[id] = v.breaks
+	}
+}
+
+// SetTrackNames tells the validator which proper nouns this break is allowed to
+// repeat. Call it before Generate, once per boundary.
+func (v *Validator) SetTrackNames(names ...string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.trackNames = append(v.trackNames[:0], names...)
+}
+
+func (v *Validator) names() []string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return append([]string(nil), v.trackNames...)
 }

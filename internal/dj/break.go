@@ -57,9 +57,114 @@ type Break struct {
 }
 
 // Text is the whole break as it will be spoken.
+//
+// A repeated leading phrase is collapsed. Models routinely restate the opening
+// at the start of the body -- "Next up, Next up, a powerful declaration...",
+// "Good evening. Good evening." -- because each field is generated knowing what
+// the break is meant to sound like and not what the neighbouring field already
+// said. It is the single most audible flaw in otherwise good output, and it is
+// cheaper to fix here than to keep asking a model not to do it.
 func (b *Break) Text() string {
-	return strings.TrimSpace(strings.Join(
-		nonEmpty(b.Opening, b.Body, b.Handoff), " "))
+	parts := nonEmpty(b.Opening, b.Body, b.Handoff)
+	for i := range parts {
+		parts[i] = stripSpeakerLabel(parts[i])
+	}
+	for i := 1; i < len(parts); i++ {
+		parts[i] = dropRepeatedPrefix(parts[i-1], parts[i])
+	}
+	return strings.TrimSpace(strings.Join(nonEmpty(parts...), " "))
+}
+
+// speakerLabel matches a script-style speaker tag at the start of a line:
+// "Dutch:", "Dutch 'The Hammer' Mahoney:", "DJ:".
+//
+// The model is writing a SCRIPT rather than speaking, and the label is not part
+// of the break -- it is the stage direction around it. Stripped rather than
+// rejected, because everything after the colon is usually a perfectly good
+// break and throwing it away would cost a good line to fix a prefix.
+var speakerLabel = regexp.MustCompile(`^[A-Z][\w'". ]{0,40}:\s+`)
+
+// stripSpeakerLabel removes a leading speaker tag.
+func stripSpeakerLabel(s string) string {
+	// Only when what follows is real speech; "Coming up:" is a legitimate
+	// opening and must survive.
+	trimmed := speakerLabel.ReplaceAllString(s, "")
+	if trimmed == s || len(strings.Fields(trimmed)) < 3 {
+		return s
+	}
+	// A label is a NAME, and a name has no lowercase words in it. That is what
+	// separates "Dutch 'The Hammer' Mahoney:" from "Coming up:", which is a
+	// perfectly good opening and must survive untouched.
+	label := strings.TrimSuffix(strings.TrimSpace(s[:len(s)-len(trimmed)]), ":")
+	words := strings.Fields(label)
+	if len(words) == 0 || len(words) > 4 {
+		return s
+	}
+	for _, w := range words {
+		if !looksLikeName(w) {
+			return s
+		}
+	}
+	return trimmed
+}
+
+// looksLikeName reports whether a word could be part of a speaker's name:
+// capitalised, or a quoted nickname, or an initialism.
+func looksLikeName(w string) bool {
+	w = strings.Trim(w, `'"`)
+	if w == "" {
+		return false
+	}
+	for _, r := range w {
+		if unicode.IsLower(r) {
+			return false
+		}
+		break // only the first rune decides
+	}
+	return unicode.IsUpper([]rune(w)[0])
+}
+
+// dropRepeatedPrefix removes the start of next when it repeats the end of prev.
+//
+// Compared on normalised words so "Next up," and "Next up" match, and only for
+// runs of at least two words: a single shared word is ordinary English.
+func dropRepeatedPrefix(prev, next string) string {
+	prevWords, nextWords := strings.Fields(prev), strings.Fields(next)
+	if len(prevWords) == 0 || len(nextWords) < 2 {
+		return next
+	}
+
+	// Longest first, so "Next up, a" is preferred over "Next".
+	maxRun := min(len(prevWords), len(nextWords)-1)
+	for n := maxRun; n >= 2; n-- {
+		if sameWords(prevWords[len(prevWords)-n:], nextWords[:n]) {
+			return strings.TrimSpace(strings.Join(nextWords[n:], " "))
+		}
+	}
+	// A whole short opening repeated verbatim: "Good evening." / "Good evening."
+	if len(prevWords) <= 3 && len(nextWords) > len(prevWords) && sameWords(prevWords, nextWords[:len(prevWords)]) {
+		return strings.TrimSpace(strings.Join(nextWords[len(prevWords):], " "))
+	}
+	return next
+}
+
+func sameWords(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if normaliseWord(a[i]) != normaliseWord(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// normaliseWord strips punctuation and case so "up," equals "Up".
+func normaliseWord(w string) string {
+	return strings.ToLower(strings.TrimFunc(w, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}))
 }
 
 func nonEmpty(parts ...string) []string {
@@ -258,7 +363,37 @@ func ResolveFactText(id string, prev, cur, next *enrich.Dossier) (string, bool) 
 // required and given an empty-only shape, so a personality-only break is still
 // generable rather than impossible.
 func BreakSchema(prev, cur, next *enrich.Dossier) map[string]any {
+	return BreakSchemaExcluding(prev, cur, next, nil)
+}
+
+// BreakSchemaExcluding is BreakSchema with some fact ids withheld.
+//
+// Withheld, not merely discouraged: the enum IS the vocabulary the sampler can
+// emit, so a fact left out of it cannot be asserted at all. That is the same
+// move that makes an ungrounded fact impossible, applied to a fact the DJ has
+// just used.
+//
+// It exists because GATE 5 measured the failure precisely. Nine shared 4-grams
+// across twenty raw breaks, and EVERY ONE of them was an artist fact recited
+// twice -- "linkin park formed 1996", "lenny kravitz born 1964". The writer had
+// no way to know it had already said them. The gate's prescribed remedy was to
+// escalate the collision index from n-grams to embeddings, which would have
+// detected the repetition harder without preventing any of it.
+func BreakSchemaExcluding(prev, cur, next *enrich.Dossier, exclude []string) map[string]any {
 	ids := ResolvableFactIDs(prev, cur, next)
+	if len(exclude) > 0 {
+		skip := make(map[string]bool, len(exclude))
+		for _, id := range exclude {
+			skip[id] = true
+		}
+		kept := ids[:0]
+		for _, id := range ids {
+			if !skip[id] {
+				kept = append(kept, id)
+			}
+		}
+		ids = kept
+	}
 
 	props := map[string]any{
 		"opening": map[string]any{"type": "string", "maxLength": 200},

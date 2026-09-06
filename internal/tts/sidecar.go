@@ -54,6 +54,12 @@ type Config struct {
 	// Voice is used when Synthesize is called with an empty voice.
 	Voice string
 
+	// Addr is an EXTERNAL sidecar to use instead of starting one, so an
+	// operator can run Kokoro wherever they like -- another machine, a GPU
+	// box, a container they manage -- or swap it for any server speaking the
+	// same two endpoints.
+	Addr string
+
 	HealthInterval time.Duration // between health polls; default 5s
 	StartTimeout   time.Duration // to first healthy response; default 30s
 	Backoff        time.Duration // first respawn delay, doubling to 30s; default 1s
@@ -97,6 +103,9 @@ type Sidecar struct {
 	mu  sync.Mutex // guards cmd
 	cmd *exec.Cmd
 
+	// external means the operator runs the sidecar; Jockora only watches it.
+	external bool
+
 	stop     chan struct{}
 	stopped  chan struct{}
 	closeErr error
@@ -107,6 +116,11 @@ type Sidecar struct {
 // that gets a *Sidecar back has a warm model rather than a promise of one.
 func Start(ctx context.Context, cfg Config) (*Sidecar, error) {
 	cfg.applyDefaults()
+
+	if cfg.Addr != "" {
+		// Somebody else's process. Attach, never spawn, and never kill.
+		return attach(ctx, cfg)
+	}
 
 	addr, err := freeAddr()
 	if err != nil {
@@ -260,7 +274,9 @@ func (s *Sidecar) supervise() {
 	for {
 		select {
 		case <-s.stop:
-			s.kill()
+			if !s.external {
+				s.kill()
+			}
 			return
 		case <-tick.C:
 		}
@@ -272,6 +288,12 @@ func (s *Sidecar) supervise() {
 		}
 
 		s.healthy.Store(false)
+		if s.external {
+			// Killing or restarting a server Jockora does not own would be
+			// worse than the outage it is reporting.
+			s.cfg.Log.Warn("external tts sidecar is not answering", "addr", s.addr)
+			continue
+		}
 		s.cfg.Log.Warn("tts sidecar unhealthy, respawning", "addr", s.addr, "backoff", backoff)
 		s.kill()
 
@@ -393,7 +415,33 @@ func (s *Sidecar) Close() error {
 		s.healthy.Store(false)
 		close(s.stop)
 		<-s.stopped
-		s.kill()
+		if !s.external {
+			s.kill()
+		}
 	})
 	return s.closeErr
+}
+
+// attach uses a sidecar the operator is running, instead of starting one.
+//
+// The rest of this file is unchanged by it: Synthesize, Healthy and the health
+// poll all work the same way. What differs is that nothing is spawned, killed
+// or respawned -- Jockora does not own the process and must not act as if it
+// does.
+func attach(ctx context.Context, cfg Config) (*Sidecar, error) {
+	s := &Sidecar{
+		cfg:      cfg,
+		addr:     strings.TrimPrefix(strings.TrimPrefix(cfg.Addr, "http://"), "https://"),
+		http:     &http.Client{},
+		external: true,
+		stop:     make(chan struct{}),
+		stopped:  make(chan struct{}),
+	}
+	if err := s.waitHealthy(ctx); err != nil {
+		return nil, err
+	}
+	s.healthy.Store(true)
+	cfg.Log.Info("using an external speech sidecar", "addr", s.addr)
+	go s.supervise()
+	return s, nil
 }

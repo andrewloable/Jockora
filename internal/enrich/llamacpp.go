@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -28,9 +29,20 @@ import (
 //
 // The native endpoint takes a raw prompt, has no template surface, and under a
 // grammar forces JSON from the first token, so no preamble is representable.
+// templateState records whether this server can apply a chat template.
+type templateState int32
+
+const (
+	templateUnknown templateState = iota
+	templateAvailable
+	templateMissing
+)
+
 type LlamaCPP struct {
 	baseURL string
 	client  *http.Client
+	// template latches whether /apply-template exists, so it is probed once.
+	template atomic.Int32
 }
 
 // NewLlamaCPP returns a client for a llama-server at baseURL.
@@ -57,7 +69,81 @@ type llamaResponse struct {
 }
 
 // Complete runs one completion.
+// applyTemplate renders a prompt through the MODEL'S OWN chat template.
+//
+// THIS IS NOT COSMETIC, and leaving it out was the single largest quality
+// problem in the DJ. /completion applies no template at all -- that is what
+// makes it the right endpoint, since a grammar can then force JSON from the
+// first token -- but it also means an INSTRUCT model receives a bare document
+// and behaves like a BASE model, continuing the text rather than obeying it.
+//
+// The symptom is unmistakable in hindsight: the model answers a prompt
+// describing a radio break with "Your radio break sentence goes here", and a
+// dossier prompt with the placeholder that described the field. It is not
+// refusing to follow the instruction; it was never asked to follow one. Two
+// different models, gemma-4-E4B and Qwen2.5-7B, failed identically.
+//
+// llama-server renders the template itself at /apply-template, so no Jinja
+// engine is needed here and the template always matches the loaded model.
+func (l *LlamaCPP) applyTemplate(ctx context.Context, prompt string) (string, error) {
+	if templateState(l.template.Load()) == templateMissing {
+		return prompt, nil
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"messages": []map[string]string{{"role": "user", "content": prompt}},
+	})
+	if err != nil {
+		return prompt, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		l.baseURL+"/apply-template", bytes.NewReader(body))
+	if err != nil {
+		return prompt, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := l.client.Do(httpReq)
+	if err != nil {
+		// Unreachable is the caller's problem, not a template problem; do not
+		// latch it, because the next call may well succeed.
+		return prompt, err
+	}
+	defer resp.Body.Close() //nolint:errcheck // body handled below
+
+	if resp.StatusCode != http.StatusOK {
+		// An older llama.cpp has no such endpoint. Latch it so this is probed
+		// once and not before every completion.
+		l.template.Store(int32(templateMissing))
+		return prompt, nil
+	}
+
+	var out struct {
+		Prompt string `json:"prompt"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.Prompt == "" {
+		l.template.Store(int32(templateMissing))
+		return prompt, nil
+	}
+	l.template.Store(int32(templateAvailable))
+	return out.Prompt, nil
+}
+
+// TemplateApplied reports whether this client is templating its prompts, so an
+// operator can be told when it is not: an untemplated instruct model produces
+// output that looks like a model problem and is not one.
+func (l *LlamaCPP) TemplateApplied() bool {
+	return templateState(l.template.Load()) != templateMissing
+}
+
 func (l *LlamaCPP) Complete(ctx context.Context, req CompletionRequest) (Completion, error) {
+	prompt, err := l.applyTemplate(ctx, req.Prompt)
+	if err != nil {
+		// Reaching the server failed. Fall through with the raw prompt so the
+		// completion below reports the real connection error.
+		prompt = req.Prompt
+	}
+
 	temperature := req.Temperature
 	if temperature <= 0 {
 		// Cataloguing facts is not a creative task, and a low temperature also
@@ -66,7 +152,7 @@ func (l *LlamaCPP) Complete(ctx context.Context, req CompletionRequest) (Complet
 		temperature = DefaultTemperature
 	}
 	body, err := json.Marshal(llamaRequest{
-		Prompt:      req.Prompt,
+		Prompt:      prompt,
 		JSONSchema:  req.JSONSchema,
 		NPredict:    req.NPredict,
 		Temperature: temperature,

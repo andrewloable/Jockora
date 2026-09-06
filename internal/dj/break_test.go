@@ -293,3 +293,84 @@ func TestParseBreakRejectsWordlessText(t *testing.T) {
 		}
 	}
 }
+
+// TestBreakCollapsesRepeatedOpening. Models restate the opening at the start of
+// the body, because each field is written knowing what the break should sound
+// like and not what the neighbouring field already said. Every input here came
+// from a live run and it is the most audible flaw in otherwise good output.
+func TestBreakCollapsesRepeatedOpening(t *testing.T) {
+	cases := []struct{ opening, body, want string }{
+		{"Next up,", "Next up, a powerful declaration of love from Bryan Adams.",
+			"Next up, a powerful declaration of love from Bryan Adams."},
+		{"Good evening.", "Good evening. The music is shifting.",
+			"Good evening. The music is shifting."},
+		{"And now, as we", "And now, as we roll with it, let's turn to The Smashing Pumpkins.",
+			"And now, as we roll with it, let's turn to The Smashing Pumpkins."},
+		{"The previous track was", "The previous track was aggressive.",
+			"The previous track was aggressive."},
+		// Not a repeat: a shared single word is ordinary English and must stay.
+		{"Three in the morning.", "The only honest hour.",
+			"Three in the morning. The only honest hour."},
+		// Nothing shared at all.
+		{"Midnight here.", "Coming up, something louder.",
+			"Midnight here. Coming up, something louder."},
+	}
+	for _, tc := range cases {
+		b := &Break{Opening: tc.opening, Body: tc.body}
+		if got := b.Text(); got != tc.want {
+			t.Errorf("Text() = %q\n    want %q", got, tc.want)
+		}
+	}
+}
+
+// TestBreakRejectsSnakeCaseTokens: nobody says "3am_listening" out loud. Both
+// of these aired, lifted from the station-tag vocabulary.
+func TestBreakRejectsSnakeCaseTokens(t *testing.T) {
+	for _, text := range []string{
+		"3am_listening Next up, we have 'I See Red' by Frida. radio_intro_music",
+		"Here is something from the night_drive playlist.",
+	} {
+		if _, echoed := echoesInstructions(text); !echoed {
+			t.Errorf("echoesInstructions(%q) = false; this aired", text)
+		}
+	}
+	if phrase, echoed := echoesInstructions("Next up, Counting Crows with a wistful tune."); echoed {
+		t.Errorf("matched %q on a real break", phrase)
+	}
+}
+
+// TestBreakStripsSpeakerLabels. The model writes a SCRIPT rather than speaking,
+// and the label is the stage direction around the break, not part of it. Both
+// of these aired.
+func TestBreakStripsSpeakerLabels(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Dutch: And now, as we welcome Laurindo Almeida, let's swing.",
+			"And now, as we welcome Laurindo Almeida, let's swing."},
+		{"Dutch 'The Hammer' Mahoney: The next track is about to fill the airwaves.",
+			"The next track is about to fill the airwaves."},
+		// A legitimate opening that happens to end in a colon must survive.
+		{"Coming up: something with more teeth in it.",
+			"Coming up: something with more teeth in it."},
+		{"Three in the morning. The only honest hour.",
+			"Three in the morning. The only honest hour."},
+	}
+	for _, tc := range cases {
+		if got := (&Break{Opening: tc.in}).Text(); got != tc.want {
+			t.Errorf("Text() = %q\n    want %q", got, tc.want)
+		}
+	}
+}
+
+// TestBreakRejectsStageDirections: the model describing its own delivery
+// instead of performing it. "Loudly and enthusiastically." aired as a break.
+func TestBreakRejectsStageDirections(t *testing.T) {
+	for _, text := range []string{
+		"Loudly and enthusiastically. And now, as we reflect on ABBA's summer.",
+		"Excitedly. Here comes the next one.",
+		"[shouting] ROCK ON",
+	} {
+		if _, echoed := echoesInstructions(text); !echoed {
+			t.Errorf("echoesInstructions(%q) = false; this aired", text)
+		}
+	}
+}

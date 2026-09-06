@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/andrewloable/jockora/internal/store"
 )
@@ -105,4 +106,82 @@ func TrackLoudness(ctx context.Context, s *store.Store, trackID int64) (float64,
 		return 0, nil
 	}
 	return lufs.Float64, nil
+}
+
+// StationTaste is what a library actually sounds like, counted from its
+// dossiers. It is what a station picks its jock from.
+type StationTaste struct {
+	Genres []string
+	Moods  []string
+}
+
+// Taste reads the most common station tags and moods across the enriched
+// tracks.
+//
+// Counted from the DOSSIERS rather than from a setting, so the jock follows the
+// music. A half-enriched library still answers: it describes what is known so
+// far, and the answer improves as enrichment proceeds.
+func Taste(ctx context.Context, s *store.Store, top int) (StationTaste, error) {
+	if top <= 0 {
+		top = 5
+	}
+	var out StationTaste
+
+	rows, err := s.DB().QueryContext(ctx, `SELECT json FROM dossiers`)
+	if err != nil {
+		return out, fmt.Errorf("enrich: reading dossiers for taste: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // counting only
+
+	genres, moods := map[string]int{}, map[string]int{}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return out, err
+		}
+		var d Dossier
+		if err := json.Unmarshal([]byte(raw), &d); err != nil {
+			continue // one unreadable row must not cost the whole answer
+		}
+		for _, g := range d.StationTags {
+			genres[g]++
+		}
+		for _, m := range d.Mood {
+			moods[m]++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+
+	out.Genres = mostCommon(genres, top)
+	out.Moods = mostCommon(moods, top)
+	return out, nil
+}
+
+// mostCommon returns the n most frequent keys, ties broken by name so the
+// answer does not change between runs over the same library.
+func mostCommon(counts map[string]int, n int) []string {
+	type kv struct {
+		k string
+		v int
+	}
+	all := make([]kv, 0, len(counts))
+	for k, v := range counts {
+		all = append(all, kv{k, v})
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].v != all[j].v {
+			return all[i].v > all[j].v
+		}
+		return all[i].k < all[j].k
+	})
+	if len(all) > n {
+		all = all[:n]
+	}
+	out := make([]string, 0, len(all))
+	for _, e := range all {
+		out = append(out, e.k)
+	}
+	return out
 }

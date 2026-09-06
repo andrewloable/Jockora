@@ -65,7 +65,21 @@ type probeResult struct {
 // A file that will not probe is recorded with playable=0 rather than skipped or
 // aborted on: a library of ten thousand tracks always contains a few damaged
 // ones, and losing the whole scan to one of them is not acceptable.
+// ScanProgress is called as a scan proceeds, so a long one can say so.
+//
+// A library of ten thousand files takes MINUTES because every one is probed
+// with ffprobe, and a scan that prints nothing is indistinguishable from a
+// hang -- which is exactly how it was read the first time a real library was
+// pointed at it.
+type ScanProgress func(found int, path string)
+
+// Scan reads a music library into the database.
 func Scan(ctx context.Context, s *store.Store, root string) (Stats, error) {
+	return ScanWithProgress(ctx, s, root, nil)
+}
+
+// ScanWithProgress is Scan, reporting as it goes.
+func ScanWithProgress(ctx context.Context, s *store.Store, root string, progress ScanProgress) (Stats, error) {
 	var stats Stats
 
 	fi, err := os.Stat(root)
@@ -89,6 +103,9 @@ func Scan(ctx context.Context, s *store.Store, root string) (Stats, error) {
 		}
 
 		stats.Found++
+		if progress != nil {
+			progress(stats.Found, path)
+		}
 		meta, probeErr := probe(ctx, path)
 		if probeErr != nil {
 			// Detected HERE, at scan time, and never at play time. A scan is

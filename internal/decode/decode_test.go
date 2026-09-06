@@ -8,7 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
+	"regexp"
 	"testing"
 	"time"
 
@@ -90,7 +90,13 @@ func TestDecodeCorruptFileReturnsError(t *testing.T) {
 	}
 	// The operator has to be able to act on this without re-running ffmpeg by
 	// hand, so ffmpeg's own diagnosis must survive into the error.
-	if !strings.Contains(err.Error(), "Invalid data") {
+	//
+	// Matched by ffmpeg's LOG FORMAT rather than by its wording. The wording is
+	// version-specific -- ffmpeg 8 says "Invalid data found when processing
+	// input", Ubuntu's says "Failed to read frame size" and "Invalid argument"
+	// -- and pinning it broke CI while the code was working perfectly. The
+	// bracketed component tag is stable across every version.
+	if !ffmpegLogLine.MatchString(err.Error()) {
 		t.Errorf("error does not carry ffmpeg stderr: %v", err)
 	}
 }
@@ -149,3 +155,7 @@ func TestDecodeContextCancelUnblocksSend(t *testing.T) {
 		t.Fatal("Decode did not return after context cancel: it is deadlocked on send")
 	}
 }
+
+// ffmpegLogLine matches ffmpeg's component log prefix, "[mp3 @ 0x55...]",
+// which every version emits and no wrapper of ours produces.
+var ffmpegLogLine = regexp.MustCompile(`\[[^\]]{1,40} @ 0x[0-9a-f]+\]`)

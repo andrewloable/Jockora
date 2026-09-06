@@ -30,8 +30,35 @@ type Config struct {
 	// on the development host, and relying on whatever python3 resolves to is
 	// exactly what made the voice epic look unbuildable. The sidecar is a
 	// separate process anyway, so a dedicated 3.10 venv costs nothing.
-	TTSPython   string
-	TTSScript   string // the sidecar entry point
+	TTSPython string
+	TTSScript string // the sidecar entry point
+
+	// LLMModelPath, when set, makes Jockora START AND SUPERVISE llama-server
+	// itself rather than expecting one to be running.
+	//
+	// Both modes are first class. An operator who already runs a model server,
+	// or runs it on a GPU box, sets -llm-url and Jockora manages nothing. One
+	// who wants a single thing to run sets -llm-model. Neither needs a rebuild,
+	// and swapping the model is a flag.
+	LLMModelPath   string
+	LLMBinary      string // llama-server; found on PATH by default
+	LLMContextSize int
+	LLMGPULayers   int
+
+	// LLMAPI selects the dialect spoken to LLMBaseURL: "llamacpp" (the
+	// default) or "ollama".
+	//
+	// It exists because an operator very often already runs something. The
+	// deployment target here has a 2 GB GPU, so the model usually belongs on
+	// another machine entirely -- and telling Jockora to use what is already
+	// there beats making them run a second server. llama.cpp stays the default
+	// so nothing changes for anyone who has not asked for this.
+	LLMAPI string
+
+	// LLMAPIKey authenticates a hosted endpoint. Prefer the environment
+	// variable: a key on a command line ends up in shell history and in `ps`
+	// output for every user on the box.
+	LLMAPIKey   string
 	StationName string // which station to broadcast
 
 	SampleRate        int // canonical bus sample rate
@@ -95,6 +122,13 @@ func LoadArgs(args []string, register func(*flag.FlagSet)) (*Config, error) {
 	fs.StringVar(&c.PersonaPath, "persona", "", "persona TOML for the jock")
 	fs.StringVar(&c.TTSPython, "tts-python", "python3.10", "python interpreter for the speech sidecar (needs kokoro-onnx)")
 	fs.StringVar(&c.TTSScript, "tts-script", "sidecar/kokoro_server.py", "speech sidecar entry point")
+	fs.StringVar(&c.LLMModelPath, "llm-model", "", "GGUF to serve; set this to have Jockora run llama-server itself")
+	fs.StringVar(&c.LLMBinary, "llm-binary", "llama-server", "llama-server executable, when -llm-model is set")
+	fs.IntVar(&c.LLMContextSize, "llm-context", 8192, "llama-server context size")
+	fs.IntVar(&c.LLMGPULayers, "llm-gpu-layers", 99, "layers to offload to the GPU (99 offloads what fits)")
+	fs.StringVar(&c.LLMAPI, "llm-api", "llamacpp",
+		`API spoken to -llm-url: "llamacpp" (default), "ollama", or "openai" for any OpenAI-compatible host such as OpenRouter`)
+	fs.StringVar(&c.LLMAPIKey, "llm-api-key", "", "API key for a hosted endpoint (prefer JOCKORA_LLM_API_KEY)")
 	fs.StringVar(&c.StationName, "station", "", "station to broadcast")
 
 	fs.IntVar(&c.SampleRate, "sample-rate", 48000, "canonical bus sample rate")

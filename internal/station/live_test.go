@@ -21,6 +21,13 @@ import (
 	"github.com/andrewloable/jockora/internal/tts"
 )
 
+// NOTE ON CORPUS SIZE. This used to read 12 dossiers however many the database
+// held, which made the repetition drop rate a property of the TEST rather than
+// of the model: a DJ given twelve tracks and asked for twenty breaks genuinely
+// runs out of things to say, and the said-lines validator correctly refuses
+// them. Measured on the same model, 15 tracks gave 6 repetition drops and 60
+// gave 8 only because the extra 48 were never loaded.
+//
 // TestLiveBreakTiming is the MEASUREMENT PROCEDURE from Jockora-96e.5: run real
 // generations end to end and record how long they take, RETRY INCLUSIVE, so
 // that T can be set from evidence instead of from the 150-second guess.
@@ -61,7 +68,11 @@ func TestLiveBreakTiming(t *testing.T) {
 	}
 	t.Logf("using %d enriched tracks", len(dossiers))
 
-	persona, err := dj.LoadPersona("../../personas/midnight_vale.toml")
+	personaPath := os.Getenv("JOCKORA_LIVE_PERSONA")
+	if personaPath == "" {
+		personaPath = "../../personas/midnight_vale.toml"
+	}
+	persona, err := dj.LoadPersona(personaPath)
 	if err != nil {
 		t.Fatalf("loading persona: %v", err)
 	}
@@ -177,7 +188,7 @@ func loadEnrichedTracks(t *testing.T, ctx context.Context, s *store.Store) ([]*e
 	rows, err := s.DB().QueryContext(ctx, `
 		SELECT t.id, coalesce(t.artist,''), coalesce(t.title,'')
 		  FROM tracks t JOIN dossiers d ON d.track_id = t.id
-		 WHERE t.playable = 1 LIMIT 12`)
+		 WHERE t.playable = 1 LIMIT 200`)
 	if err != nil {
 		t.Fatal(err)
 	}

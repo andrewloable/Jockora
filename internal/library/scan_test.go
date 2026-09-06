@@ -373,3 +373,42 @@ func TestScanNamesTheFilesItRejected(t *testing.T) {
 		t.Error("a file ffprobe could not read is still marked playable")
 	}
 }
+
+// TestScanReportsProgress. A ten-thousand-file library takes minutes because
+// every file is probed with ffprobe, and a scan that prints nothing is
+// indistinguishable from a hang -- which is how it was read the first time a
+// real library was pointed at a redeployed station.
+func TestScanReportsProgress(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 3; i++ {
+		makeAudio(t, dir, "t"+strconv.Itoa(i)+".mp3", "Artist", "Title", "Album", 1)
+	}
+
+	var seen []int
+	var lastPath string
+	s := openStore(t)
+	stats, err := ScanWithProgress(context.Background(), s, dir, func(found int, path string) {
+		seen = append(seen, found)
+		lastPath = path
+	})
+	if err != nil {
+		t.Fatalf("ScanWithProgress: %v", err)
+	}
+
+	if len(seen) != stats.Found {
+		t.Errorf("progress fired %d times for %d files", len(seen), stats.Found)
+	}
+	for i, n := range seen {
+		if n != i+1 {
+			t.Errorf("progress reported %d at call %d; the count must be monotonic", n, i+1)
+		}
+	}
+	if lastPath == "" {
+		t.Error("progress reported no path, so a scan stuck on one file cannot be identified")
+	}
+
+	// Scan without a callback must behave identically.
+	if _, err := Scan(context.Background(), openStore(t), dir); err != nil {
+		t.Errorf("Scan without progress: %v", err)
+	}
+}

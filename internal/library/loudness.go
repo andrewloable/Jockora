@@ -88,19 +88,32 @@ func Measure(ctx context.Context, path string) (Measurement, error) {
 		"-nostdin", "-hide_banner",
 		"-i", path,
 		"-af", "loudnorm=I=-16:print_format=json",
+		// Structured progress on STDOUT, which ends with an exact final block.
+		// The alternative -- scraping the periodic "time=" lines ffmpeg writes
+		// to stderr and taking the last one -- reads whatever the last update
+		// happened to say, and on CI's ffmpeg that was 7.1 seconds for a
+		// 10-second file. This is the number truncation detection depends on,
+		// so it must not be whatever a log line last mentioned.
+		"-progress", "pipe:1",
 		"-f", "null", "-",
 	)
 
 	// loudnorm prints its summary to STDERR, not stdout. Reading stdout gets
 	// nothing at all and looks like a parse failure.
-	var stderr strings.Builder
+	var stderr, stdout strings.Builder
 	cmd.Stderr = &stderr
+	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
 		return out, fmt.Errorf("library: measuring %s: %w: %s", path, err, lastLines(stderr.String(), 3))
 	}
 
 	diag := stderr.String()
-	out.DecodedSeconds = parseDecodedSeconds(diag)
+	out.DecodedSeconds = parseProgressSeconds(stdout.String())
+	if out.DecodedSeconds == 0 {
+		// An ffmpeg too old for -progress. Fall back to the log scrape rather
+		// than reporting zero, which Truncated would read as "unknown".
+		out.DecodedSeconds = parseDecodedSeconds(diag)
+	}
 
 	summary, err := extractJSON(diag)
 	if err != nil {
@@ -136,6 +149,29 @@ var timeRE = regexp.MustCompile(`time=(\d+):(\d\d):(\d\d(?:\.\d+)?)`)
 // parseDecodedSeconds reads how much audio ffmpeg actually processed from the
 // LAST progress stamp in its diagnostics. Zero means it could not be found,
 // which callers treat as "unknown" rather than "empty".
+// progressTimeRE matches the microsecond field of an ffmpeg -progress block.
+var progressTimeRE = regexp.MustCompile(`out_time_us=(\d+)`)
+
+// parseProgressSeconds reads the LAST out_time_us from a -progress stream.
+//
+// The last block is emitted with progress=end when ffmpeg finishes, so it is
+// the true total rather than whatever the periodic updates last reached.
+func parseProgressSeconds(progress string) float64 {
+	all := progressTimeRE.FindAllStringSubmatch(progress, -1)
+	if len(all) == 0 {
+		return 0
+	}
+	us, err := strconv.ParseFloat(all[len(all)-1][1], 64)
+	if err != nil {
+		return 0
+	}
+	return us / 1e6
+}
+
+// parseDecodedSeconds scrapes ffmpeg's periodic stderr progress.
+//
+// Kept only as a fallback for an ffmpeg without -progress. It reports whatever
+// the last periodic update said, which is not necessarily the end of the file.
 func parseDecodedSeconds(diag string) float64 {
 	all := timeRE.FindAllStringSubmatch(diag, -1)
 	if len(all) == 0 {

@@ -10,3 +10,8 @@ jockora_brainstorming_product_direction.md
 .dolt/
 *.db
 .beads-credential-key
+transcripts
+# Scraped third-party material must never enter a repository that is
+# dual-licensed for commercial sale.
+transcripts/
+download_transcripts.sh

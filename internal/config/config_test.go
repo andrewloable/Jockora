@@ -6,6 +6,7 @@ package config
 import (
 	"flag"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -170,5 +171,34 @@ func TestLoadCapturesPositionalArgs(t *testing.T) {
 	}
 	if len(cfg.Args) != 2 {
 		t.Errorf("Args = %v, want two tracks", cfg.Args)
+	}
+}
+
+// TestConfigModelServerFlagsHaveEnvEquivalents. The container deployment sets
+// environment, not argv, so a flag without its JOCKORA_ variable is a flag the
+// deployed station cannot use.
+func TestConfigModelServerFlagsHaveEnvEquivalents(t *testing.T) {
+	cases := []struct {
+		env, value string
+		get        func(*Config) string
+	}{
+		{"JOCKORA_LLM_MODEL", "/models/qwen.gguf", func(c *Config) string { return c.LLMModelPath }},
+		{"JOCKORA_LLM_BINARY", "/opt/llama-server", func(c *Config) string { return c.LLMBinary }},
+		{"JOCKORA_LLM_CONTEXT", "4096", func(c *Config) string { return strconv.Itoa(c.LLMContextSize) }},
+		{"JOCKORA_LLM_GPU_LAYERS", "20", func(c *Config) string { return strconv.Itoa(c.LLMGPULayers) }},
+		{"JOCKORA_TTS_PYTHON", "/venv/bin/python", func(c *Config) string { return c.TTSPython }},
+		{"JOCKORA_TTS_SCRIPT", "/opt/kokoro.py", func(c *Config) string { return c.TTSScript }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.env, func(t *testing.T) {
+			t.Setenv(tc.env, tc.value)
+			cfg, err := LoadArgs(nil, nil)
+			if err != nil {
+				t.Fatalf("loading with %s set: %v", tc.env, err)
+			}
+			if got := tc.get(cfg); got != tc.value {
+				t.Errorf("%s did not reach its flag: got %q, want %q", tc.env, got, tc.value)
+			}
+		})
 	}
 }

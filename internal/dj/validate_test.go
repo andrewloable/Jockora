@@ -386,3 +386,68 @@ func TestGenerateRejectsModelScaffolding(t *testing.T) {
 		}
 	}
 }
+
+// TestGenerateRejectsTemplatePlaceholders. Every string here AIRED in a live
+// run: the model was filling a form rather than talking, and a placeholder is
+// grammatical, the right length, and collides with nothing.
+func TestGenerateRejectsTemplatePlaceholders(t *testing.T) {
+	for _, text := range []string{
+		"Tuning in now. Your radio break sentence goes here. INTRO",
+		"Midnight here... TEXT OF YOUR RADIO BREAK HERE.",
+		"The song just ended. Your spoken radio break goes here. It must fit within 30 words.",
+		"Here's what's coming up. Your spoken word here.",
+		"This track has just started. Your spoken dialogue here.",
+	} {
+		if _, echoed := echoesInstructions(text); !echoed {
+			t.Errorf("echoesInstructions(%q) = false; this aired", text)
+		}
+	}
+
+	// Real breaks, from the same run, must survive.
+	for _, text := range []string{
+		"Over the last song, we looked at the struggle to maintain a facade and the desire for honesty.",
+		"It's been a heavy one, but the next track is a powerful statement of defiance. Let's hear them hit the floor.",
+		"Three in the morning is the only honest hour.",
+	} {
+		if phrase, echoed := echoesInstructions(text); echoed {
+			t.Errorf("echoesInstructions(%q) matched %q on a real break", text, phrase)
+		}
+	}
+}
+
+// TestGenerateRejectsPlaceholdersStructurally. A phrase list lost this fight:
+// blocking "your radio break sentence goes here" produced "YOUR SPEECH HERE",
+// then "YOUR 30 WORDS HERE", then "YOUR LINES HERE". Every string below aired
+// in a live run.
+func TestGenerateRejectsPlaceholdersStructurally(t *testing.T) {
+	aired := []string{
+		"Welcome to Midnight, YOUR SPEECH HERE Linkin Park",
+		"Now, as we prepare to stand up... YOUR TEXT HERE Linkin Park, 'Hit The Floor'",
+		"Linkin Park formed in 1996. YOUR 30 WORDS HERE. The next track is...",
+		"next.genre YOUR LINES HERE next.track_name",
+		"Good morning. YOUR SPANISH HERE Next up, a band with a history.",
+		"NEXT UP YOUR AUDIO HERE INTRO",
+		"THANK YOU FOR LISTENING TO YOUR SPEECH HERE NEXT TRACK STARTS",
+		"your 30 words go here",
+	}
+	for _, text := range aired {
+		if _, echoed := echoesInstructions(text); !echoed {
+			t.Errorf("echoesInstructions(%q) = false; this aired", text)
+		}
+	}
+
+	// Real breaks from the same runs must survive, including ones that shout a
+	// little or mention the word "here".
+	real := []string{
+		"Next up, a band that's been making waves since 1996, Linkin Park, with a track that delves into the shadows of past regrets.",
+		"And now, as we try to untangle the threads of our past, Linkin Park with a song about finding your way out of the chaos.",
+		"Three in the morning is the only honest hour. Stay here.",
+		"That was AC DC, and yes it was as loud as you remember.",
+		"OK. Here is something quieter.",
+	}
+	for _, text := range real {
+		if phrase, echoed := echoesInstructions(text); echoed {
+			t.Errorf("echoesInstructions(%q) matched %q on a real break", text, phrase)
+		}
+	}
+}

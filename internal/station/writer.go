@@ -42,6 +42,19 @@ func (w *BreakWriter) SetContext(prevID, curID, nextID int64, prevArtist, prevTi
 	w.prevArtist, w.prevTitle = prevArtist, prevTitle
 }
 
+// SetTrackNames tells the writer which artists and titles this break may
+// repeat.
+//
+// Consecutive breaks share tracks by design -- one break's NEXT is the
+// following break's CURRENT -- so a DJ that says what is coming and then says
+// what just played repeats the name every time. Naming the record is the job;
+// the collision index is for reused PHRASING.
+func (w *BreakWriter) SetTrackNames(names ...string) {
+	if w.Validator != nil {
+		w.Validator.SetTrackNames(names...)
+	}
+}
+
 // Write produces one break, or an error if none could be written.
 //
 // An error here is NOT a fault. LengthCheck turns it into a dropped break and

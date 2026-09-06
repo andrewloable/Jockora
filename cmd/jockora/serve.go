@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/andrewloable/jockora/internal/app"
@@ -32,7 +34,16 @@ func buildLibrary(ctx context.Context, cfg *config.Config, log *slog.Logger) (*a
 		return nil, err
 	}
 
-	stats, err := library.Scan(ctx, s, cfg.LibraryPath)
+	// Progress every few hundred files. A ten-thousand-file library takes
+	// minutes -- every file is probed with ffprobe -- and a scan that says
+	// nothing looks exactly like a hang, which is how it was first read.
+	log.Info("scanning library, this takes a while on a large one", "root", cfg.LibraryPath)
+	started := time.Now()
+	stats, err := library.ScanWithProgress(ctx, s, cfg.LibraryPath, func(found int, path string) {
+		if found%500 == 0 {
+			log.Info("scanning", "files", found, "elapsed", time.Since(started).Round(time.Second))
+		}
+	})
 	if err != nil {
 		return nil, fmt.Errorf("scanning %s: %w", cfg.LibraryPath, err)
 	}
@@ -67,19 +78,19 @@ func buildLibrary(ctx context.Context, cfg *config.Config, log *slog.Logger) (*a
 // see is "the DJ never started".
 func buildBreaks(ctx context.Context, cfg *config.Config, lib *app.Library, log *slog.Logger) (*station.Pipeline, *station.BreakWriter, *tts.Sidecar) {
 	if cfg.PersonaPath == "" {
-		log.Info("no DJ: no persona configured", "fix", "start with -persona personas/midnight_vale.toml")
+		log.Info("no DJ: no persona configured", "fix", "start with -persona personas/ to pick a jock by genre")
 		return nil, nil, nil
 	}
-	persona, err := dj.LoadPersona(cfg.PersonaPath)
+	persona, err := choosePersona(ctx, cfg.PersonaPath, lib, log)
 	if err != nil {
 		log.Error("no DJ: the persona could not be loaded", "path", cfg.PersonaPath, "err", err)
 		return nil, nil, nil
 	}
 
-	llm := enrich.NewLlamaCPP(cfg.LLMBaseURL, nil)
-	if err := llm.Health(ctx); err != nil {
-		log.Info("no DJ: the language model is not reachable",
-			"url", cfg.LLMBaseURL, "err", err, "fix", "start llama-server, or set -llm-url")
+	llm, _, err := newCompleter(ctx, cfg, log)
+	if err != nil {
+		log.Info("no DJ: no language model", "err", err,
+			"fix", "point -llm-url at a running server, add -llm-api ollama for Ollama, or set -llm-model to have Jockora run llama-server itself")
 		return nil, nil, nil
 	}
 
@@ -125,12 +136,67 @@ func buildBreaks(ctx context.Context, cfg *config.Config, lib *app.Library, log 
 	return pipeline, writer, sidecar
 }
 
+// startLLM attaches to a model server or starts one, whichever is configured.
+//
+// -llm-model wins over -llm-url when both are set: asking Jockora to run a
+// specific model is the more specific instruction.
+// newCompleter returns the language model client, whichever kind is configured.
+//
+// Ollama is reached over HTTP like any other external server, so nothing is
+// supervised: it has its own lifecycle and Jockora must not act as though it
+// owns it.
+func newCompleter(ctx context.Context, cfg *config.Config, log *slog.Logger) (enrich.Completer, func(), error) {
+	if strings.EqualFold(cfg.LLMAPI, enrich.OpenAIAPI) {
+		c := enrich.NewOpenAICompatible(cfg.LLMBaseURL, cfg.LLMModelPath, cfg.LLMAPIKey, nil)
+		if err := c.Health(ctx); err != nil {
+			return nil, nil, err
+		}
+		// Said at INFO every start, deliberately. This is the one configuration
+		// where the library's metadata and lyrics leave the machine, and a
+		// self-hoster should never discover that from a network capture.
+		log.Info("using a hosted language model; TRACK METADATA AND LYRICS LEAVE THIS MACHINE",
+			"url", cfg.LLMBaseURL, "model", cfg.LLMModelPath)
+		return c, func() {}, nil
+	}
+
+	if strings.EqualFold(cfg.LLMAPI, enrich.OllamaAPI) {
+		c := enrich.NewOllama(cfg.LLMBaseURL, cfg.LLMModelPath, nil)
+		if err := c.Health(ctx); err != nil {
+			return nil, nil, err
+		}
+		log.Info("using an Ollama server", "url", cfg.LLMBaseURL, "model", cfg.LLMModelPath)
+		return c, func() {}, nil
+	}
+
+	server, err := startLLM(ctx, cfg, log)
+	if err != nil {
+		return nil, nil, err
+	}
+	return server.Completer(), func() { _ = server.Close() }, nil
+}
+
+func startLLM(ctx context.Context, cfg *config.Config, log *slog.Logger) (*enrich.LLMServer, error) {
+	c := enrich.LLMServerConfig{
+		Binary:      cfg.LLMBinary,
+		ContextSize: cfg.LLMContextSize,
+		GPULayers:   cfg.LLMGPULayers,
+		Log:         log,
+	}
+	if cfg.LLMModelPath != "" {
+		c.ModelPath = cfg.LLMModelPath
+		log.Info("starting a language model", "model", cfg.LLMModelPath, "binary", cfg.LLMBinary)
+	} else {
+		c.BaseURL = cfg.LLMBaseURL
+	}
+	return enrich.StartLLMServer(ctx, c)
+}
+
 // buildEnricher returns the background dossier worker, or nil.
 func buildEnricher(ctx context.Context, cfg *config.Config, lib *app.Library, log *slog.Logger) *enrich.Queue {
-	llm := enrich.NewLlamaCPP(cfg.LLMBaseURL, nil)
-	if err := llm.Health(ctx); err != nil {
-		log.Info("no enrichment: the language model is not reachable",
-			"url", cfg.LLMBaseURL, "fix", "start llama-server, or set -llm-url")
+	llm, _, err := newCompleter(ctx, cfg, log)
+	if err != nil {
+		log.Info("no enrichment: no language model", "err", err,
+			"fix", "set -llm-url (with -llm-api ollama if that is what you run) or -llm-model")
 		return nil
 	}
 	return &enrich.Queue{
@@ -145,3 +211,56 @@ func buildEnricher(ctx context.Context, cfg *config.Config, lib *app.Library, lo
 // musicbrainzURL is the public API. Throttled to one request a second by the
 // client, which is MusicBrainz's published limit.
 const musicbrainzURL = "https://musicbrainz.org"
+
+// choosePersona picks the jock, from a single card or from a directory of them.
+//
+// A DIRECTORY is the interesting case: the station's own dossiers say what it
+// plays, and the jock follows the music rather than a setting somebody has to
+// remember to change. A rock library gets the rock presenter without being told
+// it is a rock library.
+//
+// A library with no dossiers yet still gets a jock. Enrichment takes hours and
+// the station has to be listenable from the first minute; the choice simply
+// improves once there is something to choose on.
+func choosePersona(ctx context.Context, path string, lib *app.Library, log *slog.Logger) (*dj.Persona, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return dj.LoadPersona(path)
+	}
+
+	personas, err := dj.LoadPersonas(path)
+	if err != nil {
+		return nil, err
+	}
+
+	taste, err := enrich.Taste(ctx, lib.Store, 6)
+	if err != nil {
+		return nil, err
+	}
+	if len(taste.Genres) == 0 && len(taste.Moods) == 0 {
+		chosen, _ := dj.SelectPersona(personas, nil, nil)
+		log.Info("jock chosen with nothing to go on yet",
+			"jock", chosen.Name(), "of", len(personas),
+			"why", "no dossiers yet; enrichment will not change the jock mid-session")
+		return chosen, nil
+	}
+
+	chosen, scores := dj.SelectPersona(personas, taste.Genres, taste.Moods)
+	log.Info("jock chosen from what the library plays",
+		"jock", chosen.Name(), "voice", chosen.VoiceID(),
+		"genres", taste.Genres, "moods", taste.Moods,
+		"matched", matchedOf(scores, chosen.ID()), "of", len(personas))
+	return chosen, nil
+}
+
+func matchedOf(scores []dj.PersonaScore, id string) []string {
+	for _, s := range scores {
+		if s.Persona.ID() == id {
+			return s.Matched
+		}
+	}
+	return nil
+}

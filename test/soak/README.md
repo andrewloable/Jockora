@@ -34,6 +34,26 @@ JOCKORA_SOAK_DURATION=10m JOCKORA_SOAK_INTERVAL=1m \
 go test -tags soak ./test/soak/ -run TestSoak -v -timeout 15m
 ```
 
+## Running it on the Linux box: use a container
+
+The target host has no ffmpeg -- only the container image does, which is the
+whole point of ffmpeg being operator-supplied and out of process. So the soak
+runs inside the shipping image, which already carries everything a Go test
+binary needs:
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -tags soak -c ./test/soak -o soak.test
+scp soak.test <host>:~/soak/internal/tts/     # the test resolves ../../sidecar
+
+docker run --rm -v /path/to/music:/music:ro -v "$HOME/soak":/w -w /w \
+  -e JOCKORA_SOAK_LIBRARY=/music -e JOCKORA_SOAK_DURATION=24h \
+  --entrypoint /w/soak.test <your jockora image> \
+  -test.run TestSoak -test.v -test.timeout 30h
+```
+
+See `test/gate2/README.md` for why a container is the right answer here and not
+merely a convenient one.
+
 ## Run it on the Linux box, not on the laptop
 
 Not a portability limitation — a measurement one. Every number here is timing and
