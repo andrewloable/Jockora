@@ -286,6 +286,11 @@ func runSubcommand(ctx context.Context, name string, args []string, out io.Write
 		if sidecar != nil {
 			defer sidecar.Close() //nolint:errcheck // closing at shutdown
 		}
+		// AFTER buildBreaks, because a MANAGED sidecar picks its own port and
+		// only knows it once started. Reading cfg.TTSAddr instead measured
+		// loudness and silently never measured tempo, which is exactly the
+		// half-wired state this task was filed about.
+		opts.Analyser = buildAnalyser(cfg, lib, sidecar, log)
 	} else {
 		if len(tracks) == 0 {
 			return fmt.Errorf("serve needs something to play:\n" +

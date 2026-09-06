@@ -8,15 +8,53 @@ import "math"
 // The loudness contract. These numbers are fixed for the whole program: the
 // mixer, the normaliser and the limiter all target them, and a component that
 // invents its own makes every transition audible.
+// The DEFAULTS are the contract every gate in this project was measured
+// against. Changing nothing gives you exactly these.
 const (
-	MusicLUFS           = -16.0 // music, integrated
-	MusicDuckedLUFS     = -28.0 // music while the DJ is speaking
-	SpeechLUFS          = -16.0 // speech, short-term
-	TruePeakCeilingDBTP = -1.0  // enforced by the limiter, not here
+	DefaultMusicLUFS           = -16.0
+	DefaultMusicDuckedLUFS     = -28.0
+	DefaultSpeechLUFS          = -16.0
+	DefaultTruePeakCeilingDBTP = -1.0
+)
 
-	// DuckDepthDB is how far the music drops under speech: the gap between the
-	// two music targets, never an independently chosen number.
+// The live targets. VARS rather than consts so an operator can tune them for a
+// room and a pair of speakers, which is the one thing about this contract that
+// is genuinely local.
+//
+// SET ONCE AT STARTUP, through SetLoudness, before the mixer exists. They are
+// read on the audio path with no synchronisation, so changing them while the
+// station is live is a data race, not a feature.
+var (
+	MusicLUFS           = DefaultMusicLUFS
+	MusicDuckedLUFS     = DefaultMusicDuckedLUFS
+	SpeechLUFS          = DefaultSpeechLUFS
+	TruePeakCeilingDBTP = DefaultTruePeakCeilingDBTP
+
+	// DuckDepthDB is how far the music drops under speech: the GAP between the
+	// two music targets, never an independently chosen number. Recomputed by
+	// SetLoudness so it can never drift out of step with them.
+	DuckDepthDB = DefaultMusicDuckedLUFS - DefaultMusicLUFS
+)
+
+// SetLoudness overrides the contract. A zero leaves that target alone, so a
+// caller can change the duck depth without restating the rest.
+func SetLoudness(music, ducked, speech, ceiling float64) {
+	if music != 0 {
+		MusicLUFS = music
+	}
+	if ducked != 0 {
+		MusicDuckedLUFS = ducked
+	}
+	if speech != 0 {
+		SpeechLUFS = speech
+	}
+	if ceiling != 0 {
+		TruePeakCeilingDBTP = ceiling
+	}
 	DuckDepthDB = MusicDuckedLUFS - MusicLUFS
+}
+
+const (
 
 	// Ramp times, as the time the ramp takes end to end.
 	DuckAttack  = 0.080 // seconds

@@ -202,3 +202,63 @@ func TestConfigModelServerFlagsHaveEnvEquivalents(t *testing.T) {
 		})
 	}
 }
+
+// TestTuningKnobsDefaultToTheMeasuredValues.
+//
+// The whole safety property of these knobs: an operator who sets none of them
+// gets exactly the behaviour every gate in this project was measured against.
+// A default that drifts from the measured value silently invalidates the gates.
+func TestTuningKnobsDefaultToTheMeasuredValues(t *testing.T) {
+	withArgs(t)
+	clearEnv(t)
+
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		got  float64
+		want float64
+	}{
+		{"music LUFS", c.MusicLUFS, -16},
+		{"ducked LUFS", c.MusicDuckedLUFS, -28},
+		{"speech LUFS", c.SpeechLUFS, -16},
+		{"true-peak ceiling", c.TruePeakCeiling, -1},
+		{"lookahead seconds", c.LookaheadSeconds, 150},
+		{"advert interval minutes", c.AdIntervalMin, 90},
+		{"fact confidence", c.FactConfidence, 0.6},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s defaults to %v, want the measured %v", tc.name, tc.got, tc.want)
+		}
+	}
+	if c.AdEveryNBreaks != 4 {
+		t.Errorf("advert frequency defaults to %d, want 4", c.AdEveryNBreaks)
+	}
+}
+
+// TestTuningKnobsReadFromTheEnvironment: every flag has a JOCKORA_ equivalent,
+// and these are the settings most likely to be set in a compose file rather
+// than typed.
+func TestTuningKnobsReadFromTheEnvironment(t *testing.T) {
+	withArgs(t)
+	clearEnv(t)
+	t.Setenv("JOCKORA_MUSIC_DUCKED_LUFS", "-24")
+	t.Setenv("JOCKORA_AD_EVERY_N_BREAKS", "8")
+	t.Setenv("JOCKORA_FACT_CONFIDENCE", "0.9")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MusicDuckedLUFS != -24 {
+		t.Errorf("ducked LUFS = %v, want -24 from the environment", c.MusicDuckedLUFS)
+	}
+	if c.AdEveryNBreaks != 8 {
+		t.Errorf("ad frequency = %d, want 8 from the environment", c.AdEveryNBreaks)
+	}
+	if c.FactConfidence != 0.9 {
+		t.Errorf("fact confidence = %v, want 0.9 from the environment", c.FactConfidence)
+	}
+}

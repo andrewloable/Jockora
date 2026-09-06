@@ -29,7 +29,7 @@ var ErrBreakBadJSON = errors.New("dj: break response is not valid json")
 
 // FactConfidenceThreshold is the minimum confidence a dossier must carry before
 // the DJ may state anything from it on air.
-const FactConfidenceThreshold = 0.6
+var FactConfidenceThreshold = 0.6
 
 // ConfidenceScore converts a dossier's confidence label into a number.
 //

@@ -68,6 +68,7 @@ type Server struct {
 	ln     net.Listener
 	status StatusSource
 	dial   DialSource
+	tuner  Tuner
 }
 
 // SetDialSource wires the /stations.json data source. Without one the endpoint
@@ -156,6 +157,21 @@ func (s *Server) Handler() http.Handler {
 		// the raw form means an encoding trick cannot smuggle a separator past
 		// the allowlist.
 		p := r.URL.EscapedPath()
+
+		// The two POST routes are handled before the read-only guard below.
+		// Everything else on this server is a GET by design.
+		//
+		// Only these two paths are diverted: a POST to any OTHER route still
+		// falls through to the 405 below, because "you cannot POST to a
+		// segment" is the true answer and 404 would claim it does not exist.
+		if r.Method == http.MethodPost && (p == "/tune" || p == "/feedback") {
+			if p == "/tune" {
+				s.serveTune(w, r)
+			} else {
+				s.serveFeedback(w, r)
+			}
+			return
+		}
 
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

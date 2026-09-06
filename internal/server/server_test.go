@@ -514,3 +514,104 @@ func TestServerDialUnavailableWithoutASource(t *testing.T) {
 		t.Errorf("GET /stations.json with no source = %d, want 503", rec.Code)
 	}
 }
+
+type fakeTuner struct {
+	tuned   string
+	tracks  int
+	verdict string
+	err     error
+}
+
+func (f *fakeTuner) Tune(tag string) (int, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	f.tuned = tag
+	return f.tracks, nil
+}
+func (f *fakeTuner) Feedback(v string) error { f.verdict = v; return f.err }
+
+func post(t *testing.T, s *Server, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestServerTunes: the dial is the primary UI, so changing station has to be a
+// real endpoint rather than a restart.
+func TestServerTunes(t *testing.T) {
+	s, _ := newServer(t, 0)
+	tuner := &fakeTuner{tracks: 36}
+	s.SetTuner(tuner)
+
+	rec := post(t, s, "/tune", `{"tag":"alternative"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /tune = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if tuner.tuned != "alternative" {
+		t.Errorf("tuned to %q", tuner.tuned)
+	}
+	if !strings.Contains(rec.Body.String(), "36") {
+		t.Errorf("the reply does not say how big the station is: %s", rec.Body)
+	}
+}
+
+// TestServerRecordsAThumbsDown. This is the only signal the writing ever gets
+// from a real ear; everything else is a machine checking rules it was handed.
+func TestServerRecordsAThumbsDown(t *testing.T) {
+	s, _ := newServer(t, 0)
+	tuner := &fakeTuner{}
+	s.SetTuner(tuner)
+
+	if rec := post(t, s, "/feedback", `{"verdict":"down"}`); rec.Code != http.StatusNoContent {
+		t.Fatalf("POST /feedback = %d, want 204: %s", rec.Code, rec.Body)
+	}
+	if tuner.verdict != "down" {
+		t.Errorf("verdict recorded as %q", tuner.verdict)
+	}
+	if rec := post(t, s, "/feedback", `{"verdict":"maybe"}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("an invalid verdict returned %d, want 400", rec.Code)
+	}
+}
+
+// TestServerTuningRequiresAPost: a GET that changed what is playing would be
+// followed by any prefetcher on the network and retuned by a page reload.
+func TestServerTuningRequiresAPost(t *testing.T) {
+	s, _ := newServer(t, 0)
+	s.SetTuner(&fakeTuner{tracks: 5})
+
+	tuner := &fakeTuner{tracks: 5}
+	s.SetTuner(tuner)
+
+	// The request carries a VALID BODY. Neither a status check nor an
+	// "was the tuner called" check catches a mis-routed GET on its own: with
+	// an empty body the handler fails on decoding and returns 400 before it
+	// reaches the tuner, so both assertions pass for the wrong reason. A GET
+	// that would actually have worked is the only thing that distinguishes
+	// "the router refused it" from "the body happened to be missing".
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/tune", strings.NewReader(`{"tag":"alternative"}`))
+	req.Header.Set("Content-Type", "application/json")
+	s.Handler().ServeHTTP(rec, req)
+
+	if tuner.tuned != "" {
+		t.Errorf("GET /tune reached the tuner and tuned to %q", tuner.tuned)
+	}
+	if rec.Code == http.StatusOK {
+		t.Error("GET /tune returned 200")
+	}
+}
+
+// TestServerTuningUnavailableWithoutATuner: 503, because the route exists and
+// the capability does not -- the spike path has no library to tune.
+func TestServerTuningUnavailableWithoutATuner(t *testing.T) {
+	s, _ := newServer(t, 0)
+	for _, p := range []string{"/tune", "/feedback"} {
+		if rec := post(t, s, p, `{}`); rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("POST %s with no tuner = %d, want 503", p, rec.Code)
+		}
+	}
+}

@@ -49,6 +49,21 @@ credentials. That is the same trust boundary as the password in your config.
 | `-break-every-n-tracks` | `4` | **The knob most likely to be wrong.** See below. |
 | `-station` | — | Which station to broadcast. |
 
+### JockPacks
+
+A JockPack **is** the persona file. There is no archive and no manifest: one
+TOML, human-readable and diffable, installed by dropping it in the personas
+directory. Every card written before the format existed is already a valid pack.
+
+Beyond the persona card it may carry `[[advert]]` entries and a `[chain]` hint,
+plus `author` and `licence`. Adverts are validated **at install**, not at
+airtime — a pack that would name a real company on air fails to load, because
+packs are this project's only community contribution surface and that is exactly
+where such a name arrives from outside.
+
+Adverts air in one break slot in four, with a 90-minute floor between them.
+A pack with no adverts changes nothing.
+
 **Break cadence is the setting you will actually want to change.** Spotify's AI
 DJ draws its loudest complaints for talking too much. If you find yourself
 wishing it would be quiet, raise this number *before* concluding the writing is
@@ -76,6 +91,27 @@ else.
 | `-tts-url` | `http://127.0.0.1:8090` | Attach to a sidecar you run instead. |
 
 The voice comes from the persona card's `voice_id`, not from a flag.
+
+## Tuning
+
+Every default here is the value the project was measured with. **Changing
+nothing changes nothing**, and a test asserts these defaults so they cannot
+drift away from the gates that were run against them. All are applied once at
+startup.
+
+| Flag | Default | What it changes, audibly |
+|---|---|---|
+| `-music-lufs` | `-16` | Overall music loudness. Room and speaker dependent. |
+| `-music-ducked-lufs` | `-28` | How far music drops under the DJ. Closer to `-16` and the voice fights the music; further and the music vanishes. |
+| `-speech-lufs` | `-16` | Voice loudness. Matched to music on purpose. |
+| `-true-peak-ceiling` | `-1` | dBTP ceiling. Raising it invites clipping on cheap speakers. |
+| `-lookahead-seconds` | `150` | How far ahead a break is generated. Lower drops more breaks on a slow machine; higher makes them refer to what is coming from further away. |
+| `-ad-every-n-breaks` | `4` | One break slot in N becomes an advert. **The most taste-sensitive number here.** |
+| `-ad-interval-minutes` | `90` | Floor between adverts regardless of the ratio. |
+| `-fact-confidence` | `0.6` | How sure a dossier must be before the DJ may assert from it. Lower gives a chattier DJ leaning on weaker facts; higher gives more personality-only talk. |
+
+`-sample-rate` and `-channels` are the canonical bus. They are flags for
+historical reasons and changing them is not supported.
 
 ## Audio and streaming
 
@@ -107,15 +143,45 @@ jockora enrich -sample 200 -library-path /music
 timer. That is the room-test-A harness, not the DJ. Leave them unset for a real
 station.
 
+## Track analysis
+
+Alongside enrichment, a background pass measures each track's **loudness** and
+**tempo**. Loudness needs a full decode and tempo needs real analysis, so
+neither belongs in the scan — the scan reads tags and stops, which is what keeps
+it minutes rather than hours.
+
+Loudness is the audible half: without it every track plays at its native
+mastering level, and the −16 LUFS contract is enforced for speech only. A
+development library measured −13 to −23 LUFS across four tracks, which is a
+10 dB swing between songs.
+
+Tempo is optional and only smooths the running order. It comes from librosa in
+the speech sidecar — no extra process, no cgo — and an implausible result is
+discarded rather than stored, so a track may legitimately have no tempo. The
+selector widens its matching window until something fits, so those tracks are
+still played.
+
 ## The dial
 
 `GET /stations.json` returns the proposed dial: one entry per station with its
 track count, its matched jock and the moods that actually occur in it, plus
 `enriched` and `total` so a client can say how provisional the proposal is.
 
-It is built ONCE at startup and cached — it reads every dossier in the library,
-which is fine once and absurd on every poll. On a fresh library most tracks land
-in `unsorted` and the dial fills in over the following days as enrichment runs.
+It is cached and recomputed every 5 minutes, never built per request — it reads
+every dossier in the library, which is fine on a timer and absurd on every poll.
+On a fresh library most tracks land in `unsorted`, and the dial genuinely does
+fill in over the following days as enrichment classifies them: stations appear
+once a tag reaches 8 tracks. A failed recompute keeps the previous dial rather
+than emptying it.
+
+**Tuning.** `POST /tune` with `{"tag":"rock"}` switches station. The song
+playing is not interrupted — the change is heard when it ends. A station with no
+playable tracks is refused with a 400 and you stay where you were.
+
+**Feedback.** `POST /feedback` with `{"verdict":"down"}` records what you
+thought of the break that just aired, into `break_feedback`. It stores the
+break's TEXT rather than an id, because breaks are written, aired and gone —
+what a later prompt-tuning pass needs is the sentence somebody disliked.
 
 Two buckets never get a jock: `unsorted` (no dossier yet) and `other` (enriched,
 but fitting no genre in the closed vocabulary). Neither describes a sound, so

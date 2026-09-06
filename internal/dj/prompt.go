@@ -32,10 +32,33 @@ const MaxFactsInPrompt = 3
 
 // Prohibitions is what the DJ has already said and must not repeat.
 //
-// It is the SOFTEST input in the prompt and the least individually
+// NOTHING POPULATES THIS, AND THAT IS DELIBERATE. Wiring it was tried on
+// 2026-09-06, measured, and reverted. Filling it from the said-lines index --
+// the twenty most recent openings and a hundred recent 4-grams -- run at an
+// identical seed against the same library:
+//
+//	                 breaks  collisions  truncated  would air
+//	not populated        40           7         10   33 of 50  (66%, CI 52-78)
+//	populated            38          23         12   15 of 50  (30%, CI 19-44)
+//
+// COLLISIONS MORE THAN TRIPLED. The intervals do not overlap, so this is an
+// effect rather than noise, and the mechanism is visible in the failures: the
+// colliding phrases were the greetings themselves -- "hey tuned welcome folks",
+// "keep tight folks hey" -- which is to say the model used the very phrases it
+// had just been shown and told to avoid.
+//
+// This is the same failure already recorded below about worked examples, and it
+// is the strongest form of the rule this file keeps learning: WHATEVER THE
+// PROMPT SHOWS, THE MODEL SAYS. Prohibition belongs in the sampler and the
+// validator, where it is enforced rather than suggested.
+//
+// The type and its rendering are kept because they cost nothing and because the
+// numbers above need somewhere to live. Do not wire it again without beating
+// 33 of 50.
+//
+// It is also the SOFTEST input in the prompt and the least individually
 // load-bearing, which is why it is the first thing trimmed when the budget
-// binds: losing one of a hundred prohibitions risks one repeat, while losing
-// persona text changes who is talking.
+// binds.
 type Prohibitions struct {
 	Openings []string
 	NGrams   []string

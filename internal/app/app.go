@@ -26,6 +26,7 @@ import (
 	"github.com/andrewloable/jockora/internal/dj"
 	"github.com/andrewloable/jockora/internal/encode"
 	"github.com/andrewloable/jockora/internal/enrich"
+	"github.com/andrewloable/jockora/internal/library"
 	"github.com/andrewloable/jockora/internal/mix"
 	"github.com/andrewloable/jockora/internal/obs"
 	"github.com/andrewloable/jockora/internal/sched"
@@ -52,6 +53,12 @@ type Options struct {
 	// Personas is the roster the dial matches jocks from. Optional: with no
 	// personas the dial still proposes stations, they simply carry no jock.
 	Personas []*dj.Persona
+
+	// Analyser measures loudness and tempo in the background. Optional, and
+	// nil leaves both unmeasured -- which is what every library was until it
+	// existed: 0 of 7,595 tracks had a loudness value, so every one played at
+	// unity gain and the -16 LUFS contract was enforced for speech only.
+	Analyser *library.Analyser
 
 	// Library, when set, replaces Tracks as the source of music: the app
 	// selects from the scanned database instead of looping a list of files.
@@ -111,10 +118,99 @@ func (l *Library) next(ctx context.Context) (track, error) {
 	return t, nil
 }
 
-// staticDial serves one dial value, computed at startup.
-type staticDial struct{ d station.Dial }
+// applyTuning pushes the operator's knobs into the packages that read them.
+//
+// Every value defaults to what the project was measured with, so an operator
+// who sets nothing gets exactly the behaviour every gate was run against. Only
+// a value that DIFFERS from its default is logged, because a startup line
+// listing eight unchanged numbers teaches nobody anything.
+func applyTuning(cfg *config.Config, log *slog.Logger) {
+	mix.SetLoudness(cfg.MusicLUFS, cfg.MusicDuckedLUFS, cfg.SpeechLUFS, cfg.TruePeakCeiling)
+	if cfg.MusicLUFS != 0 && cfg.MusicLUFS != mix.DefaultMusicLUFS {
+		log.Info("loudness contract changed", "music_lufs", mix.MusicLUFS,
+			"ducked_lufs", mix.MusicDuckedLUFS, "duck_depth_db", mix.DuckDepthDB)
+	}
+	if cfg.LookaheadSeconds > 0 {
+		d := time.Duration(cfg.LookaheadSeconds * float64(time.Second))
+		if d != station.DefaultLookahead {
+			log.Info("lookahead changed", "seconds", cfg.LookaheadSeconds)
+		}
+		station.DefaultLookahead = d
+	}
+	if cfg.AdEveryNBreaks != 0 && cfg.AdEveryNBreaks != station.AdEveryNBreaks {
+		log.Info("advert frequency changed", "one_slot_in", cfg.AdEveryNBreaks)
+		station.AdEveryNBreaks = cfg.AdEveryNBreaks
+	}
+	if cfg.AdIntervalMin > 0 {
+		d := time.Duration(cfg.AdIntervalMin * float64(time.Minute))
+		if d != station.MinAdInterval {
+			log.Info("advert interval changed", "minutes", cfg.AdIntervalMin)
+		}
+		station.MinAdInterval = d
+	}
+	if cfg.FactConfidence > 0 && cfg.FactConfidence != dj.FactConfidenceThreshold {
+		log.Info("fact confidence threshold changed", "threshold", cfg.FactConfidence,
+			"effect", "lower means a chattier DJ leaning on weaker dossiers")
+		dj.FactConfidenceThreshold = cfg.FactConfidence
+	}
+}
 
-func (s staticDial) Dial() any { return s.d }
+// DialRefreshInterval is how often the dial is recomputed.
+//
+// Five minutes: enrichment classifies a few tracks a minute at best, so
+// anything faster re-reads the whole dossier table to learn nothing, and
+// anything slower leaves a new station invisible for most of an evening.
+const DialRefreshInterval = 5 * time.Minute
+
+// cachedDial holds the last computed dial and recomputes it on a timer.
+type cachedDial struct {
+	store    *store.Store
+	personas []*dj.Persona
+	log      *slog.Logger
+
+	mu sync.RWMutex
+	d  station.Dial
+}
+
+func (c *cachedDial) Dial() any {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.d
+}
+
+func (c *cachedDial) refresh(ctx context.Context) {
+	dial, err := station.ProposeDial(ctx, c.store, c.personas)
+	if err != nil {
+		// Not fatal, and the previous dial is kept: a stale dial is far better
+		// than an empty one. A dial is a nicety; the stream is not.
+		c.log.Warn("could not propose a dial", "err", err)
+		return
+	}
+
+	c.mu.Lock()
+	was := len(c.d.Stations)
+	c.d = dial
+	c.mu.Unlock()
+
+	if was != len(dial.Stations) {
+		c.log.Info("dial proposed", "stations", len(dial.Stations),
+			"enriched", dial.Enriched, "of", dial.Total)
+	}
+}
+
+// watch recomputes the dial until the context ends.
+func (c *cachedDial) watch(ctx context.Context) {
+	t := time.NewTicker(DialRefreshInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			c.refresh(ctx)
+		}
+	}
+}
 
 // App is one running station.
 type App struct {
@@ -143,6 +239,8 @@ type App struct {
 
 	mixerMu sync.Mutex
 	mixer   *mix.Mixer
+
+	dial *cachedDial
 }
 
 // ringSeconds is how much decoded audio is buffered ahead of the mixer. Enough
@@ -234,6 +332,11 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 		}
 	}
 
+	// APPLIED ONCE, HERE, before the mixer, the encoder or any goroutine
+	// exists. These are read on the audio path without synchronisation, so
+	// this is the only safe moment to change them.
+	applyTuning(cfg, log)
+
 	srv, err := server.New(server.Config{
 		ListenAddr:       cfg.ListenAddr,
 		SegmentDir:       cfg.SegmentDir,
@@ -244,21 +347,21 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 	}
 	a.srv = srv
 	srv.SetStatusSource(a)
+	srv.SetTuner(a)
 
-	// The dial is PROPOSED ONCE, at startup, and cached. It reads every dossier
-	// in the library, which is fine here and absurd on every poll of
-	// /stations.json. It goes stale as enrichment proceeds, which is why the
-	// payload carries enriched/total so a client can say how provisional it is.
+	// The dial is cached and REFRESHED PERIODICALLY, never computed per
+	// request: it reads every dossier in the library, which is fine every few
+	// minutes and absurd on every poll of /stations.json.
+	//
+	// Refreshing matters more than it looks. On a fresh library every track
+	// starts in the catch-all and stations only appear as enrichment
+	// classifies them -- which takes days. A dial computed once at startup
+	// would show "unsorted 7595" and nothing else until the operator happened
+	// to restart, and the dial is the PRIMARY UI.
 	if opts.Library != nil && opts.Library.Store != nil {
-		dial, err := station.ProposeDial(context.Background(), opts.Library.Store, opts.Personas)
-		if err != nil {
-			// Not fatal. A dial is a nicety; the stream is not.
-			log.Warn("could not propose a dial", "err", err)
-		} else {
-			srv.SetDialSource(staticDial{dial})
-			log.Info("dial proposed", "stations", len(dial.Stations),
-				"enriched", dial.Enriched, "of", dial.Total)
-		}
+		a.dial = &cachedDial{store: opts.Library.Store, personas: opts.Personas, log: log}
+		a.dial.refresh(context.Background())
+		srv.SetDialSource(a.dial)
 	}
 
 	// The encoder comes up before the mixer, so the mixer never writes into a
@@ -439,6 +542,21 @@ func (a *App) Run(ctx context.Context) error {
 	// on the deployed station for three hours before anyone asked.
 	if a.opts.BreakPath != "" && a.opts.BreakEverySec > 0 {
 		go a.topUpBreaks(ctx)
+	}
+
+	if a.dial != nil {
+		go a.dial.watch(ctx)
+	}
+
+	if a.opts.Analyser != nil {
+		go func() {
+			// Loudness and tempo, in the background beside enrichment. Slow on
+			// purpose -- a decode per track -- and it shares a machine with a
+			// station that must not stutter.
+			if err := a.opts.Analyser.Run(ctx); err != nil && ctx.Err() == nil {
+				a.log.Warn("track analysis stopped", "err", err)
+			}
+		}()
 	}
 
 	if a.opts.Enricher != nil {
@@ -874,3 +992,54 @@ func feedRing(ctx context.Context, ring *mix.Ring, frames []mix.Frame) error {
 
 // encoderPID exposes the running ffmpeg so tests can prove it was reaped.
 func (a *App) encoderPID() int { return a.sup.PID() }
+
+// Tune switches the station to a tag, and reports how many tracks it holds.
+//
+// The current track keeps playing: the mixer has already buffered it, and
+// cutting audio mid-song to honour a click is the stutter this design exists to
+// avoid. The change is heard at the next boundary, which is also how a real
+// radio behaves when you turn the dial slowly.
+func (a *App) Tune(tag string) (int, error) {
+	if a.opts.Library == nil || a.opts.Library.Store == nil || a.opts.Library.Selector == nil {
+		return 0, fmt.Errorf("no library to tune")
+	}
+	pool, err := station.PoolForTag(context.Background(), a.opts.Library.Store, tag)
+	if err != nil {
+		return 0, err
+	}
+	if err := a.opts.Library.Selector.Tune(pool); err != nil {
+		return 0, fmt.Errorf("station %q has no playable tracks", tag)
+	}
+	a.log.Info("tuned", "station", tag, "tracks", len(pool))
+	return len(pool), nil
+}
+
+// Feedback records what a listener thought of the break that just aired.
+//
+// It stores the TEXT rather than an id, because a break is not a row: it is
+// written, aired and gone. What a later prompt-tuning pass needs is the
+// sentence somebody disliked, not a reference to something no longer there.
+func (a *App) Feedback(verdict string) error {
+	if a.opts.Library == nil || a.opts.Library.Store == nil {
+		return fmt.Errorf("no store to record feedback in")
+	}
+	a.nowMu.Lock()
+	last := a.lastBreak
+	a.nowMu.Unlock()
+
+	if last == nil || last.Text == "" {
+		return fmt.Errorf("no break has aired yet")
+	}
+	jockID := ""
+	if a.opts.Writer != nil && a.opts.Writer.Persona != nil {
+		jockID = a.opts.Writer.Persona.ID()
+	}
+	_, err := a.opts.Library.Store.DB().ExecContext(context.Background(),
+		`INSERT INTO break_feedback (jock_id, text, verdict, aired_at, at) VALUES (?, ?, ?, ?, ?)`,
+		jockID, last.Text, verdict, last.AiredAt, time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("recording feedback: %w", err)
+	}
+	a.log.Info("break feedback", "verdict", verdict, "text", last.Text)
+	return nil
+}

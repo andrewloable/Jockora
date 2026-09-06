@@ -76,6 +76,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, b"ok")
         elif parsed.path == "/onset":
             self._onset(urllib.parse.parse_qs(parsed.query))
+        elif parsed.path == "/bpm":
+            self._bpm(urllib.parse.parse_qs(parsed.query))
         else:
             self._send(404, b"not found")
 
@@ -102,6 +104,48 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, body, "application/json")
         except Exception as e:  # noqa: BLE001 - no analysis is a valid answer
             print(f"onset failed for {path}: {e}", file=sys.stderr, flush=True)
+            self._send(503, str(e).encode())
+
+    def _bpm(self, q):
+        """Tempo estimate, in the SAME process for the same reasons as /onset.
+
+        librosa is ISC licensed, so it adds no licence exposure to a project
+        that sells commercial exceptions, and it lives here rather than behind a
+        cgo binding or a third process because both of those were ruled out.
+
+        A failure is a 503 and the caller stores nothing. An UNKNOWN tempo is a
+        perfectly good answer: the selector widens its window until something
+        fits, so a track with no BPM is still playable rather than excluded.
+        """
+        path = (q.get("path") or [""])[0]
+        if not path:
+            self._send(400, b"path is required")
+            return
+        try:
+            import librosa
+
+            # 60 seconds from 30 in, not the whole track. Tempo is stable
+            # enough that a minute from the middle answers it, and analysing a
+            # nine-minute track end to end costs many seconds for no more
+            # certainty. Starting at 30s skips intros, which are frequently
+            # rubato or silent and drag the estimate down.
+            y, sr = librosa.load(path, sr=22050, offset=30.0, duration=60.0, mono=True)
+            if y is None or len(y) < sr * 5:
+                # Too little audio after the offset to judge a tempo from --
+                # a short track, or one under 35 seconds. Take it from the
+                # start instead of giving up.
+                y, sr = librosa.load(path, sr=22050, duration=60.0, mono=True)
+            tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+            bpm = float(tempo if not hasattr(tempo, "__len__") else tempo[0])
+            if not (30.0 <= bpm <= 250.0):
+                # Outside anything a person would call a tempo. Half- and
+                # double-time errors are the usual cause; reporting a confident
+                # wrong number is worse than reporting none.
+                self._send(503, f"implausible tempo {bpm:.1f}".encode())
+                return
+            self._send(200, json.dumps({"bpm": round(bpm, 2)}).encode(), "application/json")
+        except Exception as e:  # noqa: BLE001 - no tempo is a valid answer
+            print(f"bpm failed for {path}: {e}", file=sys.stderr, flush=True)
             self._send(503, str(e).encode())
 
     def do_POST(self):

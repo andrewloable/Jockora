@@ -10,25 +10,31 @@ jockora_brainstorming_product_direction.md
 .dolt/
 *.db
 .beads-credential-key
-transcripts
+
+# EVERY PATH BELOW IS ANCHORED WITH A LEADING SLASH, and that is not cosmetic.
+# A bare "config/" matches a directory of that name at ANY depth, so it silently
+# excluded internal/config -- core source -- and `git add` refused the whole
+# path. Anchoring confines each pattern to the repository root, which is the
+# only place any of them were ever meant to apply.
+
 # Scraped third-party material must never enter a repository that is
 # dual-licensed for commercial sale.
-transcripts/
-download_transcripts.sh
+/transcripts/
+/download_transcripts.sh
 
 # Local runtime working material: a TTS virtualenv, the HLS segment directory,
 # and the markdown a step-5.5 tuning round writes out for reading.
-.venv-tts/
-segments/
-breaks-round-*.md
+/.venv-tts/
+/segments/
+/breaks-round-*.md
 
 # Kokoro model weights: hundreds of MB, operator-supplied, never vendored.
-models/
+# Also the compose CONFIG directory, which holds the database and those weights.
+/models/
+/config/
 
 # Local compose settings; .env.example is the template that ships.
-.env
-config/
-models/
+/.env
 
 # Demo audio. Not committed until the music licence is confirmed by the
 # copyright holder; see Jockora-l6o.10.

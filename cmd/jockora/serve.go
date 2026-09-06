@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -63,10 +64,17 @@ func buildLibrary(ctx context.Context, cfg *config.Config, log *slog.Logger) (*a
 	}
 	log.Info("station pool", "tracks", len(pool))
 
-	return &app.Library{
-		Store:    s,
-		Selector: station.NewSelector(pool, time.Now().UnixNano()),
-	}, nil
+	selector := station.NewSelector(pool, time.Now().UnixNano())
+
+	// Tempo smoothing, if any tempos are known. On a library the analyser has
+	// not reached yet this is empty and the selector behaves exactly as it did
+	// before -- absence means no opinion, never zero.
+	if energy, err := station.LoadEnergy(ctx, s); err == nil && energy.Known() > 0 {
+		selector.Energy = energy
+		log.Info("tempo smoothing enabled", "tracks_with_bpm", energy.Known(), "of", len(pool))
+	}
+
+	return &app.Library{Store: s, Selector: selector}, nil
 }
 
 // buildBreaks assembles the DJ, or explains why it could not and returns nil.
@@ -121,7 +129,11 @@ func buildBreaks(ctx context.Context, cfg *config.Config, lib *app.Library, log 
 		Cadence:   station.NewCadence(cfg.BreakEveryNTracks),
 		Lookahead: station.NewLookahead(0),
 		Length: station.LengthCheck{
-			Writer: writer,
+			// The DJ, wrapped so one break slot in four becomes an advert when
+			// the pack carries a pool. An advert then travels the SAME ladder a
+			// break does -- render, length check, relocate, enqueue -- so
+			// nothing proven about airing breaks has to be proven again.
+			Writer: station.NewAdWriter(writer, adRotation(cfg.PersonaPath, log), clock.Real{}),
 			Renderer: station.RendererFunc(func(ctx context.Context, text, voice, outPath string) (float64, error) {
 				return tts.Render(ctx, sidecar, text, voice, outPath)
 			}),
@@ -310,4 +322,70 @@ func librarySource(cfg *config.Config) library.Source {
 		}
 	}
 	return library.Folder{Root: cfg.LibraryPath}
+}
+
+// adRotation builds the advert pool from the jock's pack.
+//
+// Adverts live in the JockPack rather than in the database because they are
+// part of the CHARACTER: a pack that travels without its adverts arrives as a
+// jock who has nothing to sell, and the pool is the most quotable thing the
+// product makes.
+//
+// Returns nil when there are none, and NewAdWriter then leaves the writer
+// exactly as it was.
+func adRotation(personaPath string, log *slog.Logger) *dj.AdRotation {
+	if personaPath == "" {
+		return nil
+	}
+	info, err := os.Stat(personaPath)
+	if err != nil {
+		return nil
+	}
+
+	paths := []string{personaPath}
+	if info.IsDir() {
+		found, err := filepath.Glob(filepath.Join(personaPath, "*.toml"))
+		if err != nil || len(found) == 0 {
+			return nil
+		}
+		paths = found
+	}
+
+	var ads []dj.Ad
+	for _, path := range paths {
+		pack, err := dj.LoadPack(path)
+		if err != nil {
+			// A pack that fails to load is already reported by the persona
+			// loader; here it just contributes no adverts.
+			continue
+		}
+		ads = append(ads, pack.Ads()...)
+	}
+	if len(ads) == 0 {
+		return nil
+	}
+	log.Info("advert pool loaded", "adverts", len(ads), "from", personaPath)
+	return dj.NewAdRotation(ads)
+}
+
+// buildAnalyser measures loudness and tempo in the background.
+//
+// Loudness is the audible half and needs only ffmpeg, so it runs whether or not
+// a sidecar is configured. Tempo needs librosa in the speech sidecar, and its
+// absence costs only the selector's smoothing.
+func buildAnalyser(cfg *config.Config, lib *app.Library, sidecar *tts.Sidecar, log *slog.Logger) *library.Analyser {
+	a := &library.Analyser{Store: lib.Store, Log: log}
+
+	// A MANAGED sidecar knows its address only once it is running, so it is
+	// asked rather than read from config. A configured -tts-url is the
+	// fallback for an externally-run sidecar.
+	addr := cfg.TTSAddr
+	if sidecar != nil && sidecar.Addr() != "" {
+		addr = "http://" + sidecar.Addr()
+	}
+	if addr != "" {
+		a.BPM = enrich.NewOnsetClient(addr, nil)
+		log.Info("tempo measurement enabled", "sidecar", addr)
+	}
+	return a
 }

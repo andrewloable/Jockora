@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"go/parser"
 	"go/token"
 	"io"
@@ -20,6 +21,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/andrewloable/jockora/internal/station"
+	"github.com/andrewloable/jockora/internal/store"
 
 	"github.com/andrewloable/jockora/internal/config"
 	"github.com/andrewloable/jockora/internal/mix"
@@ -504,5 +508,96 @@ func TestTopUpBreaksIsIdempotent(t *testing.T) {
 	}
 	if got := a.queue.Pending(); got != n {
 		t.Errorf("queue holds %d entries after %d added", got, n)
+	}
+}
+
+// TestCachedDialRefreshes is the defect this guards against.
+//
+// The dial is the PRIMARY UI, and on a fresh library every track starts in the
+// catch-all: stations only appear as enrichment classifies them, over days. A
+// dial computed once at startup would show "unsorted 7595" and nothing else
+// until somebody happened to restart the server.
+func TestCachedDialRefreshes(t *testing.T) {
+	s, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "d.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close() //nolint:errcheck // test teardown
+
+	for i := 1; i <= 30; i++ {
+		if _, err := s.DB().Exec(
+			`INSERT INTO tracks (id, path, playable) VALUES (?, ?, 1)`,
+			i, fmt.Sprintf("/m/%d.mp3", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	c := &cachedDial{store: s, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	c.refresh(context.Background())
+
+	first, ok := c.Dial().(station.Dial)
+	if !ok {
+		t.Fatal("Dial() did not return a station.Dial")
+	}
+	if len(first.Stations) != 1 || first.Stations[0].Tag != station.UnsortedTag {
+		t.Fatalf("a wholly unenriched library proposed %+v, want one catch-all", first.Stations)
+	}
+
+	// Enrichment classifies them, exactly as the background worker would.
+	for i := 1; i <= 30; i++ {
+		if _, err := s.DB().Exec(
+			`INSERT INTO dossiers (track_id, json, confidence) VALUES (?, ?, 'high')`,
+			i, `{"station_tags":["rock"],"mood":["aggressive"],"confidence":"high"}`); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Without a refresh the dial would still say the library is unsorted.
+	c.refresh(context.Background())
+	second := c.Dial().(station.Dial)
+
+	var rock *station.Station
+	for i := range second.Stations {
+		if second.Stations[i].Tag == "rock" {
+			rock = &second.Stations[i]
+		}
+	}
+	if rock == nil {
+		t.Fatalf("the dial never learned about the rock station: %+v", second.Stations)
+	}
+	if rock.Tracks != 30 {
+		t.Errorf("rock holds %d tracks, want 30", rock.Tracks)
+	}
+	if second.Enriched != 30 {
+		t.Errorf("enriched = %d, want 30", second.Enriched)
+	}
+}
+
+// TestCachedDialKeepsTheOldOneOnFailure: a stale dial is far better than an
+// empty one, and a dial is a nicety while the stream is not.
+func TestCachedDialKeepsTheOldOneOnFailure(t *testing.T) {
+	s, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "d.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().Exec(`INSERT INTO tracks (id, path, playable) VALUES (1, '/m/a.mp3', 1)`); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &cachedDial{store: s, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	c.refresh(context.Background())
+	before := c.Dial().(station.Dial)
+	if len(before.Stations) == 0 {
+		t.Fatal("no dial to lose")
+	}
+
+	// A closed store makes the next refresh fail.
+	s.Close() //nolint:errcheck // deliberately breaking it
+	c.refresh(context.Background())
+
+	after := c.Dial().(station.Dial)
+	if len(after.Stations) != len(before.Stations) {
+		t.Errorf("a failed refresh discarded the dial: %d stations became %d",
+			len(before.Stations), len(after.Stations))
 	}
 }

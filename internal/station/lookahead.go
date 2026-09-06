@@ -16,7 +16,7 @@ import (
 // render, sometimes twice, and the buffer exists precisely so that none of it
 // happens on the critical path. It is replaced by RecommendedT once enough real
 // generations have been timed.
-const DefaultLookahead = 150 * time.Second
+var DefaultLookahead = 150 * time.Second
 
 // LookaheadSafetyFactor multiplies the measured p95 to get T.
 //

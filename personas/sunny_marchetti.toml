@@ -32,3 +32,21 @@ forbidden = [
   "never hurries, and never apologises for not hurrying",
   "never raises her voice, even for a loud record",
 ]
+
+# ---------------------------------------------------------------------------
+# JockPack advert pool. INVENTED BRANDS ONLY -- no real company, product or
+# person, and no parody: fair-use cover for parody is US-shaped and JockPacks
+# ship worldwide. Loading refuses a pack that names a real brand.
+pack_version = 1
+author = "Andrew Loable"
+licence = "AGPL-3.0-only"
+
+[[advert]]
+id = "sunny-stillwater"
+brand = "Stillwater Ceramics"
+script = "Stillwater Ceramics have been making one mug for eleven years. They tried making a second one and it did not feel right, so they stopped. The mug holds what a mug holds. It is heavier than you expect and that is the entire point of it. Stillwater Ceramics. One mug, still."
+
+[[advert]]
+id = "sunny-halloway"
+brand = "Halloway and Dunn Removals"
+script = "Halloway and Dunn will move your things across town without once telling you what they think of your furniture. They have opinions. They have had them since nineteen eighty four. They keep them in the van. Halloway and Dunn Removals. We carry it, we do not comment on it."

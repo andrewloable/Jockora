@@ -184,3 +184,45 @@ func ResolveRamp(ctx context.Context, lrc Ramp, onset OnsetSource, path string, 
 	}
 	return ramp, nil
 }
+
+// bpmResponse is the sidecar's tempo reply.
+type bpmResponse struct {
+	BPM float64 `json:"bpm"`
+}
+
+// BPM estimates a track's tempo through the same sidecar that does onset
+// detection and speech.
+//
+// SAME PROCESS, on purpose. librosa lives beside Kokoro because that process
+// already exists, and both a separate analysis service and a cgo binding were
+// ruled out. librosa is ISC licensed, so it adds nothing to the dependency gate
+// that keeps the commercial track alive -- and it is out-of-process regardless.
+//
+// An error means NO TEMPO, which is a valid answer: the selector widens its
+// matching window until something fits, so an unmeasured track stays playable.
+func (c *OnsetClient) BPM(ctx context.Context, path string) (float64, error) {
+	q := url.Values{}
+	q.Set("path", path)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/bpm?"+q.Encode(), nil)
+	if err != nil {
+		return 0, fmt.Errorf("enrich: building bpm request: %w", err)
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("enrich: bpm: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // body drained below
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("enrich: bpm returned %s", resp.Status)
+	}
+	var body bpmResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return 0, fmt.Errorf("enrich: decoding bpm reply: %w", err)
+	}
+	if body.BPM <= 0 {
+		return 0, fmt.Errorf("enrich: bpm reported %.1f", body.BPM)
+	}
+	return body.BPM, nil
+}

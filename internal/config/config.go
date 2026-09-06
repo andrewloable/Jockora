@@ -9,6 +9,7 @@ package config
 import (
 	"flag"
 	"fmt"
+	"github.com/andrewloable/jockora/internal/mix"
 	"os"
 	"strings"
 )
@@ -23,6 +24,19 @@ type Config struct {
 	// Gonic -- instead of a local folder. The target listener usually already
 	// runs one, and pointing at it removes the whole "give it a folder and wait
 	// for a scan" step.
+	// TUNING KNOBS. Every default here is the value the project was measured
+	// with; changing nothing changes nothing. They are applied ONCE at startup,
+	// before the mixer exists, because the audio path reads them without
+	// synchronisation.
+	MusicLUFS        float64 // music loudness target, LUFS
+	MusicDuckedLUFS  float64 // music while the DJ speaks
+	SpeechLUFS       float64 // speech loudness target
+	TruePeakCeiling  float64 // dBTP ceiling held by the limiter
+	LookaheadSeconds float64 // how far ahead a break is generated
+	AdEveryNBreaks   int     // one break slot in N becomes an advert
+	AdIntervalMin    float64 // floor between adverts, minutes
+	FactConfidence   float64 // dossier confidence a fact must reach to be assertable
+
 	SubsonicURL      string
 	SubsonicUser     string
 	SubsonicPassword string
@@ -118,6 +132,14 @@ func LoadArgs(args []string, register func(*flag.FlagSet)) (*Config, error) {
 		register(fs)
 	}
 	fs.StringVar(&c.LibraryPath, "library-path", "", "music library root (read-only)")
+	fs.Float64Var(&c.MusicLUFS, "music-lufs", mix.DefaultMusicLUFS, "music loudness target in LUFS")
+	fs.Float64Var(&c.MusicDuckedLUFS, "music-ducked-lufs", mix.DefaultMusicDuckedLUFS, "music loudness while the DJ speaks")
+	fs.Float64Var(&c.SpeechLUFS, "speech-lufs", mix.DefaultSpeechLUFS, "speech loudness target in LUFS")
+	fs.Float64Var(&c.TruePeakCeiling, "true-peak-ceiling", mix.DefaultTruePeakCeilingDBTP, "true-peak ceiling in dBTP")
+	fs.Float64Var(&c.LookaheadSeconds, "lookahead-seconds", 150, "how far ahead of a boundary a break is generated")
+	fs.IntVar(&c.AdEveryNBreaks, "ad-every-n-breaks", 4, "one break slot in N becomes an advert (0 disables adverts)")
+	fs.Float64Var(&c.AdIntervalMin, "ad-interval-minutes", 90, "minimum minutes between adverts")
+	fs.Float64Var(&c.FactConfidence, "fact-confidence", 0.6, "dossier confidence a fact must reach before the DJ may assert it")
 	fs.StringVar(&c.SubsonicURL, "subsonic-url", "", "OpenSubsonic server to read the library from instead of a folder (Navidrome, Airsonic, Gonic)")
 	fs.StringVar(&c.SubsonicUser, "subsonic-user", "", "OpenSubsonic username")
 	fs.StringVar(&c.SubsonicPassword, "subsonic-password", "", "OpenSubsonic password (prefer JOCKORA_SUBSONIC_PASSWORD)")

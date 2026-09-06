@@ -15,7 +15,7 @@ import (
 // It exists from the very first migration, not from the first time the schema
 // changes. Retrofitting versioning after dossiers exist means either discarding
 // hours of enrichment or hand-writing a recovery script.
-const CurrentSchemaVersion = 4
+const CurrentSchemaVersion = 5
 
 // migrations are applied in order; index i brings the schema to version i+1.
 var migrations = []string{
@@ -110,6 +110,28 @@ var migrations = []string{
 	`
 	ALTER TABLE tracks ADD COLUMN size_bytes INTEGER;
 	ALTER TABLE tracks ADD COLUMN modified_at INTEGER;
+	`,
+
+	// 5: what a listener thought of a break.
+	//
+	// THE ONLY SIGNAL THE WRITING EVER GETS FROM A REAL EAR. Everything else
+	// judging break quality in this project is a machine checking rules it was
+	// given; a thumbs-down is a person saying that one was bad, which is the
+	// input the rubric explicitly cannot supply.
+	//
+	// The TEXT is stored, not a break id, because breaks are not rows: they are
+	// written, aired and gone. What a later prompt-tuning pass needs is the
+	// sentence somebody disliked.
+	`
+	CREATE TABLE break_feedback (
+		id       INTEGER PRIMARY KEY,
+		jock_id  TEXT,
+		text     TEXT NOT NULL,
+		verdict  TEXT NOT NULL,
+		aired_at INTEGER,
+		at       INTEGER NOT NULL
+	);
+	CREATE INDEX idx_feedback_verdict ON break_feedback(verdict, at);
 	`,
 }
 
