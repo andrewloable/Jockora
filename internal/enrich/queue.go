@@ -175,6 +175,19 @@ func (q *Queue) nextTrack(ctx context.Context) (id int64, path, artist, title st
 func (q *Queue) enrichOne(ctx context.Context, id int64, path, artist, title string, duration float64) error {
 	in := TrackInput{Artist: artist, Title: title, DurationS: duration}
 
+	// Count what this track costs. RecordEnrichmentCost has existed since the
+	// coverage report was built and was called by NOTHING, which is why every
+	// report said "cost not measured yet" and why the projection for a full
+	// library could never be computed. Counted around the WHOLE track, retries
+	// included: a track that needed two attempts really did cost two.
+	counter := &countingCompleter{inner: q.LLM}
+	started := q.clk().Now()
+	defer func() {
+		if err := RecordEnrichmentCost(ctx, q.Store, id, counter.tokens(), q.clk().Now().Sub(started).Seconds()); err != nil {
+			q.logger().Debug("could not record enrichment cost", "track", id, "err", err)
+		}
+	}()
+
 	if q.Artists != nil && artist != "" {
 		facts, err := q.Artists.ArtistFacts(ctx, artist)
 		if err != nil && ctx.Err() != nil {
@@ -219,7 +232,7 @@ func (q *Queue) enrichOne(ctx context.Context, id int64, path, artist, title str
 		}
 	}
 
-	d, err := GenerateDossier(ctx, q.LLM, in)
+	d, err := GenerateDossier(ctx, counter, in)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -293,4 +306,30 @@ func (q *Queue) releaseLock() {
 		`DELETE FROM enrich_lock WHERE id = 1 AND owner = ?`, q.owner()); err != nil {
 		q.logger().Warn("releasing lock", "err", err)
 	}
+}
+
+// countingCompleter tallies the tokens one track's enrichment spent.
+//
+// A wrapper rather than a changed GenerateDossier signature: the token count is
+// bookkeeping, and threading it through every caller would put accounting into
+// a function whose job is producing a dossier.
+type countingCompleter struct {
+	inner Completer
+
+	mu    sync.Mutex
+	total int
+}
+
+func (c *countingCompleter) Complete(ctx context.Context, req CompletionRequest) (Completion, error) {
+	out, err := c.inner.Complete(ctx, req)
+	c.mu.Lock()
+	c.total += out.TokensPredicted
+	c.mu.Unlock()
+	return out, err
+}
+
+func (c *countingCompleter) tokens() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.total
 }

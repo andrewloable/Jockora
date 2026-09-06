@@ -204,6 +204,16 @@ func assemble(in PromptInput, next *enrich.Dossier, prohib Prohibitions) string 
 	} else {
 		b.WriteString("\nState ONLY the facts listed above. Anything else you think you\n")
 		b.WriteString("know about these records is not available to you.\n")
+		// The facts arrive as finished sentences and a model will happily read
+		// one out word for word. GATE 5 measured the result: every remaining
+		// collision was a fact recited verbatim in two different breaks --
+		// "howard shore born 1946", "nickelback canadian group formed".
+		//
+		// The n-gram index then correctly refuses the second break, so this is
+		// not cosmetic: it is the difference between a break airing and being
+		// dropped.
+		b.WriteString("Say them in YOUR OWN WORDS. Reading a fact out as written is how\n")
+		b.WriteString("two breaks end up sharing a sentence, and the second one is cut.\n")
 	}
 
 	if len(prohib.Openings) > 0 {

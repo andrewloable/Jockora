@@ -96,10 +96,19 @@ for (( t=0; t<TOTAL; t++ )); do
         sleep 0.1
       done
       note "FAULT 2: ffmpeg restarted as $NEW after $(python3 -c "print(f'{$(date +%s.%N)-$T0:.2f}')")s (budget 2.00s)"
-      # Snapshot the playlist NOW. It is a sliding ten-segment window and the
-      # discontinuity tag scrolls out of it within a minute; the final playlist
-      # cannot answer whether the tag was ever written.
-      curl -sf "http://127.0.0.1:$PORT/hls/stream.m3u8" -o "$OUT/playlist-after-kill.m3u8" 2>/dev/null ;;
+      # Capture the playlist across the window where the tag exists at all.
+      #
+      # It is a sliding ten-segment window, so the tag scrolls out within a
+      # minute and the FINAL playlist cannot answer whether it was written. But
+      # an immediate snapshot is too EARLY -- the replacement ffmpeg has not
+      # published a playlist yet, so it catches the dead process's last one.
+      # Measured: the tag appears about six seconds after the kill. So poll,
+      # and keep the first snapshot that actually contains it.
+      for _ in $(seq 1 25); do
+        curl -sf "http://127.0.0.1:$PORT/hls/stream.m3u8" -o "$OUT/playlist-after-kill.m3u8" 2>/dev/null
+        grep -q "EXT-X-DISCONTINUITY" "$OUT/playlist-after-kill.m3u8" 2>/dev/null && break
+        sleep 1
+      done ;;
   esac
   if ! kill -0 "$JOCK" 2>/dev/null; then note "STREAM DIED at t=${t}s"; break; fi
   sleep 1

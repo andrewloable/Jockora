@@ -125,12 +125,15 @@ func (o *Ollama) Complete(ctx context.Context, req CompletionRequest) (Completio
 		// redundant with the status check above.
 		return Completion{}, fmt.Errorf("%w: %s", ErrLLMUnavailable, out.Error)
 	}
-	if strings.TrimSpace(out.Response) == "" {
+	// A locally served reasoning model emits its working inline, since there is
+	// no separate field to put it in.
+	content := StripReasoning(out.Response)
+	if content == "" {
 		return Completion{}, fmt.Errorf("%w: empty content", ErrLLMEmpty)
 	}
 
 	return Completion{
-		Content: out.Response,
+		Content: content,
 		// Ollama says "length" where llama.cpp says "limit". Normalised here so
 		// every caller can test one value: a truncated response is JSON up to
 		// the cut and then is not JSON at all, and callers depend on spotting it.

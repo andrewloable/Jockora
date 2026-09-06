@@ -88,27 +88,6 @@ func TestOpenAINamesABadKey(t *testing.T) {
 	}
 }
 
-// TestOpenAICatchesAReasoningModel. Recorded as a trap when llama.cpp was
-// chosen: the model spends the whole budget thinking and returns nothing, which
-// would otherwise be misread as an empty writer and retried forever.
-func TestOpenAICatchesAReasoningModel(t *testing.T) {
-	srv := fakeOpenAI(t, http.StatusOK, map[string]any{
-		"choices": []map[string]any{{
-			"message":       map[string]any{"content": "", "reasoning": "Let me think about this at length..."},
-			"finish_reason": "length",
-		}},
-	}, nil)
-
-	_, err := NewOpenAICompatible(srv.URL, "some/reasoner:free", "k", srv.Client()).
-		Complete(context.Background(), CompletionRequest{Prompt: "x"})
-	if !errors.Is(err, ErrLLMEmpty) {
-		t.Fatalf("err = %v, want ErrLLMEmpty", err)
-	}
-	if !strings.Contains(err.Error(), "non-reasoning") {
-		t.Errorf("err = %v, want it to say which kind of model to pick instead", err)
-	}
-}
-
 func TestOpenAINormalisesTruncation(t *testing.T) {
 	srv := fakeOpenAI(t, http.StatusOK, okReply(`{"line":"hi`, "length"), nil)
 	out, err := NewOpenAICompatible(srv.URL, "m", "k", srv.Client()).
@@ -146,5 +125,50 @@ func TestOpenAINeedsAModel(t *testing.T) {
 		Complete(context.Background(), CompletionRequest{Prompt: "x"})
 	if err == nil || !strings.Contains(err.Error(), "-llm-model") {
 		t.Errorf("err = %v, want it to name the flag that fixes it", err)
+	}
+}
+
+// TestOpenAIUsesAReasoningModelAnyway. Most free OpenRouter models reason, so
+// refusing them would rule out most of the free tier. Reasoning is excluded at
+// the source and stripped from the content, and the answer is used.
+func TestOpenAIUsesAReasoningModelAnyway(t *testing.T) {
+	var got openAIRequest
+	srv := fakeOpenAI(t, http.StatusOK,
+		okReply("<think>The user wants JSON. Be careful.</think>{\"ok\":true}", "stop"), &got)
+
+	out, err := NewOpenAICompatible(srv.URL, "some/reasoner:free", "k", srv.Client()).
+		Complete(context.Background(), CompletionRequest{Prompt: "x", NPredict: 200})
+	if err != nil {
+		t.Fatalf("a reasoning model was refused: %v", err)
+	}
+	if out.Content != `{"ok":true}` {
+		t.Errorf("Content = %q, want the answer with the thinking removed", out.Content)
+	}
+	if got.Reasoning == nil || got.Reasoning["exclude"] != true {
+		t.Errorf("reasoning was not excluded at the source: %v", got.Reasoning)
+	}
+}
+
+// TestOpenAIBudgetExhaustedByReasoningSaysSo. When the model reasons anyway and
+// runs out, the fix is BUDGET, not a different model -- reasoning is already
+// excluded and stripped by the time this fires.
+func TestOpenAIBudgetExhaustedByReasoningSaysSo(t *testing.T) {
+	srv := fakeOpenAI(t, http.StatusOK, map[string]any{
+		"choices": []map[string]any{{
+			"message":       map[string]any{"content": "<think>still going", "reasoning": "..."},
+			"finish_reason": "length",
+		}},
+	}, nil)
+
+	_, err := NewOpenAICompatible(srv.URL, "some/reasoner:free", "k", srv.Client()).
+		Complete(context.Background(), CompletionRequest{Prompt: "x", NPredict: 200})
+	if !errors.Is(err, ErrLLMEmpty) {
+		t.Fatalf("err = %v, want ErrLLMEmpty", err)
+	}
+	if !strings.Contains(err.Error(), "budget") {
+		t.Errorf("err = %v, want it to point at the budget", err)
+	}
+	if !strings.Contains(err.Error(), "200-token") {
+		t.Errorf("err = %v, want it to name the budget it had", err)
 	}
 }

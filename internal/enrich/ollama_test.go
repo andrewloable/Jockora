@@ -167,3 +167,22 @@ func TestOllamaNeedsAModelName(t *testing.T) {
 		t.Errorf("err = %v, want it to name the flag that fixes it", err)
 	}
 }
+
+// TestOllamaStripsInlineReasoning. A locally served reasoning model has no
+// separate field to put its working in, so it comes back inline.
+func TestOllamaStripsInlineReasoning(t *testing.T) {
+	srv := fakeOllama(t, []string{"qwen3:8b"}, func(ollamaRequest) any {
+		return map[string]any{
+			"response": "<think>Let me consider the dossier.</think>{\"ok\":true}",
+			"done":     true, "done_reason": "stop",
+		}
+	})
+	out, err := NewOllama(srv.URL, "qwen3:8b", srv.Client()).
+		Complete(context.Background(), CompletionRequest{Prompt: "x"})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if out.Content != `{"ok":true}` {
+		t.Errorf("Content = %q, want the thinking removed", out.Content)
+	}
+}

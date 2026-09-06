@@ -184,7 +184,10 @@ func (l *LlamaCPP) Complete(ctx context.Context, req CompletionRequest) (Complet
 	}
 
 	return Completion{
-		Content:         out.Content,
+		// A grammar normally makes inline reasoning impossible -- JSON is
+		// forced from the first token -- but a caller without a schema, and any
+		// future template change, can still let it through.
+		Content:         StripReasoning(out.Content),
 		StopType:        out.StopType,
 		TokensPredicted: out.TokensPredicted,
 	}, nil

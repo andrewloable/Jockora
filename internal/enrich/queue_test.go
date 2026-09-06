@@ -302,3 +302,32 @@ func (r *refusingLLM) Complete(ctx context.Context, req CompletionRequest) (Comp
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && bytes.Contains([]byte(s), []byte(sub))
 }
+
+// TestQueueRecordsEnrichmentCost. RecordEnrichmentCost existed from the day the
+// coverage report was written and was called by NOTHING, so every report said
+// "cost not measured yet" and the projection for a full library could never be
+// computed. Jockora-i7c.1 cannot report total tokens without this.
+func TestQueueRecordsEnrichmentCost(t *testing.T) {
+	s := queueStore(t, 3)
+	q := newQueue(s, &countingLLM{})
+	if err := q.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var rows, tokens int
+	if err := s.DB().QueryRow(`SELECT count(*), coalesce(sum(tokens),0) FROM enrich_cost`).Scan(&rows, &tokens); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 3 {
+		t.Errorf("enrich_cost has %d rows for 3 tracks", rows)
+	}
+
+	// And the report can now project, which is the whole point of recording it.
+	r, err := BuildReport(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Enriched != 3 {
+		t.Errorf("report counted %d enriched, want 3", r.Enriched)
+	}
+}

@@ -78,6 +78,11 @@ type openAIRequest struct {
 	Temperature    float64         `json:"temperature"`
 	MaxTokens      int             `json:"max_tokens,omitempty"`
 	ResponseFormat map[string]any  `json:"response_format,omitempty"`
+
+	// Reasoning is OpenRouter's control over chain-of-thought. Ignored by
+	// every other OpenAI-compatible host, which is why it is safe to send
+	// always.
+	Reasoning map[string]any `json:"reasoning,omitempty"`
 }
 
 type openAIMessage struct {
@@ -120,6 +125,14 @@ func (o *OpenAICompatible) Complete(ctx context.Context, req CompletionRequest) 
 		Messages:    []openAIMessage{{Role: "user", Content: req.Prompt}},
 		Temperature: temperature,
 		MaxTokens:   req.NPredict,
+		// Ask for the ANSWER, not the working.
+		//
+		// Most free OpenRouter models are reasoning models, so refusing them
+		// would rule out most of the free tier. Excluding reasoning stops it
+		// consuming the token budget -- which is what left content empty --
+		// and there is nothing here that benefits from seeing it: the writer's
+		// output is a few sentences constrained by a schema.
+		Reasoning: map[string]any{"exclude": true},
 	}
 	if req.JSONSchema != nil {
 		// strict asks the provider to ENFORCE the schema rather than merely
@@ -183,14 +196,18 @@ func (o *OpenAICompatible) Complete(ctx context.Context, req CompletionRequest) 
 	}
 
 	choice := out.Choices[0]
-	content := strings.TrimSpace(choice.Message.Content)
+	// Strip inline chain-of-thought as well. A host that ignores the reasoning
+	// parameter, or a model that thinks inside the content, both arrive here as
+	// "<think>...</think>{...}".
+	content := StripReasoning(choice.Message.Content)
 	if content == "" {
-		if choice.Message.Reasoning != "" {
-			// A reasoning model spent the budget thinking and returned nothing.
-			// Named explicitly: this was recorded as a trap when the llama.cpp
-			// backend was chosen, and it is the same trap here.
-			return Completion{}, fmt.Errorf("%w: %s returned only reasoning and no answer; choose a non-reasoning model",
-				ErrLLMEmpty, o.model)
+		if choice.Message.Reasoning != "" || choice.FinishReason == "length" {
+			// Reasoning ate the whole budget. Jockora already asks the host to
+			// exclude it and strips it inline, so reaching here means the model
+			// thinks regardless -- and the fix is BUDGET, not a different model.
+			return Completion{}, fmt.Errorf("%w: %s spent its %d-token budget reasoning and returned no answer; "+
+				"raise the budget or pick a model that does not reason",
+				ErrLLMEmpty, o.model, req.NPredict)
 		}
 		return Completion{}, fmt.Errorf("%w: empty content", ErrLLMEmpty)
 	}
