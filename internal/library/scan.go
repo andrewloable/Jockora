@@ -183,8 +183,12 @@ func scanFolder(ctx context.Context, s *store.Store, root string, sourceID, stam
 // metadata is what the scanner records about a file.
 type metadata struct {
 	artist, title, album string
-	year                 int
-	duration             float64
+	// genre is the file's OWN tag, kept as a hint about enrichment order and
+	// never as a statement about what a station contains -- that comes from
+	// the dossier. See migration 8.
+	genre    string
+	year     int
+	duration float64
 }
 
 // probe reads tags and duration with ffprobe.
@@ -227,6 +231,7 @@ func probe(ctx context.Context, path string) (metadata, error) {
 	m.artist = firstOf(tags, "artist", "album_artist", "albumartist", "performer")
 	m.title = firstOf(tags, "title")
 	m.album = firstOf(tags, "album")
+	m.genre = firstOf(tags, "genre")
 	m.year = parseYear(firstOf(tags, "date", "year", "originalyear", "originaldate"))
 	m.duration, _ = strconv.ParseFloat(r.Format.Duration, 64)
 
@@ -250,8 +255,10 @@ func probe(ctx context.Context, path string) (metadata, error) {
 // it re-probes once and is never asked again.
 func unchangedSince(ctx context.Context, s *store.Store, path string, size, modified int64) (bool, error) {
 	var storedSize, storedMod sql.NullInt64
+	var genre sql.NullString
 	err := s.DB().QueryRowContext(ctx,
-		`SELECT size_bytes, modified_at FROM tracks WHERE path = ?`, path).Scan(&storedSize, &storedMod)
+		`SELECT size_bytes, modified_at, genre FROM tracks WHERE path = ?`, path).
+		Scan(&storedSize, &storedMod, &genre)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -259,6 +266,14 @@ func unchangedSince(ctx context.Context, s *store.Store, path string, size, modi
 		return false, fmt.Errorf("library: checking %s: %w", path, err)
 	}
 	if !storedSize.Valid || !storedMod.Valid {
+		return false, nil
+	}
+	// A ROW MISSING DATA A NEWER SCHEMA WANTS IS NOT UNCHANGED, whatever its
+	// size and mtime say. Migration 8 added tracks.genre, and every existing
+	// row has it NULL: without this the skip means an established library never
+	// fills the column in, the migration is a no-op in practice, and enrichment
+	// priority silently does nothing. Costs one re-probe per track, once.
+	if !genre.Valid {
 		return false, nil
 	}
 	return storedSize.Int64 == size && storedMod.Int64 == modified, nil
@@ -281,12 +296,13 @@ func upsert(ctx context.Context, s *store.Store, path string, m metadata, playab
 	}
 
 	_, err = s.DB().ExecContext(ctx, `
-		INSERT INTO tracks (path, artist, title, album, year, duration_s, playable, scanned_at, size_bytes, modified_at, source_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO tracks (path, artist, title, album, genre, year, duration_s, playable, scanned_at, size_bytes, modified_at, source_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			artist      = excluded.artist,
 			title       = excluded.title,
 			album       = excluded.album,
+			genre       = excluded.genre,
 			year        = excluded.year,
 			duration_s  = excluded.duration_s,
 			playable    = excluded.playable,
@@ -299,7 +315,7 @@ func upsert(ctx context.Context, s *store.Store, path string, m metadata, playab
 			-- Present again. A row that is being written is by definition not
 			-- missing, so the mark clears itself with no separate pass.
 			missing_at  = NULL`,
-		path, m.artist, m.title, m.album, m.year, m.duration, playableInt, stamp,
+		path, m.artist, m.title, m.album, m.genre, m.year, m.duration, playableInt, stamp,
 		size, modified, nullableID(sourceID))
 	if err != nil {
 		return false, fmt.Errorf("library: recording %s: %w", path, err)

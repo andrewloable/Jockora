@@ -15,7 +15,7 @@ import (
 // It exists from the very first migration, not from the first time the schema
 // changes. Retrofitting versioning after dossiers exist means either discarding
 // hours of enrichment or hand-writing a recovery script.
-const CurrentSchemaVersion = 7
+const CurrentSchemaVersion = 8
 
 // migrations are applied in order; index i brings the schema to version i+1.
 var migrations = []string{
@@ -232,6 +232,27 @@ var migrations = []string{
 		key   TEXT PRIMARY KEY,
 		value TEXT NOT NULL
 	);
+	`,
+
+	// 8: the file's own genre tag, kept rather than discarded.
+	//
+	// The scanner always read it and threw it away, because a station's genre
+	// comes from the DOSSIER, not from whatever somebody typed into an ID3 tag
+	// years ago. That is still true for deciding what a station contains.
+	//
+	// But it makes enrichment ORDER possible, which is the point. A station's
+	// tracks are selected by dossier, so before enrichment there is nothing
+	// station-scoped to enrich -- the one pre-enrichment signal about what a
+	// track might be is this tag. Enriching tag-matching tracks first turns
+	// "your rock station is usable in four days" into minutes, and costs
+	// nothing when the tag is absent or wrong: it is a hint about ORDER, never
+	// about membership.
+	`
+	-- No index. Enrichment picks ONE track every thirty to forty seconds, and
+	-- the query that finds it already scans for tracks without a dossier, so
+	-- an index on genre would buy nothing measurable and would have to be
+	-- dropped before the column on any future schema change.
+	ALTER TABLE tracks ADD COLUMN genre TEXT;
 	`,
 }
 

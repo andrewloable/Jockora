@@ -83,4 +83,40 @@ describe('Dial', () => {
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-error]')).toBeTruthy();
   });
+
+  it('shows a station that is still filling, and will not tune to it', () => {
+    // A station grows while enrichment classifies the library. Twelve tracks
+    // on a loop is a worse first impression than the station not being ready
+    // yet, so it is shown with its progress and cannot be picked.
+    const fixture = TestBed.createComponent(Dial);
+    ctrl.expectOne('/stations.json').flush({
+      stations: [
+        { id: 1, name: 'UNSORTED', genre: 'unsorted', tracks: 7595, listeners: 0, ready: true },
+        { id: 2, name: 'Night Rock', genre: 'rock', tracks: 12, listeners: 0, ready: false },
+      ],
+    });
+    fixture.detectChanges();
+
+    const buttons = fixture.nativeElement.querySelectorAll('[data-station]');
+    expect(buttons[0].disabled).toBe(false);
+    expect(buttons[1].disabled).toBe(true);
+    expect(buttons[1].getAttribute('aria-disabled')).toBe('true');
+    expect(buttons[1].textContent).toContain('still filling');
+    expect(buttons[1].textContent).toContain('12 tracks so far');
+
+    // And clicking it asks for nothing.
+    buttons[1].click();
+    ctrl.verify();
+  });
+
+  it('treats a station with no readiness field as tunable', () => {
+    // The field is optional, so a server that does not send it must not make
+    // every station unpickable.
+    const fixture = TestBed.createComponent(Dial);
+    ctrl.expectOne('/stations.json').flush({
+      stations: [{ id: 1, name: 'Rock', genre: 'rock', tracks: 90, listeners: 0 }],
+    });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-station]').disabled).toBe(false);
+  });
 });

@@ -39,7 +39,7 @@ func TestMigrateV2CreatesTables(t *testing.T) {
 		}
 	}
 	for _, col := range []struct{ table, column string }{
-		{"tracks", "source_id"}, {"tracks", "missing_at"},
+		{"tracks", "source_id"}, {"tracks", "missing_at"}, {"tracks", "genre"},
 		{"ads", "station_id"}, {"break_feedback", "user_id"},
 	} {
 		if !hasColumn(t, s, col.table, col.column) {
@@ -130,7 +130,7 @@ func TestMigrateV2UpgradesV01Database(t *testing.T) {
 	}
 	// The ADD COLUMNs survive a table drop, so they have to come off too.
 	for _, c := range []struct{ table, column string }{
-		{"tracks", "source_id"}, {"tracks", "missing_at"},
+		{"tracks", "source_id"}, {"tracks", "missing_at"}, {"tracks", "genre"},
 		{"ads", "station_id"}, {"break_feedback", "user_id"},
 	} {
 		if _, err := old.DB().Exec(`ALTER TABLE ` + c.table + ` DROP COLUMN ` + c.column); err != nil {

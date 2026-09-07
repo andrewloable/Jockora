@@ -334,6 +334,9 @@ func runSubcommand(ctx context.Context, name string, args []string, out io.Write
 		// loudness and silently never measured tempo, which is exactly the
 		// half-wired state this task was filed about.
 		opts.Analyser = buildAnalyser(cfg, lib, sidecar, log)
+		// Same address the analyser uses, for the console's voice list and
+		// voice preview.
+		opts.TTSAddr = ttsAddr(cfg, sidecar)
 	} else {
 		if len(tracks) == 0 {
 			return fmt.Errorf("serve needs something to play:\n" +

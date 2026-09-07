@@ -612,8 +612,15 @@ app-admin nav button:hover {
   color: var(--ink);
 }
 
-/* Where you are. The trunk test needs this to be unmissable. */
-app-admin nav button[aria-current="page"] {
+/* Where you are. The trunk test needs this to be unmissable.
+ *
+ * The :hover pair is not redundant. The base `button:hover:not(:disabled)` rule
+ * scores 0,2,1 and this attribute selector scores 0,1,3, so hovering the
+ * CURRENT tab handed its background back to the hover rule while the white
+ * label stayed -- near-white text on a pale fill, and the one control that says
+ * where you are became the least readable thing on the page. */
+app-admin nav button[aria-current="page"],
+app-admin nav button[aria-current="page"]:hover:not(:disabled) {
   background: var(--ember);
   border-color: var(--ember);
   color: var(--on-ember);
@@ -655,6 +662,58 @@ app-admin nav button[aria-current="page"] {
 [data-station-picker],
 [data-pick-station] {
   margin-bottom: var(--s4);
+}
+
+/* Enrichment progress. The fieldset is a wrapping flex row, which suited the
+   cadence control and left this reading as a sentence with two buttons dropped
+   into the middle of it. Full width, then the controls beneath. */
+[data-enrich-progress] {
+  flex: 1 0 100%;
+  margin-bottom: var(--s2);
+}
+
+[data-enrich-progress] progress {
+  /* Styled, because the native bar is a hairline and this is the one number an
+     operator checks for days. */
+  appearance: none;
+  width: 100%;
+  height: 8px;
+  margin-bottom: var(--s3);
+  border: none;
+  border-radius: var(--r-pill);
+  background: var(--ember-soft);
+  overflow: hidden;
+}
+
+[data-enrich-progress] progress::-webkit-progress-bar {
+  background: var(--ember-soft);
+}
+
+[data-enrich-progress] progress::-webkit-progress-value {
+  background: var(--ember);
+  border-radius: var(--r-pill);
+  transition: width var(--dur-slow) var(--ease);
+}
+
+[data-enrich-progress] progress::-moz-progress-bar {
+  background: var(--ember);
+  border-radius: var(--r-pill);
+}
+
+[data-enrich-line] {
+  margin: 0 0 var(--s1);
+  font-size: var(--t-md);
+}
+
+[data-enrich-line] strong {
+  font-family: var(--font-mono);
+  letter-spacing: -0.02em;
+}
+
+[data-enrich-eta] {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--ink-faint);
 }
 
 /* --------------------------------------------------------------- motion -- */

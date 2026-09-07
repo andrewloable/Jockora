@@ -4,6 +4,9 @@ import { Observable } from 'rxjs';
 
 /** One position on the dial, as /stations.json reports it. */
 export interface DialStation {
+  /** False while the station is still filling up as enrichment runs. */
+  ready?: boolean;
+  preparing?: string;
   id: number;
   name: string;
   genre: string;
@@ -149,6 +152,11 @@ export class AdminApi {
 
   voices(): Observable<{ voices: string[] }> {
     return this.http.get<{ voices: string[] }>('/admin/voices');
+  }
+
+  /** One line spoken in a voice, so a name like "am_fenrir" can be heard. */
+  previewVoice(voice: string): Observable<Blob> {
+    return this.http.post('/admin/voices/preview', { voice }, { responseType: 'blob' });
   }
 
   sources(): Observable<Source[]> {

@@ -33,7 +33,13 @@ type Filter struct {
 // is not an empty station -- it is a station that will never fill, and the
 // operator has nothing on screen to tell them why.
 func (f Filter) Validate() error {
-	if !slices.Contains(enrich.StationTags, f.Genre) {
+	// isCatchAll as well as the vocabulary: there are TWO catch-all tags and
+	// only one of them is in enrich.StationTags. The seeded dial station uses
+	// "unsorted", which is not in the vocabulary, so regenerating it failed --
+	// on the live box POST /admin/stations/1/regenerate answered 500, and the
+	// one station that works on a fresh library was the one the operator could
+	// not rebuild.
+	if !isCatchAll(f.Genre) && !slices.Contains(enrich.StationTags, f.Genre) {
 		return fmt.Errorf("%w: genre %q", ErrBadVocabulary, f.Genre)
 	}
 	// An empty mood means ANY mood, which is what most stations want: a rock
@@ -59,7 +65,7 @@ func (f Filter) TrackIDs(ctx context.Context, s *store.Store) ([]int64, error) {
 	// includes tracks with no dossier at all and tracks whose dossier says it
 	// could assert nothing. On a fresh library that is most of them, and they
 	// have to be listenable.
-	if f.Genre == enrich.FallbackStationTag {
+	if isCatchAll(f.Genre) {
 		return f.unplacedTrackIDs(ctx, s)
 	}
 

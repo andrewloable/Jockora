@@ -28,6 +28,14 @@ const blank = (): Jock => ({
           <td>{{ jock.voice_id }}</td>
           <td>{{ jock.good_for_genres.join(', ') }}</td>
           <td>
+            <button
+              type="button"
+              data-row-preview
+              [disabled]="!jock.voice_id || previewing() !== null"
+              (click)="preview(jock.voice_id)"
+            >
+              {{ previewing() === jock.voice_id ? 'Speaking…' : 'Hear it' }}
+            </button>
             <button type="button" data-edit (click)="edit(jock)">Edit</button>
             <button type="button" data-remove (click)="remove(jock)">Delete</button>
           </td>
@@ -45,6 +53,14 @@ const blank = (): Jock => ({
           <option [value]="voice">{{ voice }}</option>
         }
       </select>
+      <button
+        type="button"
+        data-preview
+        [disabled]="!draft().voice_id || previewing() !== null"
+        (click)="preview(draft().voice_id)"
+      >
+        {{ previewing() === draft().voice_id ? 'Speaking…' : 'Hear it' }}
+      </button>
       <input
         data-style
         placeholder="speech style"
@@ -74,6 +90,11 @@ export class Jocks {
   readonly draft = signal<Jock>(blank());
   readonly editing = signal(false);
   readonly said = signal('');
+  readonly previewing = signal<string | null>(null);
+
+  // The element that plays the preview. Held so a second click stops the first
+  // one rather than talking over it.
+  private audio: HTMLAudioElement | null = null;
 
   constructor() {
     this.load();
@@ -90,6 +111,45 @@ export class Jocks {
       next: (j) => this.jocks.set(j),
       error: () => this.said.set('Could not read the jocks.'),
     });
+  }
+
+  /**
+   * Speak the selected voice.
+   *
+   * A voice is a name like "am_fenrir", which tells an operator nothing. This
+   * renders one line through the SAME sidecar the DJ uses, so what they hear is
+   * what a listener will hear -- the alternative is picking by name and finding
+   * out on air.
+   */
+  preview(voice: string): void {
+    if (!voice || this.previewing() !== null) {
+      return;
+    }
+    this.stop();
+    this.previewing.set(voice);
+    this.said.set('');
+    this.api.previewVoice(voice).subscribe({
+      next: (clip) => {
+        this.previewing.set(null);
+        this.audio = new Audio(URL.createObjectURL(clip));
+        // Revoking on end, or every preview leaks a blob for as long as the
+        // console stays open.
+        this.audio.addEventListener('ended', () => this.stop());
+        void this.audio.play();
+      },
+      error: () => {
+        this.previewing.set(null);
+        this.said.set('Could not speak that voice. The sidecar may be down.');
+      },
+    });
+  }
+
+  private stop(): void {
+    if (this.audio) {
+      this.audio.pause();
+      URL.revokeObjectURL(this.audio.src);
+      this.audio = null;
+    }
   }
 
   set(field: keyof Jock, event: Event): void {

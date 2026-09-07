@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"slices"
@@ -29,6 +30,10 @@ type Jocks interface {
 // later, on air.
 type Voices interface {
 	Voices(ctx context.Context) ([]string, error)
+	// Preview speaks one line in a voice and returns the audio, so an operator
+	// can HEAR a jock before putting them on air rather than reading a name
+	// like "am_fenrir" and guessing.
+	Preview(ctx context.Context, voice, text string) ([]byte, error)
 }
 
 // Personas is the running writers an edit has to reach.
@@ -87,6 +92,54 @@ func (s *Server) serveVoices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"voices": names})
+}
+
+// previewLine is what a voice says when nobody says what to say.
+//
+// It is written to EXERCISE a voice rather than to be pleasant: a couple of
+// sentences with different rhythms, a station ident, and some numbers, which is
+// most of what a DJ actually has to get through.
+const previewLine = "You're listening to Jockora. That was a good one — " +
+	"stay with me, there's more coming up after this."
+
+// serveVoicePreview renders a line in one voice and returns the audio.
+func (s *Server) serveVoicePreview(w http.ResponseWriter, r *http.Request) {
+	if s.voices == nil {
+		http.Error(w, "no voice service", http.StatusServiceUnavailable)
+		return
+	}
+	var body struct {
+		Voice string `json:"voice"`
+		Text  string `json:"text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		s.writeFieldError(w, "voice", "that request is not JSON")
+		return
+	}
+	if body.Voice == "" {
+		s.writeFieldError(w, "voice", "which voice?")
+		return
+	}
+	text := strings.TrimSpace(body.Text)
+	if text == "" {
+		text = previewLine
+	}
+	// Bounded, because this is a synthesis request an operator can repeat as
+	// fast as they can click, and the sidecar is the same one the DJ uses.
+	if len(text) > 300 {
+		text = text[:300]
+	}
+
+	audio, err := s.voices.Preview(r.Context(), body.Voice, text)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "audio/wav")
+	w.Header().Set("Cache-Control", "no-store")
+	// A write failure here means the operator's connection went away, which is
+	// not something this handler can do anything about.
+	_, _ = w.Write(audio) //nolint:errcheck // client hung up
 }
 
 func (s *Server) listJocks(w http.ResponseWriter, r *http.Request) {

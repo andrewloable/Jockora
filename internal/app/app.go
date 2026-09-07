@@ -67,6 +67,13 @@ type Options struct {
 	// unity gain and the -16 LUFS contract was enforced for speech only.
 	Analyser *library.Analyser
 
+	// TTSAddr is where the sidecar ACTUALLY is, which is not always where the
+	// config says. A managed sidecar is given a port by the supervisor and only
+	// knows it once running, so anything that talks to it has to be told.
+	// Empty falls back to the configured address, which is right for a sidecar
+	// the operator runs themselves.
+	TTSAddr string
+
 	// Library, when set, replaces Tracks as the source of music: the app
 	// selects from the scanned database instead of looping a list of files.
 	//
@@ -412,9 +419,18 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 		srv.SetStations(opts.Library.Store, func(ctx context.Context, id int64) (station.Diff, error) {
 			return station.Regenerate(ctx, opts.Library.Store, id)
 		}, a.mgr)
+		// THE LIVE ADDRESS, not the configured one. A managed sidecar picks its
+		// own port, so reading cfg.TTSAddr here made /admin/voices 502 in every
+		// default deployment and left the console's voice picker empty -- the
+		// same half-wired failure buildAnalyser's comment warns about, repeated
+		// three functions away.
+		ttsAddr := opts.TTSAddr
+		if ttsAddr == "" {
+			ttsAddr = cfg.TTSAddr
+		}
 		var voices server.Voices
-		if cfg.TTSAddr != "" {
-			voices = newSidecarVoices(cfg.TTSAddr)
+		if ttsAddr != "" {
+			voices = newSidecarVoices(ttsAddr)
 		}
 		srv.SetJocks(opts.Library.Store, voices, a)
 		srv.SetPlaylists(opts.Library.Store)
@@ -555,6 +571,58 @@ const MaxStations = 4
 // second is fast enough that a first listener waits no longer than that, and
 // slow enough that the work is invisible.
 const reconcileEvery = time.Second
+
+// refillEvery is how often every station's playlist is rebuilt from the
+// dossiers that exist by then.
+//
+// Two minutes, not one second like reconcileEvery: this WRITES, once per
+// station, and enrichment produces a track or two a minute at best. Any faster
+// is churn for a result that has not changed.
+const refillEvery = 2 * time.Minute
+
+// refill grows the stations as enrichment classifies more of the library.
+//
+// A station's playlist is materialised when it is created, from whatever had a
+// dossier at that moment -- which on a fresh library is almost nothing. Without
+// this it stayed that size forever unless somebody opened the console and
+// pressed Regenerate, so a station made on day one was still twelve tracks on
+// day three while the library filled up around it.
+//
+// Pins and exclusions survive: ReplaceStationTracks only deletes the rows the
+// filter owns.
+func (a *App) refill(ctx context.Context) {
+	t := time.NewTicker(refillEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			a.refillOnce(ctx)
+		}
+	}
+}
+
+func (a *App) refillOnce(ctx context.Context) {
+	stations, err := a.opts.Library.Store.ListStations(ctx)
+	if err != nil {
+		a.log.Warn("refilling stations", "err", err)
+		return
+	}
+	for _, st := range stations {
+		diff, err := station.Regenerate(ctx, a.opts.Library.Store, st.ID)
+		if err != nil {
+			// Not fatal and not retried here: the next tick is the retry, and
+			// one station whose filter is broken must not stop the others.
+			a.log.Warn("refilling station", "station", st.ID, "err", err)
+			continue
+		}
+		if diff.Added > 0 || diff.Removed > 0 {
+			a.log.Info("station refilled", "station", st.ID, "name", st.Name,
+				"added", diff.Added, "removed", diff.Removed, "now", diff.Kept+diff.Added)
+		}
+	}
+}
 
 // reconcile keeps the running stations in step with the listeners.
 func (a *App) reconcile(ctx context.Context) {
@@ -862,6 +930,9 @@ func (a *App) Run(ctx context.Context) error {
 	if a.mgr != nil {
 		defer a.mgr.StopAll() //nolint:errcheck // shutting down
 		go a.reconcile(ctx)
+	}
+	if a.opts.Library != nil && a.opts.Library.Store != nil {
+		go a.refill(ctx)
 	}
 
 	go func() {
@@ -1369,6 +1440,21 @@ func (a *App) encoderDegraded() string {
 // From the TABLE, not from a proposal. What the operator built is what the
 // listener sees; the proposal is a seed, and re-deriving it here would show a
 // dial nobody configured.
+// enrichmentDone reports whether every playable track has a dossier.
+//
+// It decides whether the readiness gate applies at all: while enrichment runs a
+// thin station is thin because the answer has not arrived, and once it finishes
+// a thin station is simply small. Errors count as NOT done, which keeps the
+// gate on -- the safe direction, since the alternative offers a station that
+// may be three tracks long.
+func (a *App) enrichmentDone(ctx context.Context) bool {
+	var left int
+	err := a.opts.Library.Store.DB().QueryRowContext(ctx,
+		`SELECT count(*) FROM tracks WHERE playable = 1 AND id NOT IN (SELECT track_id FROM dossiers)`).
+		Scan(&left)
+	return err == nil && left == 0
+}
+
 func (a *App) Dial(ctx context.Context) ([]server.DialStation, error) {
 	if a.opts.Library == nil || a.opts.Library.Store == nil {
 		return nil, fmt.Errorf("app: no library to build a dial from")
@@ -1378,6 +1464,10 @@ func (a *App) Dial(ctx context.Context) ([]server.DialStation, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Asked ONCE for the whole dial rather than per station: it is a count over
+	// the library, and the answer is the same for every row.
+	done := a.enrichmentDone(ctx)
 
 	out := []server.DialStation{}
 	for _, st := range rows {
@@ -1392,6 +1482,7 @@ func (a *App) Dial(ctx context.Context) ([]server.DialStation, error) {
 		}
 		d := server.DialStation{ID: st.ID, Name: st.Name, Genre: st.Genre,
 			Mood: st.Mood, Tracks: len(ids)}
+		d.Ready, d.Preparing = station.Ready(st.Genre, len(ids), done)
 		if a.tracker != nil {
 			d.Listeners = a.tracker.Count(st.ID)
 		}
@@ -1422,6 +1513,18 @@ func (a *App) Tune(ctx context.Context, session string, stationID int64) (string
 		// The same answer as a station that does not exist: a listener has no
 		// business knowing which stations the operator has switched off.
 		return "", store.ErrNotFound
+	}
+	// STILL FILLING is not the same as switched off, and it says so. The dial
+	// already refuses to offer it, so this is the second line rather than the
+	// first: a bookmarked station id, or a dial the listener has had open
+	// since before the operator made it.
+	ids, err := a.opts.Library.Store.StationTrackIDs(ctx, stationID)
+	if err != nil {
+		return "", err
+	}
+	if ok, why := station.Ready(st.Genre, len(ids), a.enrichmentDone(ctx)); !ok {
+		return "", fmt.Errorf("%w: %s has %d tracks and is %s",
+			server.ErrStationPreparing, st.Name, len(ids), why)
 	}
 	if a.tracker != nil {
 		a.tracker.Touch(stationID, session)

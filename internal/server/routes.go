@@ -72,6 +72,7 @@ func (s *Server) Routes() []Route {
 		{Path: "/admin/overview.json", Role: auth.RoleAdmin, H: s.serveAdminOverview},
 		{Path: "/admin/vocab", Role: auth.RoleAdmin, H: s.serveVocab},
 		{Path: "/admin/voices", Role: auth.RoleAdmin, H: s.serveVoices},
+		{Method: http.MethodPost, Path: "/admin/voices/preview", Role: auth.RoleAdmin, H: s.serveVoicePreview},
 		{Method: http.MethodPost, Path: "/admin/cadence", Role: auth.RoleAdmin, H: adminWrite},
 		{Method: http.MethodPost, Path: "/admin/enriching", Role: auth.RoleAdmin, H: adminWrite},
 		{Method: http.MethodPost, Path: "/admin/rescan", Role: auth.RoleAdmin, H: s.serveRescan},

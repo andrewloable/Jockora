@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/andrewloable/jockora/internal/store"
@@ -19,9 +20,19 @@ import (
 type voiceList struct {
 	names []string
 	err   error
+	// what Preview was asked for, and what it hands back
+	audio      []byte
+	previewErr error
+	heardVoice string
+	heardText  string
 }
 
 func (v voiceList) Voices(context.Context) ([]string, error) { return v.names, v.err }
+
+func (v *voiceList) Preview(_ context.Context, voice, text string) ([]byte, error) {
+	v.heardVoice, v.heardText = voice, text
+	return v.audio, v.previewErr
+}
 
 // personaLog records the edits that reached the running stations.
 type personaLog struct{ seen []store.Jock }
@@ -36,7 +47,7 @@ func jocksServer(t *testing.T) (*Server, *store.Store, *personaLog) {
 	t.Helper()
 	s, st, _ := authServer(t)
 	log := &personaLog{}
-	s.SetJocks(st, voiceList{names: []string{"am_fenrir", "af_heart"}}, log)
+	s.SetJocks(st, &voiceList{names: []string{"am_fenrir", "af_heart"}}, log)
 	return s, st, log
 }
 
@@ -129,7 +140,7 @@ func TestJocksAPIVoiceMustExist(t *testing.T) {
 	// because the voice service is unreachable would make the console useless
 	// during an outage.
 	down, st, _ := authServer(t)
-	down.SetJocks(st, voiceList{err: errors.New("sidecar is down")}, nil)
+	down.SetJocks(st, &voiceList{err: errors.New("sidecar is down")}, nil)
 	downAdmin := adminCookie(t, down)
 	if rec := as(t, down, http.MethodPost, "/admin/jocks", bad, downAdmin); rec.Code != http.StatusCreated {
 		t.Errorf("with the sidecar down = %d, want 201", rec.Code)
@@ -155,7 +166,7 @@ func TestJocksAPIListVoices(t *testing.T) {
 	// A sidecar that will not answer is a 502: the failure is upstream, and
 	// saying 500 would send an operator looking at Jockora.
 	down, st, _ := authServer(t)
-	down.SetJocks(st, voiceList{err: errors.New("sidecar is down")}, nil)
+	down.SetJocks(st, &voiceList{err: errors.New("sidecar is down")}, nil)
 	if rec := as(t, down, http.MethodGet, "/admin/voices", "", adminCookie(t, down)); rec.Code != http.StatusBadGateway {
 		t.Errorf("with the sidecar down = %d, want 502", rec.Code)
 	}
@@ -345,7 +356,7 @@ func TestJocksAPISurfacesFailures(t *testing.T) {
 	boom := errors.New("the database went away")
 	s, _, _ := authServer(t)
 	admin := adminCookie(t, s)
-	s.SetJocks(brokenJocks{err: boom}, voiceList{names: []string{"am_fenrir"}}, nil)
+	s.SetJocks(brokenJocks{err: boom}, &voiceList{names: []string{"am_fenrir"}}, nil)
 
 	for _, tc := range []struct{ method, path, body string }{
 		{http.MethodGet, "/admin/jocks", ""},
@@ -359,7 +370,7 @@ func TestJocksAPISurfacesFailures(t *testing.T) {
 	}
 
 	// Listing the stations works, deleting the jock does not.
-	s.SetJocks(brokenJocks{err: boom, stationOK: true}, voiceList{names: []string{"am_fenrir"}}, nil)
+	s.SetJocks(brokenJocks{err: boom, stationOK: true}, &voiceList{names: []string{"am_fenrir"}}, nil)
 	if rec := as(t, s, http.MethodDelete, "/admin/jocks/x", "", admin); rec.Code != http.StatusInternalServerError {
 		t.Errorf("= %d, want 500", rec.Code)
 	}
@@ -367,4 +378,106 @@ func TestJocksAPISurfacesFailures(t *testing.T) {
 	live, _, _ := jocksServer(t)
 	live.listJocks(&failingWriter{}, httptest.NewRequest(http.MethodGet, "/admin/jocks", nil))
 	live.serveVoices(&failingWriter{}, httptest.NewRequest(http.MethodGet, "/admin/voices", nil))
+}
+
+// A jock's voice is a name like "am_fenrir". Nobody can tell what that sounds
+// like, so the console can ask for a line to be spoken in it before an operator
+// commits a jock to air.
+
+func TestVoicePreviewSpeaksTheDefaultLine(t *testing.T) {
+	s, st, _ := jocksServer(t)
+	v := &voiceList{names: []string{"am_fenrir"}, audio: []byte("RIFF....WAVEfake")}
+	s.SetJocks(st, v, nil)
+
+	rec := as(t, s, http.MethodPost, "/admin/voices/preview", `{"voice":"am_fenrir"}`, adminCookie(t, s))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview = %d %s", rec.Code, rec.Body)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "audio/wav" {
+		t.Errorf("Content-Type = %q, want audio/wav", got)
+	}
+	// no-store: a preview is rendered fresh, and a cached one would keep
+	// playing the old voice after the operator changed it.
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	if rec.Body.String() != "RIFF....WAVEfake" {
+		t.Errorf("body did not carry the audio through")
+	}
+	if v.heardVoice != "am_fenrir" {
+		t.Errorf("asked the sidecar for %q", v.heardVoice)
+	}
+	if v.heardText != previewLine {
+		t.Errorf("with no text given it must speak the default line; got %q", v.heardText)
+	}
+}
+
+func TestVoicePreviewSpeaksTextTheOperatorGave(t *testing.T) {
+	s, st, _ := jocksServer(t)
+	v := &voiceList{audio: []byte("wav")}
+	s.SetJocks(st, v, nil)
+
+	as(t, s, http.MethodPost, "/admin/voices/preview",
+		`{"voice":"af_heart","text":"  Good evening.  "}`, adminCookie(t, s))
+	if v.heardText != "Good evening." {
+		t.Errorf("text = %q, want it trimmed", v.heardText)
+	}
+}
+
+func TestVoicePreviewBoundsTheText(t *testing.T) {
+	// This synthesises, through the same sidecar the DJ uses, as fast as an
+	// operator can click. The length is capped rather than trusted.
+	s, st, _ := jocksServer(t)
+	v := &voiceList{audio: []byte("wav")}
+	s.SetJocks(st, v, nil)
+
+	as(t, s, http.MethodPost, "/admin/voices/preview",
+		`{"voice":"af_heart","text":"`+strings.Repeat("a", 500)+`"}`, adminCookie(t, s))
+	if len(v.heardText) != 300 {
+		t.Errorf("text was %d characters, want it capped at 300", len(v.heardText))
+	}
+}
+
+func TestVoicePreviewNeedsAVoice(t *testing.T) {
+	s, st, _ := jocksServer(t)
+	s.SetJocks(st, &voiceList{}, nil)
+
+	rec := as(t, s, http.MethodPost, "/admin/voices/preview", `{}`, adminCookie(t, s))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("no voice = %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "which voice") {
+		t.Errorf("say what is missing; got %s", rec.Body)
+	}
+}
+
+func TestVoicePreviewRejectsNonsense(t *testing.T) {
+	s, st, _ := jocksServer(t)
+	s.SetJocks(st, &voiceList{}, nil)
+
+	rec := as(t, s, http.MethodPost, "/admin/voices/preview", `not json`, adminCookie(t, s))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("bad body = %d, want 400", rec.Code)
+	}
+}
+
+func TestVoicePreviewReportsASilentSidecar(t *testing.T) {
+	s, st, _ := jocksServer(t)
+	s.SetJocks(st, &voiceList{previewErr: errors.New("sidecar is down")}, nil)
+
+	rec := as(t, s, http.MethodPost, "/admin/voices/preview", `{"voice":"x"}`, adminCookie(t, s))
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("sidecar down = %d, want 502", rec.Code)
+	}
+}
+
+func TestVoicePreviewWithoutAVoiceService(t *testing.T) {
+	// The spike path has no sidecar at all.
+	s, st, _ := jocksServer(t)
+	s.SetJocks(st, nil, nil)
+
+	rec := as(t, s, http.MethodPost, "/admin/voices/preview", `{"voice":"x"}`, adminCookie(t, s))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("no sidecar = %d, want 503", rec.Code)
+	}
 }

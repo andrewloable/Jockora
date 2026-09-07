@@ -52,6 +52,8 @@ var matrix = []expectation{
 
 	{path: "/admin/overview.json", role: auth.RoleAdmin},
 	{path: "/admin/vocab", role: auth.RoleAdmin},
+	{method: http.MethodPost, path: "/admin/voices/preview", role: auth.RoleAdmin,
+		body: `{"voice":"am_fenrir"}`},
 	{path: "/admin/voices", role: auth.RoleAdmin},
 	{method: http.MethodPost, path: "/admin/cadence", role: auth.RoleAdmin, body: `{"cadence":8}`},
 	{method: http.MethodPost, path: "/admin/enriching", role: auth.RoleAdmin, body: `{"enriching":true}`},
@@ -84,7 +86,7 @@ func matrixServer(t *testing.T) *Server {
 	s.SetAdmin(&fakeAdmin{cadence: 4})
 	s.SetSources(st, &fakeRescan{})
 	s.SetStations(st, nil, nil)
-	s.SetJocks(st, voiceList{names: []string{"am_fenrir"}}, nil)
+	s.SetJocks(st, &voiceList{names: []string{"am_fenrir"}}, nil)
 	s.SetPlaylists(st)
 	s.SetTuner(&listenTuner{stations: []DialStation{{ID: 1, Name: "ROCK"}}})
 	s.SetStatusSource(&StaticStatus{})

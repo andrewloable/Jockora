@@ -1,4 +1,5 @@
 import { Component, OnDestroy, inject, signal } from '@angular/core';
+import { DecimalPipe } from '@angular/common';
 import { AdminApi } from '../api/api';
 
 /**
@@ -16,6 +17,7 @@ const REFRESH_MS = 10_000;
 @Component({
   selector: 'app-overview',
   standalone: true,
+  imports: [DecimalPipe],
   template: `
     <h2>Overview</h2>
     @if (rows().length) {
@@ -44,6 +46,18 @@ const REFRESH_MS = 10_000;
 
     <fieldset>
       <legend>Enrichment</legend>
+      @if (progress(); as p) {
+        <div data-enrich-progress>
+          <progress [value]="p.done" [max]="p.total"></progress>
+          <p data-enrich-line>
+            <strong>{{ p.done | number }} of {{ p.total | number }}</strong> tracks
+            ({{ p.pct }}%) · {{ p.state }}
+          </p>
+          <p data-enrich-eta>{{ p.eta }}</p>
+        </div>
+      } @else {
+        <p data-enrich-progress>Nothing scanned yet.</p>
+      }
       <button type="button" data-pause (click)="setEnriching(false)">Pause</button>
       <button type="button" data-resume (click)="setEnriching(true)">Resume</button>
     </fieldset>
@@ -55,6 +69,9 @@ export class Overview implements OnDestroy {
   private readonly api = inject(AdminApi);
 
   readonly rows = signal<{ key: string; value: string }[]>([]);
+  // The raw answer as well as the flattened rows: the table wants every field,
+  // the progress readout wants three of them by name.
+  readonly overview = signal<Record<string, unknown>>({});
   readonly cadence = signal(4);
   readonly said = signal('');
 
@@ -65,9 +82,64 @@ export class Overview implements OnDestroy {
     this.timer = setInterval(() => this.load(), REFRESH_MS);
   }
 
+  /**
+   * Enrichment, as something a person can read.
+   *
+   * The numbers were already on the page -- library.enriched and library.tracks
+   * are two rows in the table above -- but a job that takes DAYS and moves at a
+   * track a minute needs a shape, not a pair of integers buried in a readout.
+   * Reported as "does not show any progress" while it was in fact progressing.
+   */
+  progress(): { done: number; total: number; pct: number; state: string; eta: string } | null {
+    const lib = (this.overview()['library'] ?? {}) as Record<string, number>;
+    const total = lib['tracks'] ?? 0;
+    if (!total) {
+      return null;
+    }
+    const done = lib['enriched'] ?? 0;
+    const cost = (this.overview()['enrichment_cost'] ?? {}) as Record<string, number>;
+    const perTrack = cost['seconds_per_track'] ?? 0;
+    const running = this.overview()['enriching'] === true;
+
+    return {
+      done,
+      total,
+      pct: Math.round((done / total) * 1000) / 10,
+      state: running ? 'running' : 'paused',
+      eta: this.eta(total - done, perTrack, running),
+    };
+  }
+
+  /**
+   * How long the rest will take, in units a person thinks in.
+   *
+   * SAID PLAINLY BECAUSE IT IS LONG. On a CPU-bound model this is tens of
+   * hours for a real library, and an operator who does not know that reads a
+   * slow-moving number as a stuck one.
+   */
+  private eta(left: number, perTrack: number, running: boolean): string {
+    if (left <= 0) {
+      return 'Every track has a dossier.';
+    }
+    if (!perTrack || !running) {
+      return `${left.toLocaleString()} to go.`;
+    }
+    const hours = (left * perTrack) / 3600;
+    const when =
+      hours < 1
+        ? `${Math.max(1, Math.round(hours * 60))} minutes`
+        : hours < 48
+          ? `${Math.round(hours)} hours`
+          : `${Math.round(hours / 24)} days`;
+    return `${left.toLocaleString()} to go, about ${when} left at ${Math.round(perTrack)}s per track.`;
+  }
+
   load(): void {
     this.api.overview().subscribe({
-      next: (o) => this.rows.set(flatten(o)),
+      next: (o) => {
+        this.overview.set(o as Record<string, unknown>);
+        this.rows.set(flatten(o));
+      },
       error: () => this.said.set('Could not read the overview.'),
     });
   }

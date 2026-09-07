@@ -70,6 +70,7 @@ func v01Fixture(t *testing.T) string {
 		`DROP TABLE sources`, `DROP TABLE users`, `DROP TABLE settings`,
 		`ALTER TABLE tracks DROP COLUMN source_id`,
 		`ALTER TABLE tracks DROP COLUMN missing_at`,
+		`ALTER TABLE tracks DROP COLUMN genre`,
 		`ALTER TABLE ads DROP COLUMN station_id`,
 		`ALTER TABLE break_feedback DROP COLUMN user_id`,
 		`PRAGMA user_version = 5`,

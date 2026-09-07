@@ -190,12 +190,35 @@ type work struct {
 // only ones that do not collide when the same artist comes round again.
 func (q *Queue) nextTrack(ctx context.Context) (work, error) {
 	var w work
+	// WHAT THE OPERATOR'S STATIONS NEED, FIRST.
+	//
+	// Enrichment is one pass per track and takes tens of seconds on a CPU-bound
+	// model, so a real library is days of work. Doing it in id order means a
+	// station the operator just made is empty for most of that, because a
+	// station's tracks are SELECTED BY DOSSIER: nothing can join it until its
+	// tracks have been enriched.
+	//
+	// The file's own genre tag is the one thing known before enrichment, so it
+	// is used to guess which tracks are candidates and enrich those first. A
+	// rock station then fills in minutes instead of days.
+	//
+	// A HINT ABOUT ORDER, NEVER ABOUT MEMBERSHIP. The tag is often wrong, often
+	// absent, and often something nobody has in a vocabulary ("Rock/Pop",
+	// "Alt. Rock"). Matching loosely costs nothing when it is wrong -- the
+	// track still gets a dossier, just sooner -- and what the station actually
+	// contains is still decided by the dossier alone.
 	row := q.Store.DB().QueryRowContext(ctx, `
-		SELECT id, path, COALESCE(artist,''), COALESCE(title,''),
-		       COALESCE(album,''), COALESCE(year,0), COALESCE(duration_s,0)
-		FROM tracks
-		WHERE playable = 1 AND id NOT IN (SELECT track_id FROM dossiers)
-		ORDER BY id
+		SELECT t.id, t.path, COALESCE(t.artist,''), COALESCE(t.title,''),
+		       COALESCE(t.album,''), COALESCE(t.year,0), COALESCE(t.duration_s,0)
+		FROM tracks t
+		WHERE t.playable = 1 AND t.id NOT IN (SELECT track_id FROM dossiers)
+		ORDER BY
+			CASE WHEN t.genre IS NOT NULL AND EXISTS (
+				SELECT 1 FROM stations s
+				 WHERE s.genre IS NOT NULL
+				   AND LOWER(t.genre) LIKE '%' || LOWER(s.genre) || '%'
+			) THEN 0 ELSE 1 END,
+			t.id
 		LIMIT 1`)
 
 	switch err := row.Scan(&w.id, &w.path, &w.artist, &w.title, &w.album, &w.year, &w.duration); {

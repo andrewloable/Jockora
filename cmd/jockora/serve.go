@@ -377,16 +377,24 @@ func adRotation(personaPath string, log *slog.Logger) *dj.AdRotation {
 // Loudness is the audible half and needs only ffmpeg, so it runs whether or not
 // a sidecar is configured. Tempo needs librosa in the speech sidecar, and its
 // absence costs only the selector's smoothing.
+// ttsAddr is where the sidecar actually is.
+//
+// A MANAGED sidecar knows its address only once it is running, so it is asked
+// rather than read from config; a configured -tts-url is the fallback for one
+// the operator runs themselves. ONE function because there are two callers --
+// the analyser and the console's voice list -- and when the second read config
+// directly instead, the voice picker was empty in every default deployment.
+func ttsAddr(cfg *config.Config, sidecar *tts.Sidecar) string {
+	if sidecar != nil && sidecar.Addr() != "" {
+		return "http://" + sidecar.Addr()
+	}
+	return cfg.TTSAddr
+}
+
 func buildAnalyser(cfg *config.Config, lib *app.Library, sidecar *tts.Sidecar, log *slog.Logger) *library.Analyser {
 	a := &library.Analyser{Store: lib.Store, Log: log}
 
-	// A MANAGED sidecar knows its address only once it is running, so it is
-	// asked rather than read from config. A configured -tts-url is the
-	// fallback for an externally-run sidecar.
-	addr := cfg.TTSAddr
-	if sidecar != nil && sidecar.Addr() != "" {
-		addr = "http://" + sidecar.Addr()
-	}
+	addr := ttsAddr(cfg, sidecar)
 	if addr != "" {
 		a.BPM = enrich.NewOnsetClient(addr, nil)
 		log.Info("tempo measurement enabled", "sidecar", addr)

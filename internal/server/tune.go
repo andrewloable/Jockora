@@ -28,6 +28,10 @@ type DialStation struct {
 	// it is already playing, which is the difference between joining a stream
 	// and waiting for one to start.
 	Listeners int `json:"listeners"`
+	// Ready is false while a station is still filling up as enrichment
+	// classifies the library. Preparing says so in words.
+	Ready     bool   `json:"ready"`
+	Preparing string `json:"preparing,omitempty"`
 }
 
 // Tuner is the listener's side of the product.
@@ -63,6 +67,12 @@ func (s *Server) serveDial(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]any{"stations": stations})
 }
 
+// ErrStationPreparing is a station that exists and is switched on but is still
+// filling up as enrichment classifies the library. Defined here rather than in
+// the app because the HTTP status is the only thing that turns on it, and
+// package app already imports this one.
+var ErrStationPreparing = errors.New("station is still preparing")
+
 // serveTune handles POST /tune.
 //
 // A POST because it CHANGES what the listener is hearing. A GET that mutated
@@ -91,6 +101,13 @@ func (s *Server) serveTune(w http.ResponseWriter, r *http.Request) {
 		// mistake rather than a server fault -- and they stay on whatever they
 		// were already hearing.
 		http.Error(w, "no such station", http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, ErrStationPreparing) {
+		// 409, not 404: the station is real, the listener did nothing wrong,
+		// and it WILL work later. The reason goes back so the dial can say so
+		// rather than leaving somebody clicking a button that does nothing.
+		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 	if err != nil {

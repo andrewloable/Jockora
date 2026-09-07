@@ -15,11 +15,17 @@ import { Api, DialStation } from '../api/api';
           type="button"
           data-station
           [attr.aria-pressed]="station.id === current()"
+          [attr.aria-disabled]="station.ready === false ? 'true' : null"
+          [disabled]="station.ready === false"
           (click)="tune(station)"
         >
           <span data-station-name>{{ station.name }}</span>
           <small>
-            {{ station.tracks }} tracks
+            @if (station.ready === false) {
+              still filling · {{ station.tracks }} tracks so far
+            } @else {
+              {{ station.tracks }} tracks
+            }
             @if (station.jock_name) {
               · {{ station.jock_name }}
             }

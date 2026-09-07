@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
@@ -180,5 +180,127 @@ describe('Jocks', () => {
     ctrl.expectOne('/admin/jocks').flush([]);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-said]').textContent.trim()).toBe('Deleted.');
+  });
+
+  describe('voice preview', () => {
+    // A voice is a name like "am_fenrir", which tells an operator nothing.
+    // Hearing it before a jock goes on air is the whole point.
+    let played: string[];
+    let paused: number;
+
+    beforeEach(() => {
+      played = [];
+      paused = 0;
+      vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:fake');
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+      vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(function (this: HTMLAudioElement) {
+        played.push(this.src);
+        return Promise.resolve();
+      });
+      vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {
+        paused += 1;
+      });
+    });
+
+    afterEach(() => vi.restoreAllMocks());
+
+    function withVoice() {
+      const fixture = mounted();
+      type(fixture, '[data-voice]', 'am_fenrir');
+      return fixture;
+    }
+
+    it('is not offered until a voice is chosen', () => {
+      const fixture = mounted();
+      expect(fixture.nativeElement.querySelector('[data-preview]').disabled).toBe(true);
+      type(fixture, '[data-voice]', 'am_fenrir');
+      expect(fixture.nativeElement.querySelector('[data-preview]').disabled).toBe(false);
+    });
+
+    it('speaks the chosen voice and plays what comes back', () => {
+      const fixture = withVoice();
+      fixture.nativeElement.querySelector('[data-preview]').click();
+      fixture.detectChanges();
+      // Says so while it renders: a cold sidecar takes a few seconds.
+      expect(fixture.nativeElement.querySelector('[data-preview]').textContent).toContain('Speaking');
+
+      const req = ctrl.expectOne('/admin/voices/preview');
+      expect(req.request.method).toBe('POST');
+      expect(req.request.body).toEqual({ voice: 'am_fenrir' });
+      req.flush(new Blob(['RIFF'], { type: 'audio/wav' }));
+      fixture.detectChanges();
+
+      expect(played).toEqual(['blob:fake']);
+      expect(fixture.nativeElement.querySelector('[data-preview]').textContent).toContain('Hear it');
+    });
+
+    it('stops the previous clip rather than talking over it', () => {
+      const fixture = withVoice();
+      fixture.nativeElement.querySelector('[data-preview]').click();
+      ctrl.expectOne('/admin/voices/preview').flush(new Blob(['a']));
+      fixture.detectChanges();
+
+      fixture.nativeElement.querySelector('[data-preview]').click();
+      ctrl.expectOne('/admin/voices/preview').flush(new Blob(['b']));
+      fixture.detectChanges();
+
+      expect(paused).toBe(1);
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:fake');
+    });
+
+    it('lets go of the clip when it finishes', () => {
+      // Otherwise every preview leaks a blob for as long as the console is open.
+      const fixture = withVoice();
+      fixture.nativeElement.querySelector('[data-preview]').click();
+      ctrl.expectOne('/admin/voices/preview').flush(new Blob(['a']));
+      fixture.detectChanges();
+      fixture.componentInstance['audio']!.dispatchEvent(new Event('ended'));
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:fake');
+    });
+
+    it('says so when the sidecar will not speak', () => {
+      const fixture = withVoice();
+      fixture.nativeElement.querySelector('[data-preview]').click();
+      ctrl
+        .expectOne('/admin/voices/preview')
+        .flush(null, { status: 502, statusText: 'Bad Gateway' });
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain(
+        'sidecar may be down',
+      );
+      expect(fixture.nativeElement.querySelector('[data-preview]').textContent).toContain('Hear it');
+    });
+
+    it('ignores a click with no voice, and one while already speaking', () => {
+      const fixture = mounted();
+      fixture.componentInstance.preview('');
+      ctrl.verify();
+
+      type(fixture, '[data-voice]', 'am_fenrir');
+      fixture.nativeElement.querySelector('[data-preview]').click();
+      fixture.componentInstance.preview('am_fenrir');
+      ctrl.expectOne('/admin/voices/preview').flush(new Blob(['a']));
+    });
+
+    it('plays a jock straight from the list', () => {
+      // The list is where an operator compares jocks, so it is where hearing
+      // them belongs -- not only inside the edit form.
+      const fixture = mounted();
+      const row = fixture.nativeElement.querySelector('[data-row-preview]');
+      expect(row.disabled).toBe(false);
+      row.click();
+      fixture.detectChanges();
+
+      // Only the button that was pressed says so.
+      expect(row.textContent).toContain('Speaking');
+      expect(fixture.nativeElement.querySelector('[data-preview]').textContent).toContain('Hear it');
+
+      const req = ctrl.expectOne('/admin/voices/preview');
+      expect(req.request.body).toEqual({ voice: 'am_fenrir' });
+      req.flush(new Blob(['a']));
+      fixture.detectChanges();
+      expect(row.textContent).toContain('Hear it');
+      expect(played).toEqual(['blob:fake']);
+    });
   });
 });

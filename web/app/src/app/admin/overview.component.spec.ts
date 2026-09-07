@@ -147,4 +147,102 @@ describe('Overview', () => {
       vi.useRealTimers();
     }
   });
+
+  describe('enrichment progress', () => {
+    // Reported as "enrichment does not show any progress" while it WAS
+    // progressing: the numbers were two rows in a flat table, and a job that
+    // takes days at a track a minute needs a shape, not a pair of integers.
+    function withOverview(o: Record<string, unknown>) {
+      const fixture = TestBed.createComponent(Overview);
+      ctrl.expectOne('/admin/overview.json').flush(o);
+      fixture.detectChanges();
+      return fixture;
+    }
+
+    it('shows how far along it is, and how long is left', () => {
+      const fixture = withOverview({
+        enriching: true,
+        library: { tracks: 7696, enriched: 130 },
+        enrichment_cost: { seconds_per_track: 40.6 },
+      });
+      const line = fixture.nativeElement.querySelector('[data-enrich-line]').textContent;
+      expect(line).toContain('130');
+      expect(line).toContain('7,696');
+      expect(line).toContain('1.7%');
+      expect(line).toContain('running');
+
+      const eta = fixture.nativeElement.querySelector('[data-enrich-eta]').textContent;
+      expect(eta).toContain('7,566 to go');
+      expect(eta).toContain('4 days');
+      expect(eta).toContain('41s per track');
+
+      const bar = fixture.nativeElement.querySelector('progress');
+      expect(bar.value).toBe(130);
+      expect(bar.max).toBe(7696);
+    });
+
+    it('says hours when it is hours, minutes when it is minutes', () => {
+      const hours = withOverview({
+        enriching: true,
+        library: { tracks: 1000, enriched: 100 },
+        enrichment_cost: { seconds_per_track: 40 },
+      });
+      expect(hours.nativeElement.querySelector('[data-enrich-eta]').textContent).toContain('10 hours');
+
+      const mins = withOverview({
+        enriching: true,
+        library: { tracks: 100, enriched: 95 },
+        enrichment_cost: { seconds_per_track: 40 },
+      });
+      expect(mins.nativeElement.querySelector('[data-enrich-eta]').textContent).toContain('3 minutes');
+    });
+
+    it('does not promise a time when it is paused or the rate is unknown', () => {
+      // A paused job has no rate to project from, and saying "4 days" about
+      // something that is not running would be a lie.
+      const paused = withOverview({
+        enriching: false,
+        library: { tracks: 1000, enriched: 100 },
+        enrichment_cost: { seconds_per_track: 40 },
+      });
+      expect(paused.nativeElement.querySelector('[data-enrich-line]').textContent).toContain('paused');
+      const eta = paused.nativeElement.querySelector('[data-enrich-eta]').textContent;
+      expect(eta).toContain('900 to go');
+      expect(eta).not.toContain('hours');
+
+      const unknown = withOverview({ enriching: true, library: { tracks: 10, enriched: 1 } });
+      expect(unknown.nativeElement.querySelector('[data-enrich-eta]').textContent).toContain('9 to go');
+    });
+
+    it('says so when every track has a dossier', () => {
+      const fixture = withOverview({
+        enriching: true,
+        library: { tracks: 500, enriched: 500 },
+        enrichment_cost: { seconds_per_track: 40 },
+      });
+      expect(fixture.nativeElement.querySelector('[data-enrich-eta]').textContent).toContain(
+        'Every track has a dossier',
+      );
+    });
+
+    it('treats a library with no enriched count as none done', () => {
+      const fixture = withOverview({ enriching: true, library: { tracks: 200 } });
+      expect(fixture.nativeElement.querySelector('[data-enrich-line]').textContent).toContain('0 of 200');
+    });
+
+    it('says nothing has been scanned rather than dividing by zero', () => {
+      const fixture = withOverview({ enriching: true, library: { tracks: 0, enriched: 0 } });
+      expect(fixture.nativeElement.querySelector('[data-enrich-progress]').textContent).toContain(
+        'Nothing scanned yet',
+      );
+      expect(fixture.nativeElement.querySelector('progress')).toBeNull();
+    });
+
+    it('survives an overview with no library block at all', () => {
+      const fixture = withOverview({ enriching: true });
+      expect(fixture.nativeElement.querySelector('[data-enrich-progress]').textContent).toContain(
+        'Nothing scanned yet',
+      );
+    });
+  });
 });
