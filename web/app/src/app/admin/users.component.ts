@@ -22,15 +22,37 @@ import { AdminApi, User } from '../api/api';
       <tbody>
       @for (user of users(); track user.id) {
         <tr [attr.data-row]="user.id">
-          <td>{{ user.name }}</td>
-          <td>{{ user.role }}</td>
+          @if (editing() === user.id) {
+            <td>
+              <input
+                data-edit-name
+                [value]="editName()"
+                (input)="editName.set(value($event))"
+              />
+            </td>
+            <td>
+              <select data-edit-role (change)="editRole.set(value($event))">
+                <option value="listener" [selected]="editRole() === 'listener'">listener</option>
+                <option value="admin" [selected]="editRole() === 'admin'">admin</option>
+              </select>
+            </td>
+          } @else {
+            <td>{{ user.name }}</td>
+            <td>{{ user.role }}</td>
+          }
           <td>{{ user.disabled ? 'disabled' : 'active' }}</td>
           <td>
-            <button type="button" data-toggle (click)="toggle(user)">
-              {{ user.disabled ? 'Enable' : 'Disable' }}
-            </button>
-            <button type="button" data-reset (click)="reset(user)">Reset password</button>
-            <button type="button" data-remove (click)="remove(user)">Delete</button>
+            @if (editing() === user.id) {
+              <button type="button" data-save (click)="save(user)">Save</button>
+              <button type="button" data-cancel (click)="cancel()">Cancel</button>
+            } @else {
+              <button type="button" data-edit (click)="startEdit(user)">Edit</button>
+              <button type="button" data-toggle (click)="toggle(user)">
+                {{ user.disabled ? 'Enable' : 'Disable' }}
+              </button>
+              <button type="button" data-reset (click)="reset(user)">Reset password</button>
+              <button type="button" data-remove (click)="remove(user)">Delete</button>
+            }
           </td>
         </tr>
       }
@@ -78,6 +100,11 @@ export class Users {
   readonly name = signal('');
   readonly password = signal('');
   readonly role = signal('listener');
+
+  // The row being edited, by id, so opening a second closes the first.
+  readonly editing = signal<number | null>(null);
+  readonly editName = signal('');
+  readonly editRole = signal('');
   readonly resetting = signal<User | null>(null);
   readonly said = signal('');
 
@@ -93,6 +120,37 @@ export class Users {
     this.api.users().subscribe({
       next: (u) => this.users.set(u),
       error: () => this.said.set('Could not read the accounts.'),
+    });
+  }
+
+  startEdit(u: User): void {
+    this.said.set('');
+    this.editing.set(u.id);
+    this.editName.set(u.name);
+    this.editRole.set(u.role);
+  }
+
+  cancel(): void {
+    this.editing.set(null);
+  }
+
+  /**
+   * Save one account's name and role.
+   *
+   * A REFUSAL LEAVES THE ROW OPEN, and the server's own words are repeated:
+   * the two that matter are a name already taken and the refusal to let an
+   * operator take admin off their own account, and "could not save" would
+   * hide both.
+   */
+  save(u: User): void {
+    this.said.set('');
+    this.api.updateUser(u.id, { name: this.editName(), role: this.editRole() }).subscribe({
+      next: () => {
+        this.said.set(`Saved ${this.editName()}.`);
+        this.editing.set(null);
+        this.load();
+      },
+      error: (e: { error?: string }) => this.said.set(String(e.error ?? 'Could not save that account.')),
     });
   }
 

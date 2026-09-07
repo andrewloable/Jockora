@@ -58,6 +58,10 @@ type Queue struct {
 	// Paused reports whether the worker may run. Nil means always.
 	Paused func() bool
 
+	// Backoff is how long to wait after the model refuses. Zero means
+	// DefaultUnavailableBackoff; tests set it small.
+	Backoff time.Duration
+
 	Artists ArtistSource
 	Lyrics  LyricsSource
 	// Onset derives a ramp from AUDIO when synced lyrics cannot. Optional: nil
@@ -116,6 +120,11 @@ func (q *Queue) Run(ctx context.Context) error {
 	}
 
 	lastBeat := q.clk().Now()
+	// Consecutive refusals from the model, reset by any track that gets
+	// through. Consecutive rather than total: a service that comes back should
+	// not carry the memory of an outage into the rest of the run.
+	unavailable := 0
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -147,10 +156,33 @@ func (q *Queue) Run(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+
+			// The service, not the track. Nothing was stored, so this same
+			// track is the next one tried -- WAITING is the whole point:
+			// without it the loop asks for the next track immediately, gets
+			// refused immediately, and races through the library achieving
+			// nothing while hammering an endpoint that has already said no.
+			if errors.Is(err, ErrLLMUnavailable) {
+				unavailable++
+				if unavailable >= MaxConsecutiveUnavailable {
+					return fmt.Errorf("enrich: giving up after %d refusals in a row: %w",
+						unavailable, err)
+				}
+				q.logger().Warn("model unavailable; waiting rather than spending the queue on it",
+					"attempt", unavailable, "waiting", q.backoff(), "err", err)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(q.backoff()):
+				}
+				continue
+			}
+
 			// One bad track must not end a ten-thousand-track run. enrichOne
 			// already stored a dossier row, so it will not be retried forever.
 			q.logger().Warn("track enrichment failed", "path", path, "err", err)
 		}
+		unavailable = 0
 
 		q.mu.Lock()
 		q.done++
@@ -161,6 +193,30 @@ func (q *Queue) Run(ctx context.Context) error {
 			lastBeat = now
 		}
 	}
+}
+
+// MaxConsecutiveUnavailable ends a run rather than waiting for ever.
+//
+// Ten refusals in a row is no longer a rate limit clearing on its own: it is a
+// key that has been revoked, a host that is down, or a daily ceiling that will
+// not lift for hours. Ending the run says so where an operator can see it, and
+// the queue is resumable, so nothing is lost by stopping.
+const MaxConsecutiveUnavailable = 10
+
+// DefaultUnavailableBackoff is how long to wait after the model refuses.
+//
+// A minute, because the thing being waited out is a per-minute or per-day
+// ceiling and there is no hurry: the queue has already been running for hours
+// and will run for hours more. Short enough that a transient blip costs a
+// minute, long enough that ten of them is ten minutes rather than ten seconds.
+const DefaultUnavailableBackoff = time.Minute
+
+// backoff is the configured wait, or the default.
+func (q *Queue) backoff() time.Duration {
+	if q.Backoff > 0 {
+		return q.Backoff
+	}
+	return DefaultUnavailableBackoff
 }
 
 var errNoWork = errors.New("enrich: nothing left to do")
@@ -308,8 +364,18 @@ func (q *Queue) enrichOne(ctx context.Context, w work) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		// Store an empty dossier so this track is not attempted forever, then
-		// report why.
+		// A SERVICE THAT IS NOT THERE IS NOT A TRACK WITH NOTHING TO SAY, and
+		// the difference decides whether this track is ever tried again.
+		// Storing an empty dossier for a rate limit would mark a perfectly
+		// good record as permanently unknowable -- and a 429 returns with no
+		// model latency at all, so the queue would do that to the entire
+		// remaining library in minutes, then report itself complete.
+		if errors.Is(err, ErrLLMUnavailable) {
+			return err
+		}
+		// The model answered and the answer was unusable: it has looked at
+		// this track. Store an empty dossier so it is not attempted forever,
+		// then report why.
 		if storeErr := StoreDossier(ctx, q.Store, id, emptyDossier()); storeErr != nil {
 			return storeErr
 		}

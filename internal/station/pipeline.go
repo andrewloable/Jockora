@@ -101,6 +101,8 @@ type Pipeline struct {
 
 	mu      sync.Mutex
 	pending []Boundary
+	// scheduled is how many rendered breaks the mixer queue is holding.
+	scheduled int
 }
 
 func (p *Pipeline) log() *slog.Logger {
@@ -346,4 +348,49 @@ func windowOr(t mix.Transition, seconds float64) float64 {
 		return BetweenWindowSeconds
 	}
 	return seconds
+}
+
+// Outlook is what the DJ is about to do, for anyone who cannot see the logs.
+//
+// A break that is coming, one still being written, and one that was never
+// scheduled are indistinguishable from outside -- so a quiet station and a
+// broken one read the same, which is the failure this product is least able to
+// notice.
+type Outlook string
+
+const (
+	// OutlookNone: no break is scheduled after the current track.
+	OutlookNone Outlook = "none"
+	// OutlookWriting: a slot exists and the model has not answered yet. This
+	// is the state that can still fail.
+	OutlookWriting Outlook = "writing"
+	// OutlookReady: the speech is rendered and queued. It will air.
+	OutlookReady Outlook = "ready"
+)
+
+// SetScheduled records how many rendered breaks are waiting in the mixer's
+// queue. Told rather than asked, because the queue belongs to the station
+// runtime and the pipeline is handed one only once a station is on air.
+func (p *Pipeline) SetScheduled(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.scheduled = n
+}
+
+// Outlook reports whether the DJ is about to speak.
+//
+// WRITING OUTRANKS READY when both are true: the interesting state is the one
+// that can still fail, and saying "ready" while a later break is unwritten
+// would be the more comfortable half of the truth.
+func (p *Pipeline) Outlook() Outlook {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	switch {
+	case len(p.pending) > 0:
+		return OutlookWriting
+	case p.scheduled > 0:
+		return OutlookReady
+	default:
+		return OutlookNone
+	}
 }

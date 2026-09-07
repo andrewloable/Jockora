@@ -79,7 +79,10 @@ func TestDegenerateShoutingTheTitleIsNotAPlaceholder(t *testing.T) {
 	if _, echoed := echoesInstructions("AND NOW YOUR SPEECH HERE friends", names); !echoed {
 		t.Error("a shouted placeholder was allowed through")
 	}
-	if _, echoed := echoesInstructions("THIS IS NOT A TITLE at all", names); !echoed {
+	// A whole line of shouting that is not the record. Note there is no
+	// single-letter word in it: the pattern wants runs of two-or-more-letter
+	// capitals, so an "A" in the middle ends the run.
+	if _, echoed := echoesInstructions("THIS IS NOT THE TITLE", names); !echoed {
 		t.Error("shouting unrelated to the record was allowed through")
 	}
 }
@@ -113,7 +116,7 @@ func TestDegenerateIsDroppedNotAired(t *testing.T) {
 		Writer: &scriptedWriter{replies: []string{loop, loop}},
 		Said:   saidStore(t),
 	}
-	_, err := v.Generate(context.Background(), "prompt", nil, nil, nil)
+	_, err := v.Generate(context.Background(), "prompt", 0, nil, nil, nil)
 	if err == nil {
 		t.Fatal("the break that actually aired was accepted again")
 	}
@@ -124,5 +127,43 @@ func TestDegenerateIsDroppedNotAired(t *testing.T) {
 	// attempt -- and it must be filed under the reason that actually happened.
 	if got := v.Stats().Reasons[DropSelfRepetitive]; got != 1 {
 		t.Errorf("self-repetition recorded %d times, want 1", got)
+	}
+}
+
+// TestDegenerateShoutingIsOnlyAMarkerWhenItIsTheWholeBreak.
+//
+// Third time this rule has cost a good break. It refuses three consecutive
+// capitalised words because "YOUR SPEECH HERE" once aired -- but the model
+// deployed here writes in an emphatic style, and a DJ shouting three words
+// inside ninety of prose is doing the job. Live drops: "HAVE FUN STORMING THE
+// CASTLE" (a title, exempted earlier) and then "YOU ARE HERE", which is not a
+// title and is still not a placeholder.
+//
+// With one generation per break there is no second attempt, so every false
+// positive here is silence.
+func TestDegenerateShoutingIsOnlyAMarkerWhenItIsTheWholeBreak(t *testing.T) {
+	real := []string{
+		"WOOO! Bayside just knocked the walls down and I am HERE for it. " +
+			"YOU ARE HERE, awake at three in the morning, listening to a man yell about castles.",
+		"I am DEAD. I am BURIED. What a TITLE that was, and there is more coming.",
+	}
+	for _, text := range real {
+		if phrase, echoed := echoesInstructions(text, nil); echoed {
+			t.Errorf("dropped a real break over %q: %s", phrase, text)
+		}
+	}
+
+	// The markers that actually aired are still refused, because they are the
+	// whole break rather than a flourish inside one.
+	markers := []string{
+		"YOUR RADIO BREAK HERE",
+		"TEXT OF YOUR RADIO BREAK HERE",
+		"YOUR 30 WORDS HERE",
+		"PLACEHOLDER LINE GOES HERE",
+	}
+	for _, text := range markers {
+		if _, echoed := echoesInstructions(text, nil); !echoed {
+			t.Errorf("a placeholder aired: %q", text)
+		}
 	}
 }

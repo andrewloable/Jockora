@@ -23,10 +23,18 @@ const (
 )
 
 // Playlists is the playlist editing a console needs.
+//
+// The tag methods are here rather than in an interface of their own because
+// they are edited from the same screen, by the same operator, in the same
+// breath as pinning -- even though what they change is the TRACK and not the
+// station's copy of it.
 type Playlists interface {
 	StationTrackPage(ctx context.Context, id int64, limit, offset int) ([]store.StationTrackDetail, int, error)
 	SetPinned(ctx context.Context, stationID, trackID int64, pinned bool) error
 	SetExcluded(ctx context.Context, stationID, trackID int64, excluded bool) error
+	SetTrackTags(ctx context.Context, trackID int64, genres, moods []string) error
+	ClearTrackTags(ctx context.Context, trackID int64) error
+	TrackTags(ctx context.Context, trackID int64) (store.TrackTags, error)
 }
 
 // SetPlaylists wires playlist editing.

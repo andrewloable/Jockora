@@ -21,7 +21,10 @@ import { Player } from './player.component';
       <app-theme-toggle />
     </header>
     <app-player [src]="hls()" />
-    <app-now-playing [station]="stationId()" />
+    <!-- The transcript comes from the component that POLLS for it. It used to
+         be a signal here that nothing ever wrote to, so the thumbs-down could
+         not appear in the running app however well it was unit-tested. -->
+    <app-now-playing [station]="stationId()" (spoke)="transcript.set($event)" />
     <app-feedback [station]="stationId()" [transcript]="transcript()" />
     <app-dial (tuned)="onTuned($event)" />
   `,

@@ -61,21 +61,49 @@ func (s *Store) UpsertJock(ctx context.Context, j Jock) error {
 
 // GetJock reads one jock.
 func (s *Store) GetJock(ctx context.Context, id string) (Jock, error) {
+	return scanJock(s.db.QueryRowContext(ctx,
+		`SELECT `+jockColumns+` FROM jocks WHERE id = ?`, id), id)
+}
+
+// StationJock reads the jock a station presents, in ONE query.
+//
+// One query rather than a station read followed by a jock read: two would leave
+// an error branch reachable only by a database that answers the first and fails
+// the second, which is a fixture nobody can write honestly. Same reasoning as
+// guardLastAdmin.
+//
+// ErrNotFound is the answer to every way there is nobody to put on air -- no
+// such station, no jock assigned, or a jock id with no row behind it -- because
+// the caller does the same thing in all three: keeps whoever is already
+// speaking.
+func (s *Store) StationJock(ctx context.Context, stationID int64) (Jock, error) {
+	// The columns are spelled out rather than reusing jockColumns: "id" alone
+	// is ambiguous across this join, and qualifying a shared constant at
+	// runtime is string surgery nobody should have to read.
+	return scanJock(s.db.QueryRowContext(ctx, `
+		SELECT j.id, j.name, j.voice_id, j.good_for_genres, j.good_for_moods,
+		       j.speech_style, j.personality, j.forbidden, j.updated_at
+		  FROM stations st JOIN jocks j ON j.id = st.jock_id
+		 WHERE st.id = ?`, stationID), fmt.Sprintf("of station %d", stationID))
+}
+
+// scanJock reads one jock row. what names the row in an error, so a failure
+// says which lookup produced it.
+func scanJock(row *sql.Row, what string) (Jock, error) {
 	var j Jock
 	var genres, moods, forbidden string
 	var updated int64
 
-	err := s.db.QueryRowContext(ctx, `SELECT `+jockColumns+` FROM jocks WHERE id = ?`, id).
-		Scan(&j.ID, &j.Name, &j.VoiceID, &genres, &moods,
-			&j.SpeechStyle, &j.Personality, &forbidden, &updated)
+	err := row.Scan(&j.ID, &j.Name, &j.VoiceID, &genres, &moods,
+		&j.SpeechStyle, &j.Personality, &forbidden, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Jock{}, ErrNotFound
 	}
 	if err != nil {
-		return Jock{}, fmt.Errorf("store: reading jock %q: %w", id, err)
+		return Jock{}, fmt.Errorf("store: reading jock %s: %w", what, err)
 	}
 	if err := decodeJockLists(&j, genres, moods, forbidden); err != nil {
-		return Jock{}, fmt.Errorf("store: jock %q: %w", id, err)
+		return Jock{}, fmt.Errorf("store: jock %s: %w", what, err)
 	}
 	j.UpdatedAt = time.Unix(updated, 0)
 	return j, nil

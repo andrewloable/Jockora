@@ -101,7 +101,7 @@ type Config struct {
 	LogFormat string
 
 	// AllowLAN permits a non-loopback listen address. Off by default: this
-	// program has no authentication, so binding off-host is a decision, never
+	// program speaks plain HTTP, so binding off-host is a decision, never
 	// an accident.
 	AllowLAN bool
 
@@ -151,8 +151,10 @@ func LoadArgs(args []string, register func(*flag.FlagSet)) (*Config, error) {
 	fs.StringVar(&c.DBPath, "db-path", "jockora.db", "SQLite database file")
 	fs.StringVar(&c.SessionKey, "session-key", "", "secret signing listener sessions, at least 32 bytes (prefer JOCKORA_SESSION_KEY); empty generates one and keeps it in the database")
 	fs.StringVar(&c.SegmentDir, "segment-dir", "segments", "directory for HLS segments")
-	// Loopback, never 0.0.0.0: v0.1 ships no authentication at all, and
-	// self-hosters port-forward services without realising.
+	// Loopback, never 0.0.0.0. Accounts guard the stream and the console now,
+	// but there is still no TLS -- so a LAN bind sends every password across
+	// the wire in clear, and self-hosters port-forward services without
+	// realising.
 	fs.StringVar(&c.ListenAddr, "listen-addr", "127.0.0.1:8080", "HTTP listen address")
 	// 8081, not llama-server's own default of 8080, because Jockora already
 	// listens there. Start llama-server with --port 8081 or set JOCKORA_LLM_URL.
@@ -182,7 +184,7 @@ func LoadArgs(args []string, register func(*flag.FlagSet)) (*Config, error) {
 		`"text", "json", or empty to infer (json when not a terminal)`)
 
 	fs.BoolVar(&c.AllowLAN, "allow-lan", false,
-		"permit a non-loopback listen address (NO AUTHENTICATION: anyone who can reach it can listen)")
+		"permit a non-loopback listen address (plain HTTP: passwords cross the wire in clear)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err

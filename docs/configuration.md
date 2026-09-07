@@ -209,7 +209,7 @@ historical reasons and changing them is not supported.
 | `-list-size` | `10` | Playlist window. Segment × list = how far a client can rewind. |
 | `-listen-addr` | `127.0.0.1:8080` | HTTP bind address. |
 | `-log-format` | inferred | `text`, `json`, or empty to infer — JSON when stdout is not a terminal. |
-| `-allow-lan` | off | **Required for any non-loopback bind. There is no authentication.** |
+| `-allow-lan` | off | **Required for any non-loopback bind.** Accounts guard the stream and the APIs; there is no TLS. |
 
 ## Coverage sampling
 

@@ -86,9 +86,14 @@ type Enrichment struct {
 
 // Status is the whole /now.json payload.
 type Status struct {
-	Now        *Track      `json:"now"`
-	Next       *Track      `json:"next"`
-	LastBreak  *LastBreak  `json:"last_break"`
+	Now       *Track     `json:"now"`
+	Next      *Track     `json:"next"`
+	LastBreak *LastBreak `json:"last_break"`
+
+	// NextBreak is what the DJ is about to do: "ready", "writing" or "none".
+	// Without it a station that has nothing to say and one whose break failed
+	// are the same silence.
+	NextBreak  string      `json:"next_break,omitempty"`
 	Health     Health      `json:"health"`
 	Metrics    Metrics     `json:"metrics"`
 	Enrichment *Enrichment `json:"enrichment,omitempty"`

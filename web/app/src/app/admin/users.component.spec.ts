@@ -188,4 +188,72 @@ describe('Users', () => {
     expect(head).toContain('Status');
     expect(head).toContain('Actions');
   });
+
+  describe('editing an account', () => {
+    // A name or a role was fixed at creation: a typo meant deleting the account
+    // and building it again, and deleting the last admin is refused outright --
+    // so on a one-operator install there was no route at all.
+    function editing(fixture: ReturnType<typeof mounted>) {
+      fixture.nativeElement.querySelectorAll('[data-edit]')[0].click();
+      fixture.detectChanges();
+      return fixture;
+    }
+
+    it('opens a row with the account values in it', () => {
+      const fixture = editing(mounted());
+      expect(fixture.nativeElement.querySelector('[data-edit-name]').value).toBe(people[0].name);
+      expect(fixture.nativeElement.querySelector('[data-edit-role]').value).toBe(people[0].role);
+    });
+
+    it('saves the new name and role', () => {
+      const fixture = editing(mounted());
+      type(fixture, '[data-edit-name]', 'andrew2');
+      type(fixture, '[data-edit-role]', 'listener');
+      fixture.nativeElement.querySelector('[data-save]').click();
+
+      const req = ctrl.expectOne('/admin/users/' + people[0].id);
+      expect(req.request.method).toBe('PUT');
+      expect(req.request.body).toEqual({ name: 'andrew2', role: 'listener' });
+      req.flush(null);
+      ctrl.expectOne('/admin/users').flush(people);
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('Saved');
+      expect(fixture.nativeElement.querySelector('[data-edit-name]')).toBeNull();
+    });
+
+    it('cancels without sending anything', () => {
+      const fixture = editing(mounted());
+      type(fixture, '[data-edit-name]', 'nope');
+      fixture.nativeElement.querySelector('[data-cancel]').click();
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-edit-name]')).toBeNull();
+      ctrl.verify();
+    });
+
+    it("repeats the server's reason and keeps the row open", () => {
+      // The refusals here are the ones that matter: a taken name, and the
+      // console refusing to let an operator take admin off themselves.
+      const fixture = editing(mounted());
+      fixture.nativeElement.querySelector('[data-save]').click();
+      ctrl
+        .expectOne('/admin/users/' + people[0].id)
+        .flush('you cannot take admin off your own account', {
+          status: 409,
+          statusText: 'Conflict',
+        });
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain(
+        'your own account',
+      );
+      expect(fixture.nativeElement.querySelector('[data-edit-name]')).not.toBeNull();
+
+      // And a refusal with no message still says something.
+      fixture.nativeElement.querySelector('[data-save]').click();
+      ctrl
+        .expectOne('/admin/users/' + people[0].id)
+        .flush(null, { status: 500, statusText: 'Error' });
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('Could not');
+    });
+  });
 });

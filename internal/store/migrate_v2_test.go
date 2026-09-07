@@ -15,7 +15,7 @@ import (
 // v01SchemaVersion is the schema a v0.1 database is left at.
 const v01SchemaVersion = 5
 
-var v2Tables = []string{"users", "sources", "jocks", "stations", "station_tracks", "settings"}
+var v2Tables = []string{"users", "sources", "jocks", "stations", "station_tracks", "settings", "track_tags"}
 
 func openAt(t *testing.T, path string) *Store {
 	t.Helper()
@@ -126,6 +126,12 @@ func TestMigrateV2UpgradesV01Database(t *testing.T) {
 		}
 	}
 	if _, err := old.DB().Exec(`DROP INDEX IF EXISTS idx_station_tracks_track`); err != nil {
+		t.Fatal(err)
+	}
+	// The VIEW too. A view is not a table, so the loop above does not reach it,
+	// and a leftover one makes migration 9 fail on a fixture that is supposed
+	// to predate it.
+	if _, err := old.DB().Exec(`DROP VIEW IF EXISTS effective_tags`); err != nil {
 		t.Fatal(err)
 	}
 	// The ADD COLUMNs survive a table drop, so they have to come off too.

@@ -166,7 +166,7 @@ func run() error {
 			return err
 		}
 
-		out, err := writer.WriteBreak(ctx, prompt, schema)
+		out, err := writer.WriteBreak(ctx, prompt, schema, 0)
 		if err != nil {
 			failed++
 			fmt.Printf("  %2d  model error: %v\n", i+1, err)
@@ -363,7 +363,7 @@ func enforceLength(ctx context.Context, rubric dj.Rubric, w dj.Writer, b *dj.Bre
 	if err != nil {
 		return res, false, err
 	}
-	if out, err := w.WriteBreak(ctx, shortPrompt, schema); err == nil {
+	if out, err := w.WriteBreak(ctx, shortPrompt, schema, 0); err == nil {
 		if retry, perr := dj.ParseBreak(out); perr == nil {
 			if r2, serr := rubric.Score(ctx, retry, prev, cur, next, shorter, names); serr == nil {
 				if r2.Pass {

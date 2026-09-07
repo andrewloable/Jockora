@@ -80,6 +80,13 @@ func (s *Server) Routes() []Route {
 		{Path: "/admin/sources", Prefix: true, AnyMethod: true, Role: auth.RoleAdmin, H: withPath(s.serveSources)},
 		{Path: "/admin/stations", Prefix: true, AnyMethod: true, Role: auth.RoleAdmin, H: withPath(s.serveStations)},
 		{Path: "/admin/jocks", Prefix: true, AnyMethod: true, Role: auth.RoleAdmin, H: withPath(s.serveAdminJocks)},
+		// TRACKS, not stations. A track's tags belong to the track, so the
+		// path says so even though the console edits them from a playlist.
+		{Path: "/admin/tracks", Prefix: true, AnyMethod: true, Role: auth.RoleAdmin, H: withPath(s.serveTrackTags)},
+		// Enrichment is the most expensive thing this program makes, and it
+		// lived in exactly one place. Admin only: it is the whole library's
+		// work, and importing one is a write to every track.
+		{Path: "/admin/enrichment", Prefix: true, AnyMethod: true, Role: auth.RoleAdmin, H: withPath(s.serveEnrichment)},
 
 		// GET /login is the app's sign-in PAGE. POST /login above is the API
 		// that page posts to; without this the page would answer 405, because

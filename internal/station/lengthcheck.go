@@ -110,33 +110,24 @@ func (lc LengthCheck) Enforce(ctx context.Context, placement mix.Placement, wind
 		return Rendered{Path: path, Text: text, Placement: placement, Seconds: seconds, Attempts: attempts}, nil
 	}
 
-	// One retry, and only one. Two LLM calls plus two renders is already the
-	// ceiling inside the lookahead window.
-	shorter := int(float64(target)*ShorterRetryFactor + 0.5)
-	retryPath, retryText, retrySeconds, retryAttempts, err := lc.attempt(ctx, shorter, placement, 1)
-	remove(path) // the overlong first render must not stay in the break directory
-	attempts += retryAttempts
-	if err != nil {
-		return Rendered{Dropped: true, Attempts: attempts, Reason: err.Error()}, ctxErr(ctx, err)
-	}
-	if retrySeconds <= windowSeconds {
-		return Rendered{Path: retryPath, Text: retryText, Placement: placement, Seconds: retrySeconds, Attempts: attempts}, nil
+	// TOO LONG IS A PLACEMENT PROBLEM, NOT A WRITING PROBLEM. This used to
+	// rewrite at three quarters of the word target and render again -- a second
+	// LLM call and a second TTS render, inside a lookahead window sized for
+	// one. Moving audio that already exists costs nothing, and the between gap
+	// is wider than any ramp or outro, so a break that overran its intro simply
+	// airs in the gap instead.
+	if placement != mix.PlacementBetween && seconds <= BetweenWindowSeconds {
+		return Rendered{Path: path, Text: text, Placement: mix.PlacementBetween, Seconds: seconds, Attempts: attempts}, nil
 	}
 
-	// Still long. Re-PLACE rather than rewrite: the between gap is wider than
-	// any ramp, and moving audio that already exists costs nothing, while a
-	// third render would blow the budget the lookahead was sized for.
-	if placement != mix.PlacementBetween && retrySeconds <= BetweenWindowSeconds {
-		return Rendered{Path: retryPath, Text: retryText, Placement: mix.PlacementBetween, Seconds: retrySeconds, Attempts: attempts}, nil
-	}
-
-	remove(retryPath)
+	// Longer than the widest window there is. Nothing to move it to.
+	remove(path)
 	return Rendered{
 		Dropped:  true,
-		Seconds:  retrySeconds,
+		Seconds:  seconds,
 		Attempts: attempts,
 		Reason: fmt.Sprintf("%.1fs of speech does not fit the %.1fs %s window or the %.1fs between gap",
-			retrySeconds, windowSeconds, placement, BetweenWindowSeconds),
+			seconds, windowSeconds, placement, BetweenWindowSeconds),
 	}, nil
 }
 

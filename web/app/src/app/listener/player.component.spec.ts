@@ -47,12 +47,76 @@ describe('Player', () => {
     expect(el.textContent.toLowerCase()).not.toContain('next track');
   });
 
-  it('offers the browser its own play, pause and volume', () => {
-    const audio = mount().nativeElement.querySelector('[data-player]');
-    expect(audio.hasAttribute('controls')).toBe(true);
+  it('player transport exposes no seek control', () => {
+    // The NATIVE controls gave a live stream a draggable scrub bar and a
+    // running duration: measured seekable [0, 60.01] on the live station, and a
+    // readout of "0:28 / 0:44" that was the HLS buffer window rather than any
+    // length a listener could mean. The component's own docstring forbids
+    // exactly this.
+    const el = mount().nativeElement;
+    const audio = el.querySelector('[data-player]');
+    expect(audio.hasAttribute('controls')).toBe(false);
     // No autoplay: browsers block it, and the block looks like a broken stream.
     expect(audio.hasAttribute('autoplay')).toBe(false);
     expect(audio.getAttribute('preload')).toBe('none');
+    expect(el.querySelector('progress, input[type="range"][data-seek]')).toBeNull();
+    // A live stream has no meaningful position, so nothing pretends otherwise.
+    expect(el.textContent).not.toMatch(/\d:\d\d/);
+  });
+
+  it('player transport toggles play and pause', () => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    const fixture = mount();
+    const button = fixture.nativeElement.querySelector('[data-playpause]');
+    const audio = fixture.nativeElement.querySelector('[data-player]');
+
+    expect(button.textContent.trim()).toBe('Listen');
+    button.click();
+    expect(play).toHaveBeenCalled();
+    // The BUTTON follows the element, not the click: a stream that stops on its
+    // own would otherwise leave the label saying it was still playing.
+    audio.dispatchEvent(new Event('play'));
+    fixture.detectChanges();
+    expect(button.textContent.trim()).toBe('Stop');
+
+    button.click();
+    expect(pause).toHaveBeenCalled();
+    audio.dispatchEvent(new Event('pause'));
+    fixture.detectChanges();
+    expect(button.textContent.trim()).toBe('Listen');
+  });
+
+  it('player transport survives a play the browser refuses', async () => {
+    // A browser that will not make sound without a gesture rejects play(). The
+    // status line already says what is wrong; an unhandled rejection in the
+    // console helps nobody.
+    const play = vi
+      .spyOn(HTMLMediaElement.prototype, 'play')
+      .mockRejectedValue(new Error('NotAllowedError'));
+    const fixture = mount();
+    fixture.nativeElement.querySelector('[data-playpause]').click();
+    await Promise.resolve();
+    expect(play).toHaveBeenCalled();
+    expect(fixture.nativeElement.querySelector('[data-playpause]').textContent.trim()).toBe(
+      'Listen',
+    );
+  });
+
+  it('player transport carries a volume control and nothing else', () => {
+    const fixture = mount();
+    const volume = fixture.nativeElement.querySelector('[data-volume]');
+    const audio = fixture.nativeElement.querySelector('[data-player]');
+    expect(volume.type).toBe('range');
+
+    volume.value = '0.4';
+    volume.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    expect(audio.volume).toBeCloseTo(0.4);
+  });
+
+  it('player transport says it is live instead of showing a position', () => {
+    expect(mount().nativeElement.querySelector('[data-live]').textContent).toContain('Live');
   });
 
   it('uses native HLS only where hls.js cannot run', () => {
@@ -337,7 +401,6 @@ describe('Player', () => {
       vi.useRealTimers();
     }
   });
-
 });
 
 // The two guarantees below were carried over from web/web_test.go when
@@ -354,9 +417,19 @@ describe('Player, as written', () => {
   it('never starts playing by itself', () => {
     // Browsers block autoplay, and the block looks exactly like a broken
     // stream: a play button that does nothing and no error anywhere.
+    //
+    // Asserted on BEHAVIOUR now rather than on the absence of ".play()" in the
+    // source. The player has a play button, so the string is there on purpose;
+    // what must stay true is that tuning alone never calls it.
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    const fixture = TestBed.createComponent(Host);
+    fixture.detectChanges();
+    fixture.componentInstance.src.set('/hls/3/stream.m3u8');
+    fixture.detectChanges();
+    expect(play).not.toHaveBeenCalled();
+
     expect(source).not.toContain('autoplay');
     expect(source).toContain('preload="none"');
-    expect(source).not.toContain('.play()');
   });
 
   it('loads nothing from a CDN', () => {

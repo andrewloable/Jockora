@@ -49,11 +49,11 @@ func TestReadyGateLiftsWhenEnrichmentIsDone(t *testing.T) {
 
 func TestReadyCatchAllFilterValidates(t *testing.T) {
 	for _, genre := range []string{UnsortedTag, "other"} {
-		if err := (Filter{Genre: genre}).Validate(); err != nil {
-			t.Errorf("Filter{Genre:%q}.Validate() = %v, want nil", genre, err)
+		if err := (Filter{Genres: SplitList(genre)}).Validate(); err != nil {
+			t.Errorf("Filter{Genres: SplitList(%q)}.Validate() = %v, want nil", genre, err)
 		}
 	}
-	if err := (Filter{Genre: "nonsense"}).Validate(); err == nil {
+	if err := (Filter{Genres: SplitList("nonsense")}).Validate(); err == nil {
 		t.Error("a genre outside the vocabulary was accepted")
 	}
 }

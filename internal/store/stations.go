@@ -6,6 +6,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -295,6 +296,19 @@ type StationTrackDetail struct {
 	Pinned   bool   `json:"pinned"`
 	Excluded bool   `json:"excluded"`
 	Missing  bool   `json:"missing"`
+	// Genres and Moods are what the track COUNTS AS -- the operator's own tags
+	// where they exist, the dossier's otherwise -- so an operator curating a
+	// playlist sees why a track landed here. Empty when nothing has said yet.
+	Genres []string `json:"genres"`
+	Moods  []string `json:"moods"`
+	// Overridden marks a row an operator has re-tagged by hand, which is what
+	// lets the console offer to put the enrichment's answer back.
+	Overridden bool `json:"overridden"`
+	// BPM is the measured tempo, and ZERO MEANS UNMEASURED rather than silent:
+	// the column stays NULL until the background analysis pass reaches the
+	// track. It is shown because a mood's tempo range decides whether a track
+	// is on this playlist at all, and nothing else on the row would say so.
+	BPM float64 `json:"bpm"`
 }
 
 // StationTrackPage is one page of a station's playlist, with the total so a
@@ -310,9 +324,11 @@ func (s *Store) StationTrackPage(ctx context.Context, id int64, limit, offset in
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT st.track_id, coalesce(t.artist, ''), coalesce(t.title, ''),
 		       coalesce(t.album, ''), coalesce(t.year, 0),
-		       st.pinned, st.excluded, t.missing_at IS NOT NULL
+		       st.pinned, st.excluded, t.missing_at IS NOT NULL,
+		       e.station_tags, e.mood, e.overridden, coalesce(t.bpm, 0)
 		  FROM station_tracks st
 		  JOIN tracks t ON t.id = st.track_id
+		  JOIN effective_tags e ON e.track_id = t.id
 		 WHERE st.station_id = ? ORDER BY st.track_id LIMIT ? OFFSET ?`, id, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("store: reading station %d playlist: %w", id, err)
@@ -323,9 +339,16 @@ func (s *Store) StationTrackPage(ctx context.Context, id int64, limit, offset in
 	var failures error
 	for rows.Next() {
 		var d StationTrackDetail
-		failures = errors.Join(failures,
-			rows.Scan(&d.TrackID, &d.Artist, &d.Title, &d.Album, &d.Year,
-				&d.Pinned, &d.Excluded, &d.Missing))
+		var genres, moods string
+		if err := rows.Scan(&d.TrackID, &d.Artist, &d.Title, &d.Album, &d.Year,
+			&d.Pinned, &d.Excluded, &d.Missing, &genres, &moods, &d.Overridden,
+			&d.BPM); err != nil {
+			failures = errors.Join(failures, err)
+			out = append(out, d)
+			continue
+		}
+		failures = errors.Join(failures, json.Unmarshal([]byte(genres), &d.Genres))
+		failures = errors.Join(failures, json.Unmarshal([]byte(moods), &d.Moods))
 		out = append(out, d)
 	}
 	return out, total, wrapErr(errors.Join(failures, rows.Err()), "reading a station playlist")

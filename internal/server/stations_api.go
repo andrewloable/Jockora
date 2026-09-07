@@ -43,16 +43,50 @@ func (s *Server) SetStations(st Stations, regen Regenerator, rt Runtimes) {
 	s.stations, s.regenerate, s.runtimes = st, regen, rt
 }
 
+// stationBody is what the console sends when it makes or edits a station.
+//
+// LISTS, with the single-value fields still accepted. A station is a place on a
+// dial and "rock and punk" is one place; two stations a listener flips between
+// is a different thing, and the dial is the listener's whole UI. The old fields
+// stay because they cost one line each and something else may still send them.
+type stationBody struct {
+	Name   string   `json:"name"`
+	Genre  string   `json:"genre"`
+	Mood   string   `json:"mood"`
+	Genres []string `json:"genres"`
+	Moods  []string `json:"moods"`
+}
+
+func (b stationBody) genres() []string {
+	if len(b.Genres) > 0 {
+		return b.Genres
+	}
+	return station.SplitList(b.Genre)
+}
+
+func (b stationBody) moods() []string {
+	if len(b.Moods) > 0 {
+		return b.Moods
+	}
+	return station.SplitList(b.Mood)
+}
+
 // stationView is a station as the console sees it, with the numbers that decide
 // whether it can run.
 type stationView struct {
-	ID      int64  `json:"id"`
-	Name    string `json:"name"`
-	Genre   string `json:"genre"`
-	Mood    string `json:"mood,omitempty"`
-	JockID  string `json:"jock_id,omitempty"`
-	Enabled bool   `json:"enabled"`
-	Tracks  int    `json:"tracks"`
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+	// Genre and Mood are the STORED form, comma-joined, and Genres and Moods
+	// are the same values as lists. Both are sent: the lists are what the
+	// console edits, and the strings are what every existing reader already
+	// understands.
+	Genre   string   `json:"genre"`
+	Mood    string   `json:"mood,omitempty"`
+	Genres  []string `json:"genres"`
+	Moods   []string `json:"moods"`
+	JockID  string   `json:"jock_id,omitempty"`
+	Enabled bool     `json:"enabled"`
+	Tracks  int      `json:"tracks"`
 	// Warning is set when a station is legal but thinner than most people
 	// want, so the console can say so without refusing.
 	Warning string `json:"warning,omitempty"`
@@ -149,6 +183,7 @@ func (s *Server) viewOfStation(ctx context.Context, st store.Station) (stationVi
 		return stationView{}, err
 	}
 	view := stationView{ID: st.ID, Name: st.Name, Genre: st.Genre, Mood: st.Mood,
+		Genres: station.SplitList(st.Genre), Moods: station.SplitList(st.Mood),
 		JockID: st.JockID, Enabled: st.Enabled, Tracks: len(ids)}
 	if ok, warn := station.CheckThreshold(len(ids)); !ok {
 		view.Warning = "too few tracks to run"
@@ -162,21 +197,20 @@ func (s *Server) viewOfStation(ctx context.Context, st store.Station) (stationVi
 // count rather than a promise -- and finds out at once if their genre and mood
 // together select nothing.
 func (s *Server) createStation(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Name  string `json:"name"`
-		Genre string `json:"genre"`
-		Mood  string `json:"mood"`
-	}
+	var body stationBody
 	if !s.decode(w, r, &body) {
 		return
 	}
-	if field, msg := validateStation(body.Name, body.Genre, body.Mood); field != "" {
+	if field, msg := validateStation(body.Name, body.genres(), body.moods()); field != "" {
 		s.writeFieldError(w, field, msg)
 		return
 	}
 
 	id, err := s.stations.CreateStation(r.Context(), store.Station{
-		Name: body.Name, Genre: body.Genre, Mood: body.Mood, Enabled: false})
+		Name:  body.Name,
+		Genre: station.JoinList(body.genres()),
+		Mood:  station.JoinList(body.moods()),
+	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -193,15 +227,11 @@ func (s *Server) createStation(w http.ResponseWriter, r *http.Request) {
 // genre changes what the station is: leaving the old playlist would keep airing
 // music the operator has just said they do not want.
 func (s *Server) updateStation(w http.ResponseWriter, r *http.Request, id int64) {
-	var body struct {
-		Name  string `json:"name"`
-		Genre string `json:"genre"`
-		Mood  string `json:"mood"`
-	}
+	var body stationBody
 	if !s.decode(w, r, &body) {
 		return
 	}
-	if field, msg := validateStation(body.Name, body.Genre, body.Mood); field != "" {
+	if field, msg := validateStation(body.Name, body.genres(), body.moods()); field != "" {
 		s.writeFieldError(w, field, msg)
 		return
 	}
@@ -215,7 +245,9 @@ func (s *Server) updateStation(w http.ResponseWriter, r *http.Request, id int64)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	st.Name, st.Genre, st.Mood = body.Name, body.Genre, body.Mood
+	st.Name = body.Name
+	st.Genre = station.JoinList(body.genres())
+	st.Mood = station.JoinList(body.moods())
 	if err := s.stations.UpdateStation(r.Context(), st); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -347,20 +379,50 @@ func (s *Server) assignJock(w http.ResponseWriter, r *http.Request, id int64) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.jockToAir(r.Context(), st.JockID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// jockToAir pushes a newly assigned jock to the station already airing.
+//
+// Saving the row was the whole of it before: the station kept speaking as the
+// previous jock until it next started, which on a station somebody is listening
+// to is never. PersonaChanged does the matching -- it looks for a running
+// station holding this jock, which is the one just saved.
+//
+// UNASSIGNING pushes nothing: there is no persona to swap to, and silence is
+// worse than a jock nobody chose.
+func (s *Server) jockToAir(ctx context.Context, jockID string) {
+	if jockID == "" || s.personas == nil || s.jocks == nil {
+		return
+	}
+	j, err := s.jocks.GetJock(ctx, jockID)
+	if err != nil {
+		// The foreign key already refused an id with no row behind it, so
+		// this is a database fault rather than a bad request -- and the
+		// assignment IS saved. Leaving the old jock on air until the station
+		// restarts is the honest outcome.
+		return
+	}
+	s.personas.PersonaChanged(j)
+}
+
 // validateStation refuses a station the filter could never satisfy.
-func validateStation(name, genre, mood string) (field, msg string) {
+func validateStation(name string, genres, moods []string) (field, msg string) {
 	if strings.TrimSpace(name) == "" {
 		return "name", "a name is required"
 	}
 	// Against the CLOSED vocabularies, so a station cannot be made
 	// unsatisfiable by a typo -- which produces not an empty station but one
 	// that will never fill, with nothing on screen to say why.
-	if err := (station.Filter{Genre: genre, Mood: mood}).Validate(); err != nil {
-		if genre == "" || !containsString(enrich.StationTags, genre) {
-			return "genre", err.Error()
+	if err := (station.Filter{Genres: genres, Moods: moods}).Validate(); err != nil {
+		// WHICH BOX TO HIGHLIGHT. The filter reports one error for two fields,
+		// so the offending value decides: a genre the vocabulary does not hold
+		// blames the genre picker, and anything else is the mood.
+		for _, g := range genres {
+			if !containsString(enrich.StationTags, g) {
+				return "genre", err.Error()
+			}
 		}
 		return "mood", err.Error()
 	}

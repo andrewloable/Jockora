@@ -5,9 +5,11 @@ package station
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/andrewloable/jockora/internal/enrich"
 	"github.com/andrewloable/jockora/internal/store"
@@ -23,8 +25,44 @@ var ErrBadVocabulary = errors.New("station: not in the vocabulary")
 // is exact; matching loosely here would quietly reintroduce the near-duplicate
 // buckets they were built to prevent.
 type Filter struct {
-	Genre string `json:"genre"`
-	Mood  string `json:"mood,omitempty"`
+	// Genres is what the station plays. EMPTY MEANS ANY GENRE, the same way an
+	// empty Mood has always meant any mood: an operator who wants "everything
+	// nocturnal" should not have to name every tag in the vocabulary to get it.
+	//
+	// A LIST, because a station is a place on a dial and "rock and punk" is one
+	// place. Two stations that a listener flips between is not the same thing,
+	// and the dial is the listener's whole UI.
+	Genres []string `json:"genres,omitempty"`
+
+	// Moods narrows by feeling. Empty means any.
+	Moods []string `json:"moods,omitempty"`
+}
+
+// SplitList reads the comma-joined form these are stored in.
+//
+// The columns already existed holding ONE value, and the vocabularies are
+// closed and contain no commas -- so a station written before stations could
+// hold several reads back as a one-element list, and no migration is needed.
+// Blanks and stray spaces are tolerated on the way in, because editing the
+// database by hand is a thing that happens.
+func SplitList(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if v := strings.TrimSpace(part); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// JoinList writes the comma-joined form.
+func JoinList(values []string) string { return strings.Join(values, ",") }
+
+// catchAll reports whether this filter is the catch-all, which is a different
+// question from what it plays: "other" and "unsorted" mean everything the
+// enrichment could not place, including tracks with no dossier at all.
+func (f Filter) catchAll() bool {
+	return len(f.Genres) == 1 && isCatchAll(f.Genres[0])
 }
 
 // Validate refuses a filter that could never match anything.
@@ -39,13 +77,20 @@ func (f Filter) Validate() error {
 	// on the live box POST /admin/stations/1/regenerate answered 500, and the
 	// one station that works on a fresh library was the one the operator could
 	// not rebuild.
-	if !isCatchAll(f.Genre) && !slices.Contains(enrich.StationTags, f.Genre) {
-		return fmt.Errorf("%w: genre %q", ErrBadVocabulary, f.Genre)
+	// EVERY value, not the first: a filter that silently dropped one it did not
+	// recognise would select more music than the operator asked for, which is
+	// the failure they are least likely to notice.
+	for _, g := range f.Genres {
+		if !isCatchAll(g) && !slices.Contains(enrich.StationTags, g) {
+			return fmt.Errorf("%w: genre %q", ErrBadVocabulary, g)
+		}
 	}
 	// An empty mood means ANY mood, which is what most stations want: a rock
 	// station narrowed to one feeling is a fraction of the rock in a library.
-	if f.Mood != "" && !slices.Contains(enrich.Moods, f.Mood) {
-		return fmt.Errorf("%w: mood %q", ErrBadVocabulary, f.Mood)
+	for _, m := range f.Moods {
+		if !slices.Contains(enrich.Moods, m) {
+			return fmt.Errorf("%w: mood %q", ErrBadVocabulary, m)
+		}
 	}
 	return nil
 }
@@ -65,22 +110,58 @@ func (f Filter) TrackIDs(ctx context.Context, s *store.Store) ([]int64, error) {
 	// includes tracks with no dossier at all and tracks whose dossier says it
 	// could assert nothing. On a fresh library that is most of them, and they
 	// have to be listenable.
-	if isCatchAll(f.Genre) {
+	if f.catchAll() {
 		return f.unplacedTrackIDs(ctx, s)
 	}
 
+	// NO GENRE AND NO MOOD IS THE WHOLE LIBRARY, and it must not be expressed
+	// as a join through dossiers: that would silently drop every track
+	// enrichment has not reached yet, which on a fresh library is most of them.
+	if len(f.Genres) == 0 && len(f.Moods) == 0 {
+		rows, err := s.DB().QueryContext(ctx, `
+			SELECT t.id FROM tracks t
+			 WHERE t.playable = 1 AND t.missing_at IS NULL
+			 ORDER BY t.id`)
+		if err != nil {
+			return nil, fmt.Errorf("station: selecting every track: %w", err)
+		}
+		return scanIDs(rows)
+	}
+
+	// The lists travel as JSON arrays and are matched with json_each, so one
+	// query shape serves any number of values and nothing is built by string
+	// concatenation.
+	genres, err := json.Marshal(f.Genres)
+	if err != nil {
+		return nil, fmt.Errorf("station: encoding genres: %w", err)
+	}
+	moods, err := json.Marshal(f.Moods)
+	if err != nil {
+		return nil, fmt.Errorf("station: encoding moods: %w", err)
+	}
+
+	// THROUGH effective_tags, NEVER dossiers. An operator's own tags outrank
+	// the enrichment's, and the view is the one place the two are combined --
+	// so a station selects on exactly what the playlist shows.
+	// A MOOD IMPLIES A TEMPO, for the five where tempo means anything. A NULL
+	// bpm never excludes: analysis is a slow background pass, and on a fresh
+	// library dropping the unmeasured would make every mood station empty.
+	lo, hi := tempoBounds(f.Moods)
+
 	rows, err := s.DB().QueryContext(ctx, `
 		SELECT DISTINCT t.id FROM tracks t
-		  JOIN dossiers d ON d.track_id = t.id
-		  JOIN json_each(json_extract(d.json, '$.station_tags')) tag
+		  JOIN effective_tags e ON e.track_id = t.id
 		 WHERE t.playable = 1 AND t.missing_at IS NULL
-		   AND tag.value = ?
-		   AND (? = '' OR EXISTS (
-		         SELECT 1 FROM json_each(json_extract(d.json, '$.mood')) m
-		          WHERE m.value = ?))
-		 ORDER BY t.id`, f.Genre, f.Mood, f.Mood)
+		   AND (t.bpm IS NULL OR t.bpm BETWEEN ? AND ?)
+		   AND (json_array_length(?) = 0 OR EXISTS (
+		         SELECT 1 FROM json_each(e.station_tags) tag
+		          WHERE tag.value IN (SELECT value FROM json_each(?))))
+		   AND (json_array_length(?) = 0 OR EXISTS (
+		         SELECT 1 FROM json_each(e.mood) m
+		          WHERE m.value IN (SELECT value FROM json_each(?))))
+		 ORDER BY t.id`, lo, hi, genres, genres, moods, moods)
 	if err != nil {
-		return nil, fmt.Errorf("station: selecting %s tracks: %w", f.Genre, err)
+		return nil, fmt.Errorf("station: selecting %v tracks: %w", f.Genres, err)
 	}
 	return scanIDs(rows)
 }
@@ -88,20 +169,36 @@ func (f Filter) TrackIDs(ctx context.Context, s *store.Store) ([]int64, error) {
 // unplacedTrackIDs is the catch-all: tagged "other", or never enriched, or
 // enriched into nothing.
 func (f Filter) unplacedTrackIDs(ctx context.Context, s *store.Store) ([]int64, error) {
+	moods, err := json.Marshal(f.Moods)
+	if err != nil {
+		return nil, fmt.Errorf("station: encoding moods: %w", err)
+	}
+	// "No tags at all" replaces the old "no dossier row": through the view a
+	// track nobody has enriched and a track somebody emptied by hand read the
+	// same, which is right -- neither is anything in particular.
+	//
+	// AN OVERRIDE TAKES A TRACK OUT OF HERE even when its dossier still says
+	// nothing, because confidence is about what the enrichment managed, and an
+	// operator who placed the track has already answered the question.
+	// The catch-all takes a mood like any other station, so it answers the same
+	// question about tempo.
+	lo, hi := tempoBounds(f.Moods)
+
 	rows, err := s.DB().QueryContext(ctx, `
 		SELECT t.id FROM tracks t
-		  LEFT JOIN dossiers d ON d.track_id = t.id
+		  JOIN effective_tags e ON e.track_id = t.id
 		 WHERE t.playable = 1 AND t.missing_at IS NULL
-		   AND (d.track_id IS NULL
-		        OR d.confidence = ?
+		   AND (t.bpm IS NULL OR t.bpm BETWEEN ? AND ?)
+		   AND (json_array_length(e.station_tags) = 0
+		        OR (e.overridden = 0 AND e.confidence = ?)
 		        OR EXISTS (
-		             SELECT 1 FROM json_each(json_extract(d.json, '$.station_tags')) tag
+		             SELECT 1 FROM json_each(e.station_tags) tag
 		              WHERE tag.value = ?))
-		   AND (? = '' OR EXISTS (
-		         SELECT 1 FROM json_each(json_extract(d.json, '$.mood')) m
-		          WHERE m.value = ?))
+		   AND (json_array_length(?) = 0 OR EXISTS (
+		         SELECT 1 FROM json_each(e.mood) m
+		          WHERE m.value IN (SELECT value FROM json_each(?))))
 		 ORDER BY t.id`,
-		ConfidenceNone, enrich.FallbackStationTag, f.Mood, f.Mood)
+		lo, hi, ConfidenceNone, enrich.FallbackStationTag, moods, moods)
 	if err != nil {
 		return nil, fmt.Errorf("station: selecting unplaced tracks: %w", err)
 	}

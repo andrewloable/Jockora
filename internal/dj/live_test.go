@@ -58,11 +58,17 @@ func TestLiveBreak(t *testing.T) {
 	// The window the station will actually ask for, now that a short one falls
 	// through to the gap rather than demanding an eight-word break.
 	in := PromptInput{
-		Persona:        persona,
-		CurrentArtist:  "Bayside",
-		CurrentTitle:   "Have Fun Storming the Castle",
-		NextArtist:     "Foo Fighters",
-		NextTitle:      "Everlong",
+		Persona:       persona,
+		CurrentArtist: "Bayside",
+		CurrentTitle:  "Have Fun Storming the Castle",
+		NextArtist:    "Foo Fighters",
+		NextTitle:     "Everlong",
+		// THE SLEEVE, which is all an unenriched record has. It is here so the
+		// probe exercises the branch that prints it: the failure this catches
+		// is a model told "that is the sleeve, not research" and stating the
+		// year flatly anyway, which no unit test can see.
+		CurrentAlbum:   "The Walking Wounded",
+		CurrentYear:    2007,
 		Placement:      "between",
 		WindowSeconds:  48,
 		PreviousArtist: "Nirvana",
@@ -79,9 +85,17 @@ func TestLiveBreak(t *testing.T) {
 	writer := NewWriter(client, BreakTokenBudget)
 	const trials = 3
 	for i := 0; i < trials; i++ {
-		raw, err := writer.WriteBreak(ctx, prompt, schema)
+		// THE BUDGET PRODUCTION USES. Zero here meant the probe asked for a
+		// 120-word break with a 200-token cap -- the very mismatch that was
+		// truncating one break in nine -- so the probe was measuring a
+		// configuration nothing runs.
+		raw, err := writer.WriteBreak(ctx, prompt, schema, TokensFor(WordTarget(in.WindowSeconds)))
 		if err != nil {
-			t.Fatalf("trial %d: %v", i, err)
+			// NOT Fatalf. One bad trial used to end the run, so the other two
+			// were never sampled -- and a probe of a stochastic thing that
+			// stops at the first miss reports one sample as if it were three.
+			t.Errorf("trial %d: %v", i, err)
+			continue
 		}
 
 		// THE KEYS, not merely valid JSON. An invented key parses, passes every
@@ -101,7 +115,11 @@ func TestLiveBreak(t *testing.T) {
 		if phrase, echoed := echoesInstructions(text, names); echoed {
 			t.Errorf("trial %d: recites the prompt (%q): %s", i, phrase, text)
 		}
-		if phrase, looped := repeatsItself(text, nil); looped {
+		// WITH THE NAMES, exactly as the validator does in production. Passing
+		// nil made the probe stricter than the thing it probes: a jock saying
+		// a five-word track title twice is doing its job, and the exemption
+		// for that already exists at line 289 of validate.go.
+		if phrase, looped := repeatsItself(text, names); looped {
 			t.Errorf("trial %d: repeats %q: %s", i, phrase, text)
 		}
 		if got := len(strings.Fields(text)); got > WordTarget(in.WindowSeconds)*2 {

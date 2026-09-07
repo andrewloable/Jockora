@@ -116,7 +116,9 @@ func TestPromptIncludesOnlyThreeFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if n := strings.Count(got, "  fact: "); n != MaxFactsInPrompt {
+	// Each fact now carries the id the schema will accept for it, so the
+	// model can name the label instead of declaring the sentence.
+	if n := strings.Count(got, "  fact ["); n != MaxFactsInPrompt {
 		t.Errorf("%d facts in the prompt, want exactly %d", n, MaxFactsInPrompt)
 	}
 	for i := MaxFactsInPrompt; i < 10; i++ {

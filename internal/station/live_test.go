@@ -243,7 +243,7 @@ func (w *liveWriter) Write(ctx context.Context, wordTarget int, placement mix.Pl
 	if err != nil {
 		return "", err
 	}
-	b, err := w.validator.Generate(ctx, prompt, w.prev, w.cur, w.next)
+	b, err := w.validator.Generate(ctx, prompt, 0, w.prev, w.cur, w.next)
 	if err != nil {
 		return "", err
 	}

@@ -316,6 +316,32 @@ func ResolveFacts(b *Break, prev, cur, next *enrich.Dossier) error {
 	return nil
 }
 
+// KeepResolvableFacts strips declarations that name nothing, and reports what
+// it removed.
+//
+// A COMPANION TO ResolveFacts RATHER THAN A REPLACEMENT: the strict form is
+// still what a grammar-constrained backend should satisfy, and is worth
+// asserting in tests. This is what the live path uses, because a hosted model
+// treats the schema as advice and a malformed label must not cost a break whose
+// prose is fine.
+func KeepResolvableFacts(b *Break, prev, cur, next *enrich.Dossier) []string {
+	allowed := make(map[string]bool)
+	for _, id := range ResolvableFactIDs(prev, cur, next) {
+		allowed[id] = true
+	}
+
+	kept, dropped := b.AssertedFacts[:0], []string(nil)
+	for _, id := range b.AssertedFacts {
+		if allowed[id] {
+			kept = append(kept, id)
+			continue
+		}
+		dropped = append(dropped, id)
+	}
+	b.AssertedFacts = kept
+	return dropped
+}
+
 // ResolveFactText returns the text behind a fact id, for logging and for the
 // rubric review. It is not used to validate: validation is set membership.
 func ResolveFactText(id string, prev, cur, next *enrich.Dossier) (string, bool) {

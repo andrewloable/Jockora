@@ -9,6 +9,14 @@ SPDX-License-Identifier: AGPL-3.0-only
 follow it too, but it is written to be executed rather than read: every step has
 a command, an expected result, and what to do when the result differs.
 
+**Ask before you deploy.** Steps 1–4 read the host and decide nothing the
+operator cannot undo, so run them freely. Steps 5–8 change what the box runs:
+get an explicit yes first, and again for every REDEPLOY. On a server that is
+already on air a redeploy restarts the stream and cuts off whoever is listening,
+which is the operator's call to make and not yours to infer from the fact that
+you have a fix ready. Finish the work, report it, say plainly that it is not
+deployed, and wait.
+
 Follow it in order. Steps 1–4 gather facts and make decisions; 5–8 deploy; 9
 verifies. **Do not skip step 9.** Every failure listed in step 10 was met on a
 real deployment, and most of them look like success until something else breaks

@@ -5,12 +5,14 @@ import { HttpTestingController, provideHttpClientTesting } from '@angular/common
 import { Stations } from './stations.component';
 
 const stations = [
-  { id: 1, name: 'ROCK', genre: 'rock', tracks: 412, enabled: true },
+  { id: 1, name: 'ROCK', genre: 'rock', genres: ['rock'], moods: [], tracks: 412, enabled: true },
   {
     id: 3,
     name: 'AMBIENT',
     genre: 'ambient',
     mood: 'calm',
+    genres: ['ambient'],
+    moods: ['calm'],
     tracks: 12,
     enabled: false,
     warning: 'fewer tracks than most stations',
@@ -37,6 +39,21 @@ describe('Stations', () => {
     (fixture as unknown as { detectChanges(): void }).detectChanges();
   }
 
+  // Tick exactly these boxes in a checkbox group, clicking any that need to
+  // change. Clicking rather than assigning .checked, because the component
+  // reads the event target and an assignment fires no event.
+  function choose(fixture: { detectChanges(): void; nativeElement: HTMLElement }, sel: string, values: string[]) {
+    const boxes = Array.from(
+      fixture.nativeElement.querySelectorAll(sel + ' input[type=checkbox]'),
+    ) as HTMLInputElement[];
+    for (const box of boxes) {
+      if (box.checked !== values.includes(box.value)) {
+        box.click();
+        fixture.detectChanges();
+      }
+    }
+  }
+
   function mounted(list: unknown[] = stations) {
     const fixture = TestBed.createComponent(Stations);
     ctrl.expectOne('/admin/stations').flush(list);
@@ -59,11 +76,15 @@ describe('Stations', () => {
     // A station whose genre is a typo is one that will never fill, with
     // nothing on screen to say why.
     const fixture = mounted();
-    const genres = fixture.nativeElement.querySelectorAll('[data-genre] option');
-    expect(Array.from(genres).map((o) => (o as HTMLOptionElement).value)).toEqual(vocab.genres);
-    const moods = fixture.nativeElement.querySelectorAll('[data-mood] option');
-    // Plus "any mood", which is what most stations want.
-    expect(moods.length).toBe(vocab.moods.length + 1);
+    const genres = fixture.nativeElement.querySelectorAll('[data-genre] input[type=checkbox]');
+    expect(Array.from(genres).map((o) => (o as HTMLInputElement).value)).toEqual(vocab.genres);
+    // CHECKBOXES, not a multiple select: picking two things that are not next
+    // to each other needed ctrl-click, which is a keyboard trick people do not
+    // know and cannot see.
+    const moods = fixture.nativeElement.querySelectorAll('[data-mood] input[type=checkbox]');
+    expect(moods.length).toBe(vocab.moods.length);
+    // Ticking NOTHING is how you say any, for both, and the form says so.
+    expect(fixture.nativeElement.querySelector('[data-genre]').textContent).toContain('any genre');
   });
 
   it('creates a station with the genre and mood that were chosen', () => {
@@ -71,29 +92,32 @@ describe('Stations', () => {
     const name = fixture.nativeElement.querySelector('[data-name]');
     name.value = 'CALM AMBIENT';
     name.dispatchEvent(new Event('input'));
-    const genre = fixture.nativeElement.querySelector('[data-genre]');
-    genre.value = 'ambient';
-    genre.dispatchEvent(new Event('change'));
-    const mood = fixture.nativeElement.querySelector('[data-mood]');
-    mood.value = 'calm';
-    mood.dispatchEvent(new Event('change'));
+    choose(fixture, '[data-genre]', ['ambient', 'rock']);
+    choose(fixture, '[data-mood]', ['calm']);
 
     fixture.nativeElement.querySelector('[data-add]').click();
     const req = ctrl.expectOne('/admin/stations');
-    expect(req.request.body).toEqual({ name: 'CALM AMBIENT', genre: 'ambient', mood: 'calm' });
+    // VOCABULARY ORDER, not click order: the selection is rebuilt by filtering
+    // the vocabulary, so the same station saved twice is the same string.
+    expect(req.request.body).toEqual({
+      name: 'CALM AMBIENT',
+      genres: ['rock', 'ambient'],
+      moods: ['calm'],
+    });
     req.flush({ id: 9, tracks: 96 });
     ctrl.expectOne('/admin/stations').flush(stations);
   });
 
   it('handles a server with an empty vocabulary', () => {
     // A build whose vocabulary lists came back empty must not preselect a
-    // genre that does not exist.
+    // genre that does not exist. Nothing is preselected now in any case: no
+    // genre means every genre.
     const fixture = TestBed.createComponent(Stations);
     ctrl.expectOne('/admin/stations').flush([]);
     ctrl.expectOne('/admin/vocab').flush({ genres: [], moods: [] });
     ctrl.expectOne('/admin/jocks').flush([]);
     fixture.detectChanges();
-    expect(fixture.componentInstance.genre()).toBe('');
+    expect(fixture.componentInstance.genres()).toEqual([]);
   });
 
   it('says nothing when a comfortable station is enabled', () => {
@@ -113,7 +137,8 @@ describe('Stations', () => {
     fixture.nativeElement.querySelector('[data-add]').click();
 
     const req = ctrl.expectOne('/admin/stations');
-    expect(req.request.body).toEqual({ name: 'ROCK', genre: 'rock', mood: '' });
+    // NOTHING CHOSEN IS A REAL ANSWER: every genre, every mood.
+    expect(req.request.body).toEqual({ name: 'ROCK', genres: [], moods: [] });
     req.flush({ id: 9, tracks: 412 });
     ctrl.expectOne('/admin/stations').flush(stations);
     fixture.detectChanges();
@@ -142,17 +167,26 @@ describe('Stations', () => {
   });
 
   it('assigns and unassigns a jock', () => {
+    // Through the EDIT form, which is where a station's settings now live: the
+    // jock used to be a live select that saved on change while the genre beside
+    // it did not, so half the row committed instantly and half needed a button.
     const fixture = mounted();
-    const select = fixture.nativeElement.querySelector('[data-jock]');
-    select.value = 'dutch';
-    select.dispatchEvent(new Event('change'));
+    fixture.nativeElement.querySelectorAll('[data-edit]')[0].click();
+    fixture.detectChanges();
+    type(fixture, '[data-jock]', 'dutch');
+    fixture.nativeElement.querySelector('[data-save]').click();
+    ctrl.expectOne('/admin/stations/1').flush({ added: 0, removed: 0, kept: 412 });
     const on = ctrl.expectOne('/admin/stations/1/jock');
     expect(on.request.body).toEqual({ jock_id: 'dutch' });
     on.flush(null);
-    ctrl.expectOne('/admin/stations').flush(stations);
+    ctrl.expectOne('/admin/stations').flush([{ ...stations[0], jock_id: 'dutch' }, stations[1]]);
+    fixture.detectChanges();
 
-    select.value = '';
-    select.dispatchEvent(new Event('change'));
+    fixture.nativeElement.querySelectorAll('[data-edit]')[0].click();
+    fixture.detectChanges();
+    type(fixture, '[data-jock]', '');
+    fixture.nativeElement.querySelector('[data-save]').click();
+    ctrl.expectOne('/admin/stations/1').flush({ added: 0, removed: 0, kept: 412 });
     // null UNASSIGNS: a station with no jock still plays music.
     const off = ctrl.expectOne('/admin/stations/1/jock');
     expect(off.request.body).toEqual({ jock_id: null });
@@ -177,41 +211,54 @@ describe('Stations', () => {
     ctrl.expectOne('/admin/jocks').flush(jocks);
     fixture.detectChanges();
 
+    // The row shows the jock by NAME when it is not being edited.
+    expect(fixture.nativeElement.querySelector('[data-stations]').textContent).toContain('Dutch');
+
+    fixture.nativeElement.querySelectorAll('[data-edit]')[0].click();
+    fixture.detectChanges();
     const select: HTMLSelectElement = fixture.nativeElement.querySelector('[data-jock]');
     expect(select.value).toBe('dutch');
     expect(select.selectedOptions[0].textContent?.trim()).toBe('Dutch');
   });
 
-  it('keeps the chosen genre and mood selected', () => {
-    // Same race as the jock picker: these options come from the vocabulary
-    // over HTTP. Pinned so a later edit cannot reintroduce [value] on a select
-    // whose options are async.
+  it('keeps the ticked genres and moods ticked', () => {
+    // The vocabulary arrives over HTTP, so the boxes are rendered from data
+    // that lands after the component does. What is ticked has to survive that.
     const fixture = mounted();
-    type(fixture, '[data-genre]', 'ambient');
-    type(fixture, '[data-mood]', 'raw');
+    choose(fixture, '[data-genre]', ['ambient']);
+    choose(fixture, '[data-mood]', ['raw']);
 
-    const genre: HTMLSelectElement = fixture.nativeElement.querySelector('[data-genre]');
-    const mood: HTMLSelectElement = fixture.nativeElement.querySelector('[data-mood]');
-    expect(genre.value).toBe('ambient');
-    expect(mood.value).toBe('raw');
-    expect(genre.selectedOptions[0].textContent?.trim()).toBe('ambient');
+    const ticked = (sel: string) =>
+      Array.from(fixture.nativeElement.querySelectorAll(sel + ' input[type=checkbox]'))
+        .filter((b) => (b as HTMLInputElement).checked)
+        .map((b) => (b as HTMLInputElement).value);
+    expect(ticked('[data-genre]')).toEqual(['ambient']);
+    expect(ticked('[data-mood]')).toEqual(['raw']);
   });
 
   it('shows no jock when a station has none', () => {
     const fixture = mounted([
       { id: 1, name: 'Rock', genre: 'rock', enabled: true, tracks: 90 },
     ]);
+    expect(fixture.nativeElement.querySelector('[data-stations]').textContent).toContain(
+      'no jock',
+    );
+    fixture.nativeElement.querySelectorAll('[data-edit]')[0].click();
+    fixture.detectChanges();
     const select: HTMLSelectElement = fixture.nativeElement.querySelector('[data-jock]');
     expect(select.value).toBe('');
   });
 
-  it('says so when a jock is put on air, because there is no Save button', () => {
-    // Reported as "there is no way to save a selected jockey": it saves on
-    // change, correctly, but said nothing, so it looked like nothing happened.
+  it('names the jock it put on air and says when it takes effect', () => {
+    // Reported once as "there is no way to save a selected jockey": the jock
+    // saved on change and said nothing, so it looked like nothing happened.
+    // There is a Save button now, but naming the jock still matters.
     const fixture = mounted();
-    const select = fixture.nativeElement.querySelector('[data-jock]');
-    select.value = 'dutch';
-    select.dispatchEvent(new Event('change'));
+    fixture.nativeElement.querySelectorAll('[data-edit]')[0].click();
+    fixture.detectChanges();
+    type(fixture, '[data-jock]', 'dutch');
+    fixture.nativeElement.querySelector('[data-save]').click();
+    ctrl.expectOne('/admin/stations/1').flush({ added: 0, removed: 0, kept: 412 });
     ctrl.expectOne('/admin/stations/1/jock').flush(null);
     ctrl.expectOne('/admin/stations').flush(stations);
     fixture.detectChanges();
@@ -222,10 +269,12 @@ describe('Stations', () => {
   });
 
   it('says so when a jock is taken off a station', () => {
-    const fixture = mounted();
-    const select = fixture.nativeElement.querySelector('[data-jock]');
-    select.value = '';
-    select.dispatchEvent(new Event('change'));
+    const fixture = mounted([{ ...stations[0], jock_id: 'dutch' }]);
+    fixture.nativeElement.querySelectorAll('[data-edit]')[0].click();
+    fixture.detectChanges();
+    type(fixture, '[data-jock]', '');
+    fixture.nativeElement.querySelector('[data-save]').click();
+    ctrl.expectOne('/admin/stations/1').flush({ added: 0, removed: 0, kept: 412 });
     ctrl.expectOne('/admin/stations/1/jock').flush(null);
     ctrl.expectOne('/admin/stations').flush(stations);
     fixture.detectChanges();
@@ -250,9 +299,125 @@ describe('Stations', () => {
   it('asks the console to open a playlist', () => {
     const fixture = mounted();
     let asked: unknown;
-    fixture.componentInstance.edit.subscribe((s: unknown) => (asked = s));
-    fixture.nativeElement.querySelectorAll('[data-edit]')[0].click();
+    fixture.componentInstance.playlist.subscribe((s: unknown) => (asked = s));
+    fixture.nativeElement.querySelectorAll('[data-playlist]')[0].click();
     expect(asked).toEqual(stations[0]);
+  });
+
+  describe('editing a station', () => {
+    // A station's name, genre and mood were fixed at creation: the only way to
+    // change one was to delete it and build it again, losing every pin and
+    // exclude on its playlist. The SERVER could already do it -- PUT
+    // /admin/stations/{id} validates, saves and regenerates -- and the console
+    // simply never called it.
+    function editing(fixture: ReturnType<typeof mounted>) {
+      fixture.nativeElement.querySelectorAll('[data-edit]')[0].click();
+      fixture.detectChanges();
+      return fixture;
+    }
+
+    it("opens a row for editing with the station's values in it", () => {
+      const fixture = editing(mounted());
+      expect(fixture.nativeElement.querySelector('[data-edit-name]').value).toBe('ROCK');
+      // The SELECT must have the station's genre chosen, not the first option:
+      // the vocabulary arrives over HTTP, and this is the same trap the add
+      // form documents.
+      expect(
+        Array.from(
+          fixture.nativeElement.querySelectorAll('[data-edit-genre] input[type=checkbox]'),
+        )
+          .filter((b) => (b as HTMLInputElement).checked)
+          .map((b) => (b as HTMLInputElement).value),
+      ).toEqual(['rock']);
+    });
+
+    it('saves the change and reports what regenerating did to the playlist', () => {
+      const fixture = editing(mounted());
+      type(fixture, '[data-edit-name]', 'CLASSIC ROCK');
+      choose(fixture, '[data-edit-genre]', ['ambient']);
+      choose(fixture, '[data-edit-mood]', ['calm']);
+      fixture.nativeElement.querySelector('[data-save]').click();
+
+      const req = ctrl.expectOne('/admin/stations/1');
+      expect(req.request.method).toBe('PUT');
+      expect(req.request.body).toEqual({
+        name: 'CLASSIC ROCK',
+        genres: ['ambient'],
+        moods: ['calm'],
+      });
+      // CHANGING THE GENRE RESTATES THE PLAYLIST, which is the whole reason an
+      // edit is not just a rename. The operator has to be told.
+      req.flush({ added: 40, removed: 380, kept: 32 });
+      ctrl.expectOne('/admin/stations').flush(stations);
+      fixture.detectChanges();
+
+      const said = fixture.nativeElement.querySelector('[data-said]').textContent;
+      expect(said).toContain('40');
+      expect(said).toContain('380');
+      expect(said).toContain('32');
+      // And the row is closed again.
+      expect(fixture.nativeElement.querySelector('[data-edit-name]')).toBeNull();
+    });
+
+    it('cancels without sending anything', () => {
+      const fixture = editing(mounted());
+      type(fixture, '[data-edit-name]', 'SOMETHING ELSE');
+      fixture.nativeElement.querySelector('[data-cancel]').click();
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-edit-name]')).toBeNull();
+      // The name in the table is untouched, and no request was made.
+      expect(fixture.nativeElement.querySelector('[data-stations]').textContent).toContain('ROCK');
+      ctrl.verify();
+    });
+
+    it("repeats the server's reason for refusing an edit", () => {
+      const fixture = editing(mounted());
+      fixture.nativeElement.querySelector('[data-save]').click();
+      ctrl.expectOne('/admin/stations/1').flush(
+        { error: 'name is already taken' },
+        { status: 400, statusText: 'Bad Request' },
+      );
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('already taken');
+      // STILL OPEN, so the operator can fix it rather than retype it.
+      expect(fixture.nativeElement.querySelector('[data-edit-name]')).not.toBeNull();
+
+      // And a refusal that carries no message at all still says something.
+      fixture.nativeElement.querySelector('[data-save]').click();
+      ctrl.expectOne('/admin/stations/1').flush(null, { status: 500, statusText: 'Error' });
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain(
+        'Could not save',
+      );
+    });
+
+    it('edits only the row that was opened', () => {
+      const fixture = editing(mounted());
+      expect(fixture.nativeElement.querySelectorAll('[data-edit-name]').length).toBe(1);
+    });
+
+    it('leaves the jock alone when it was not touched', () => {
+      // Saving a rename must not rewrite the jock: an unchanged value still
+      // costs a request, and a request that writes is a request that can fail.
+      const fixture = editing(mounted());
+      type(fixture, '[data-edit-name]', 'ROCK II');
+      fixture.nativeElement.querySelector('[data-save]').click();
+      ctrl.expectOne('/admin/stations/1').flush({ added: 1, removed: 2, kept: 3 });
+      ctrl.expectOne('/admin/stations').flush(stations);
+      ctrl.verify();
+    });
+
+    it('says so when the jock will not save', () => {
+      const fixture = editing(mounted());
+      type(fixture, '[data-jock]', 'dutch');
+      fixture.nativeElement.querySelector('[data-save]').click();
+      ctrl.expectOne('/admin/stations/1').flush({ added: 0, removed: 0, kept: 412 });
+      ctrl
+        .expectOne('/admin/stations/1/jock')
+        .flush(null, { status: 500, statusText: 'Error' });
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('jock');
+    });
   });
 
   it('says so when anything fails', () => {
@@ -291,12 +456,19 @@ describe('Stations', () => {
     expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('Could not');
     confirmSpy.mockRestore();
 
-    const select = fixture.nativeElement.querySelector('[data-jock]');
-    select.value = 'dutch';
-    select.dispatchEvent(new Event('change'));
-    ctrl.expectOne('/admin/stations/1/jock').flush(null, { status: 400, statusText: 'Bad' });
+    fixture.nativeElement.querySelectorAll('[data-edit]')[0].click();
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('on air');
+    type(fixture, '[data-jock]', 'dutch');
+    fixture.nativeElement.querySelector('[data-save]').click();
+    // The STATION saved and the jock did not, which has to read as a different
+    // outcome from the whole edit failing.
+    ctrl.expectOne('/admin/stations/1').flush({ added: 0, removed: 0, kept: 412 });
+    ctrl.expectOne('/admin/stations/1/jock').flush(null, { status: 400, statusText: 'Bad' });
+    ctrl.expectOne('/admin/stations').flush(stations);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain(
+      'jock could not be assigned',
+    );
   });
 
   it('blames the mood when a genre+mood station comes back empty', () => {
@@ -306,7 +478,7 @@ describe('Stations', () => {
     // genre, which was never the problem.
     const fixture = mounted();
     type(fixture, '[data-name]', 'Night Rock');
-    type(fixture, '[data-mood]', 'calm');
+    choose(fixture, '[data-mood]', ['calm']);
     fixture.nativeElement.querySelector('[data-add]').click();
     ctrl.expectOne('/admin/stations').flush({ id: 9, tracks: 0 });
     ctrl.expectOne('/admin/stations').flush([]);
@@ -369,5 +541,26 @@ describe('Stations', () => {
     expect(head).toContain('Tracks');
     expect(head).toContain('Jock');
     expect(head).toContain('Actions');
+  });
+
+  // THE PICKER RENDERS THE WHOLE VOCABULARY. It always did; what it did not do
+  // was let the reader SEE it -- a rule meant for text fields sized every
+  // checkbox like an entry box, and the grid was capped at three visible rows
+  // of 42 options with no sign there was more. The markup contract is what the
+  // stylesheet keys off, so it is pinned here and the rules themselves are
+  // pinned by test/console_css_test.go.
+  it('tag picker offers every option in the vocabulary, not a scrolled few', () => {
+    const fixture = mounted();
+    const genres = fixture.nativeElement.querySelectorAll('[data-genre] label');
+    const moods = fixture.nativeElement.querySelectorAll('[data-mood] label');
+    expect(genres.length).toBe(vocab.genres.length);
+    expect(moods.length).toBe(vocab.moods.length);
+  });
+
+  it('tag picker uses checkboxes, which is what keeps them out of the field sizing', () => {
+    const fixture = mounted();
+    const inputs = [...fixture.nativeElement.querySelectorAll('[data-genre] input')];
+    expect(inputs.length).toBeGreaterThan(0);
+    expect(inputs.every((i: HTMLInputElement) => i.type === 'checkbox')).toBe(true);
   });
 });

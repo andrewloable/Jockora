@@ -50,6 +50,8 @@ func (s *Server) serveUsers(w http.ResponseWriter, r *http.Request, path string)
 	}
 
 	switch {
+	case r.Method == http.MethodPut && action == "":
+		s.updateUser(w, r, id)
 	case r.Method == http.MethodDelete && action == "":
 		s.deleteUser(w, r, id)
 	case r.Method == http.MethodPost && action == "disable":
@@ -138,6 +140,41 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusCreated, map[string]any{"id": id})
 }
 
+// updateUser changes an account's name and role.
+//
+// The password is NOT here: it has its own route, it is the one field that
+// cannot be read back to prefill a form, and folding it in would mean an
+// operator fixing a typo in a name either retypes a password or blanks one.
+func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id int64) {
+	var body struct {
+		Name string `json:"name"`
+		Role string `json:"role"`
+	}
+	if !s.decode(w, r, &body) {
+		return
+	}
+	// The account rules, minus the password one -- validateAccount checks a
+	// minimum length, and there is no password in this request to check.
+	if field, msg := validateAccount(body.Name, strings.Repeat("x", MinUserPasswordLength), body.Role); field != "" {
+		s.writeFieldError(w, field, msg)
+		return
+	}
+
+	// SELF-DEMOTION IS REFUSED, exactly as self-disable is and for the same
+	// reason: an operator who makes themselves a listener is locked out of the
+	// only place that could put them back, and the store's last-admin rule
+	// does not catch it while another admin exists -- which is precisely when
+	// somebody would try it.
+	if body.Role != auth.RoleAdmin {
+		if sess, _, err := s.session(r); err == nil && sess.UserID == id {
+			http.Error(w, "you cannot take admin off your own account", http.StatusConflict)
+			return
+		}
+	}
+
+	s.writeUserResult(w, s.users.UpdateUser(r.Context(), id, body.Name, body.Role))
+}
+
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id int64) {
 	err := s.users.DeleteUser(r.Context(), id)
 	s.writeUserResult(w, err)
@@ -192,6 +229,11 @@ func (s *Server) writeUserResult(w http.ResponseWriter, err error) {
 		// 409, not 403: the request was allowed, the STATE refuses it. A
 		// console can say "promote someone first" to one and not the other.
 		http.Error(w, "that is the last enabled operator account", http.StatusConflict)
+	case errors.Is(err, store.ErrUserExists):
+		// Same 409 as createUser gives, and the same words: a rename collides
+		// with an existing name exactly the way a new account does, and an
+		// operator should not have to learn two vocabularies for one rule.
+		http.Error(w, "that name is taken", http.StatusConflict)
 	case errors.Is(err, store.ErrNotFound):
 		http.Error(w, "no such account", http.StatusNotFound)
 	default:

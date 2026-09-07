@@ -10,30 +10,34 @@ import (
 
 // All named TestLookahead*, matching the task's own `-run TestLookahead`.
 
-func TestLookaheadTriggersAtTSecondsBefore(t *testing.T) {
+// TestLookaheadTriggersAsSoonAsTheSlotExists. It used to wait until
+// insertionAt - now fell below T. That is a head start rather than a wait, but
+// it is the SMALLEST head start that usually works, and against a hosted model
+// whose latency is somebody else's queue it produced breaks that finished after
+// their boundary and were deleted unheard.
+func TestLookaheadTriggersAsSoonAsTheSlotExists(t *testing.T) {
 	l := NewLookahead(150 * time.Second)
 
-	if l.ShouldTrigger(149.9, 300) {
-		t.Error("triggered at t=149.9s for an insertion at 300s; T is 150s")
+	if !l.ShouldTrigger(0, 300) {
+		t.Error("did not trigger at t=0 for an insertion at 300s")
 	}
-	if !l.ShouldTrigger(150, 300) {
-		t.Error("did not trigger at t=150s for an insertion at 300s")
+	if !l.ShouldTrigger(149.9, 300) {
+		t.Error("did not trigger inside T either")
 	}
 	if !l.ShouldTrigger(299, 300) {
 		t.Error("did not trigger at t=299s; late is still worth attempting")
 	}
+	// Past is past.
+	if l.ShouldTrigger(300, 300) {
+		t.Error("triggered on a boundary the mixer has reached")
+	}
 }
 
-// TestLookaheadSpansMultipleShortTracks is the reason the trigger is a TIME
-// threshold and not "one track ahead". Five 60-second tracks put the insertion
-// point 300 seconds out, so a 150-second lookahead fires in the MIDDLE of the
-// run. That is correct behaviour on short material, not depth creep to cap.
-//
-// The task said this fires during track 2. It does not, and the task's own
-// numbers say so: with T=150 the trigger is at t=150s, which is inside track 3
-// (120-180s). Track 2 would need T between 180 and 240. The number is wrong;
-// the point it was making -- that the trigger reaches past one track and this
-// is not an error -- is right and is what is asserted here.
+// TestLookaheadSpansMultipleShortTracks kept its point and lost its threshold.
+// The trigger reaching several tracks back is correct behaviour on short
+// material rather than depth creep to cap -- and now it always does, because it
+// fires the moment the slot exists. Depth still reports how far that is, which
+// is the observability the number was for.
 func TestLookaheadSpansMultipleShortTracks(t *testing.T) {
 	l := NewLookahead(150 * time.Second)
 
@@ -49,11 +53,8 @@ func TestLookaheadSpansMultipleShortTracks(t *testing.T) {
 			break
 		}
 	}
-	if firedDuringTrack != 3 {
-		t.Errorf("trigger fired during track %d, want track 3 (t=150s falls in 120-180s)", firedDuringTrack)
-	}
-	if firedDuringTrack <= 1 {
-		t.Error("trigger did not reach past the current track; a time threshold must")
+	if firedDuringTrack != 1 {
+		t.Errorf("trigger fired during track %d, want track 1: as soon as the slot exists", firedDuringTrack)
 	}
 	if d := l.Depth(0, insertion, trackLen); d != 3 {
 		t.Errorf("Depth = %d tracks, want 3: a run of short tracks legitimately reaches past one", d)

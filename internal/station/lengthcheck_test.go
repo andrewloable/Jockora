@@ -74,40 +74,28 @@ func TestLengthFitsIsAired(t *testing.T) {
 	}
 }
 
-func TestLengthOverrunRegeneratesShorter(t *testing.T) {
+// TestLengthOverrunMovesRatherThanRewrites. It used to rewrite at three
+// quarters of the word target and render again -- a second LLM call and a
+// second TTS render inside a lookahead window sized for one. ONE GENERATION per
+// break now: a break that overran its intro airs in the gap instead, because
+// moving audio that already exists costs nothing.
+func TestLengthOverrunMovesRatherThanRewrites(t *testing.T) {
 	lc, s := newCheck(t, 12.0, 8.0)
 	got, err := lc.Enforce(context.Background(), mix.PlacementRamp, 9.0)
 	if err != nil {
 		t.Fatalf("Enforce: %v", err)
 	}
 	if got.Dropped {
-		t.Fatal("dropped a break that fits on the second attempt")
+		t.Fatal("dropped a 12s break that fits the between gap")
 	}
-	if got.Placement != mix.PlacementRamp {
-		t.Errorf("placement = %v, want ramp", got.Placement)
+	if got.Placement != mix.PlacementBetween {
+		t.Errorf("placement = %v, want between", got.Placement)
 	}
-	if got.Seconds != 8.0 {
-		t.Errorf("Seconds = %v, want the 8.0 second re-render", got.Seconds)
+	if got.Seconds != 12.0 {
+		t.Errorf("Seconds = %v, want the first render reused", got.Seconds)
 	}
-	if len(s.targets) != 2 {
-		t.Fatalf("wrote %d times, want exactly 2: two LLM calls plus two renders is the ceiling inside the lookahead", len(s.targets))
-	}
-}
-
-func TestLengthRegenerationUsesReducedTarget(t *testing.T) {
-	lc, s := newCheck(t, 12.0, 8.0)
-	if _, err := lc.Enforce(context.Background(), mix.PlacementRamp, 9.0); err != nil {
-		t.Fatalf("Enforce: %v", err)
-	}
-	if len(s.targets) != 2 {
-		t.Fatalf("targets = %v, want two attempts", s.targets)
-	}
-	want := int(float64(s.targets[0])*ShorterRetryFactor + 0.5)
-	if s.targets[1] != want {
-		t.Errorf("second word target = %d, want %d (%.2fx of %d)", s.targets[1], want, ShorterRetryFactor, s.targets[0])
-	}
-	if s.targets[1] >= s.targets[0] {
-		t.Errorf("second target %d is not shorter than the first %d", s.targets[1], s.targets[0])
+	if len(s.targets) != 1 {
+		t.Fatalf("wrote %d times, want exactly 1", len(s.targets))
 	}
 }
 
@@ -115,7 +103,7 @@ func TestLengthRegenerationUsesReducedTarget(t *testing.T) {
 // a vocal, so it holds a longer break than any ramp. Re-placing costs nothing;
 // a third render would blow the lookahead budget.
 func TestLengthSecondOverrunFallsBackToBetween(t *testing.T) {
-	lc, s := newCheck(t, 30.0, 20.0)
+	lc, s := newCheck(t, 20.0, 20.0)
 	got, err := lc.Enforce(context.Background(), mix.PlacementRamp, 9.0)
 	if err != nil {
 		t.Fatalf("Enforce: %v", err)
@@ -127,10 +115,10 @@ func TestLengthSecondOverrunFallsBackToBetween(t *testing.T) {
 		t.Errorf("placement = %v, want between", got.Placement)
 	}
 	if got.Seconds != 20.0 {
-		t.Errorf("Seconds = %v, want the second render at 20.0 reused, not a third render", got.Seconds)
+		t.Errorf("Seconds = %v, want the one render reused rather than a second", got.Seconds)
 	}
-	if len(s.targets) != 2 {
-		t.Errorf("wrote %d times, want 2: falling back re-places the audio, it does not rewrite it", len(s.targets))
+	if len(s.targets) != 1 {
+		t.Errorf("wrote %d times, want 1: falling back re-places the audio, it does not rewrite it", len(s.targets))
 	}
 }
 
@@ -148,8 +136,8 @@ func TestLengthBetweenOverrunDropsBreak(t *testing.T) {
 			t.Error("dropped break left its WAV on disk; the scheduler would find it")
 		}
 	}
-	if len(s.targets) != 2 {
-		t.Errorf("wrote %d times, want 2", len(s.targets))
+	if len(s.targets) != 1 {
+		t.Errorf("wrote %d times, want 1: a break too long for any window costs one call, not two", len(s.targets))
 	}
 }
 

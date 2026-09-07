@@ -74,21 +74,24 @@ func TestPipelineEndToEnd(t *testing.T) {
 		t.Fatalf("Pending = %d, want 1", p.Pending())
 	}
 
-	// Too early: the insertion is at 240s and T is 150s.
-	if n, err := p.Tick(context.Background(), 60); err != nil || n != 0 {
-		t.Fatalf("Tick at t=60 enqueued %d (err %v), want 0", n, err)
+	// NOT too early any more. The insertion is at 240s and generation starts
+	// the moment the slot exists, so the first tick writes it -- which is the
+	// whole point: every second between here and the boundary is slack against
+	// a slow model.
+	if n, err := p.Tick(context.Background(), 60); err != nil || n != 1 {
+		t.Fatalf("Tick at t=60 enqueued %d (err %v), want 1", n, err)
 	}
-	if len(s.targets) != 0 {
-		t.Errorf("wrote a break %d seconds before the lookahead fired", 240-60)
+	if len(s.targets) != 1 {
+		t.Errorf("wrote %d breaks at the first opportunity, want 1", len(s.targets))
 	}
 
-	// Inside the window.
+	// Nothing pending left to do: it was written at the first opportunity.
 	n, err := p.Tick(context.Background(), 100)
 	if err != nil {
 		t.Fatalf("Tick: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("enqueued %d breaks, want 1", n)
+	if n != 0 {
+		t.Fatalf("enqueued %d breaks on a second tick, want 0", n)
 	}
 	if q.Pending() != 1 {
 		t.Fatalf("scheduler holds %d entries, want 1", q.Pending())
@@ -109,10 +112,18 @@ func TestPipelineEndToEnd(t *testing.T) {
 	}
 }
 
-// TestPipelineTimingIsRetryInclusive is the measurement the whole task turns on.
-func TestPipelineTimingIsRetryInclusive(t *testing.T) {
+// TestPipelineTimingCoversTheWholeLadder is the measurement the lookahead turns
+// on: the sample is taken around everything Enforce does, not around a clean
+// first pass.
+//
+// There is no longer a second pass to include. The writer gets ONE generation
+// and a break that does not fit is re-placed into the wider gap rather than
+// rewritten, so a retried render is now structurally impossible -- which is
+// what the RetriedCount assertion here guards.
+func TestPipelineTimingCoversTheWholeLadder(t *testing.T) {
 	clk := clock.NewFake(time.Unix(1_700_000_000, 0))
-	// First render overruns the 12s ramp, second fits. 20s of wall clock each.
+	// The render overruns the 12s ramp and is moved to the between gap. 20s of
+	// wall clock, once.
 	p, _, _ := newPipeline(t, clk, 20*time.Second, 30.0, 6.0)
 
 	for i := 1; i <= 4; i++ {
@@ -126,11 +137,11 @@ func TestPipelineTimingIsRetryInclusive(t *testing.T) {
 	if n := p.Lookahead.Count(); n != 1 {
 		t.Fatalf("recorded %d timings, want 1", n)
 	}
-	if n := p.Lookahead.RetriedCount(); n != 1 {
-		t.Errorf("RetriedCount = %d, want 1: the retry must be visible in the sample", n)
+	if n := p.Lookahead.RetriedCount(); n != 0 {
+		t.Errorf("RetriedCount = %d, want 0: a second generation is no longer possible", n)
 	}
-	if got := p.Lookahead.P50(); got != 40*time.Second {
-		t.Errorf("recorded %s, want 40s -- BOTH renders, not just the one that aired", got)
+	if got := p.Lookahead.P50(); got != 20*time.Second {
+		t.Errorf("recorded %s, want the 20s the one render took", got)
 	}
 }
 
@@ -285,12 +296,15 @@ func TestPipelineQueueSurvivesANilCallback(t *testing.T) {
 
 func TestPipelineWritesAboutItsOwnBoundary(t *testing.T) {
 	w := &BreakWriter{}
-	// A writer that refuses. Generation therefore drops the break, which is a
-	// normal outcome -- and the context must already be correct by the time it
-	// is asked, which is what this test is about.
+	// OBSERVED AT WRITE TIME, not afterwards. Generation now starts the moment
+	// a slot exists, so several boundaries generate in one tick and the
+	// writer's final state is only ever the last one's -- which would say
+	// nothing about whether each break was written about its own. This records
+	// the context as each write is attempted.
+	seen := &contextRecorder{w: w}
 	p := &Pipeline{
 		Cadence: NewCadence(1), Lookahead: NewLookahead(0), Writer: w,
-		Length: LengthCheck{Writer: refusingWriter{}},
+		Length: LengthCheck{Writer: seen},
 	}
 
 	first := Boundary{
@@ -312,21 +326,33 @@ func TestPipelineWritesAboutItsOwnBoundary(t *testing.T) {
 	p.Announce(first)
 	p.Announce(later)
 
-	// The FIRST one generates -- through Tick, so this exercises the real path.
-	// Generation itself fails (there is no model here) and that is fine: the
-	// context must already be right by the time writing is attempted.
+	// Both generate in this one tick. Generation itself fails (there is no
+	// model here) and that is fine: the context must already be right by the
+	// time writing is attempted, which is what this test is about.
 	_, _ = p.Tick(context.Background(), first.InsertionAt-1)
-	if w.curID != 1 || w.nextID != 2 {
-		t.Errorf("boundary 1 wrote about cur=%d next=%d, want 1 and 2: a later "+
-			"boundary overwrote the context and the DJ announced the wrong record",
-			w.curID, w.nextID)
-	}
 
-	// Then the second, which must move the context on.
-	_, _ = p.Tick(context.Background(), later.InsertionAt-1)
-	if w.curID != 3 || w.nextID != 4 {
-		t.Errorf("boundary 2 wrote about cur=%d next=%d, want 3 and 4", w.curID, w.nextID)
+	want := [][2]int64{{1, 2}, {3, 4}}
+	if len(seen.pairs) != len(want) {
+		t.Fatalf("wrote %d breaks, want %d: %v", len(seen.pairs), len(want), seen.pairs)
 	}
+	for i, w := range want {
+		if seen.pairs[i] != w {
+			t.Errorf("break %d wrote about cur=%d next=%d, want %d and %d: a later "+
+				"boundary overwrote the context and the DJ announced the wrong record",
+				i+1, seen.pairs[i][0], seen.pairs[i][1], w[0], w[1])
+		}
+	}
+}
+
+// contextRecorder refuses to write, and notes which records it was asked about.
+type contextRecorder struct {
+	w     *BreakWriter
+	pairs [][2]int64
+}
+
+func (c *contextRecorder) Write(context.Context, int, mix.Placement) (string, error) {
+	c.pairs = append(c.pairs, [2]int64{c.w.curID, c.w.nextID})
+	return "", errors.New("no model in this test")
 }
 
 func TestPipelineContextWithoutAWriterIsHarmless(t *testing.T) {

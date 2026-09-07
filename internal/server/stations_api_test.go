@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/andrewloable/jockora/internal/enrich"
@@ -109,7 +110,10 @@ func TestStationsAPIGenreMustBeInVocabulary(t *testing.T) {
 	s, _, _ := stationsServer(t, 12, 0)
 	admin := adminCookie(t, s)
 
-	for _, genre := range []string{"vaporwave", "Rock", "", "rock and roll"} {
+	// EMPTY IS NO LONGER HERE: no genre means any genre now, the same way no
+	// mood has always meant any mood. Everything else is still refused, because
+	// a genre that is a typo makes a station that will never fill.
+	for _, genre := range []string{"vaporwave", "Rock", "rock and roll"} {
 		rec := as(t, s, http.MethodPost, "/admin/stations",
 			`{"name":"S","genre":"`+genre+`"}`, admin)
 		if rec.Code != http.StatusBadRequest {
@@ -130,6 +134,56 @@ func TestStationsAPIGenreMustBeInVocabulary(t *testing.T) {
 	}
 	if rec := as(t, s, http.MethodPost, "/admin/stations", "not json", admin); rec.Code != http.StatusBadRequest {
 		t.Errorf("a body that is not JSON = %d, want 400", rec.Code)
+	}
+}
+
+// TestStationsAPIAnyGenreIsAllowed. A station with no genre selects the whole
+// library, which is a thing an operator asks for -- "everything, nocturnal" --
+// and used to require naming every tag in the vocabulary.
+func TestStationsAPIAnyGenreIsAllowed(t *testing.T) {
+	s, _, _ := stationsServer(t, 12, 0)
+	admin := adminCookie(t, s)
+
+	rec := as(t, s, http.MethodPost, "/admin/stations", `{"name":"Everything"}`, admin)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("= %d, want 201: %s", rec.Code, rec.Body)
+	}
+	var made struct{ Tracks int }
+	if err := json.Unmarshal(rec.Body.Bytes(), &made); err != nil {
+		t.Fatal(err)
+	}
+	if made.Tracks == 0 {
+		t.Error("a station with no genre selected nothing")
+	}
+}
+
+// TestStationsAPITakesSeveralGenres. A station is a place on a dial, and "rock
+// and punk" is one place.
+func TestStationsAPITakesSeveralGenres(t *testing.T) {
+	s, _, _ := stationsServer(t, 12, 0)
+	admin := adminCookie(t, s)
+
+	rec := as(t, s, http.MethodPost, "/admin/stations",
+		`{"name":"Loud","genres":["rock","punk"],"moods":["raw","aggressive"]}`, admin)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("= %d, want 201: %s", rec.Code, rec.Body)
+	}
+
+	// And it reads back as lists, which is what the console edits.
+	list := as(t, s, http.MethodGet, "/admin/stations", "", admin)
+	if !strings.Contains(list.Body.String(), `"genres":["rock","punk"]`) {
+		t.Errorf("stations read back as %s", list.Body)
+	}
+}
+
+// TestStationsAPIRefusesOneBadGenreAmongGood. Dropping it silently would select
+// more music than the operator asked for.
+func TestStationsAPIRefusesOneBadGenreAmongGood(t *testing.T) {
+	s, _, _ := stationsServer(t, 12, 0)
+	rec := as(t, s, http.MethodPost, "/admin/stations",
+		`{"name":"S","genres":["rock","wizard"]}`, adminCookie(t, s))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("= %d, want 400", rec.Code)
 	}
 }
 
@@ -639,4 +693,79 @@ func TestStationsAPISurfacesFailures(t *testing.T) {
 		s.listStations(&failingWriter{}, httptest.NewRequest(http.MethodGet, "/admin/stations", nil))
 		s.serveVocab(&failingWriter{}, httptest.NewRequest(http.MethodGet, "/admin/vocab", nil))
 	})
+}
+
+// TestStationsAPIAssignJockReachesTheAir: assigning a jock changed a row and
+// nothing else. The station kept speaking in the old jock's voice until every
+// listener left and it restarted, which on a station somebody is listening to
+// is never.
+func TestStationsAPIAssignJockReachesTheAir(t *testing.T) {
+	s, st, _ := stationsServer(t, 12, 0)
+	admin := adminCookie(t, s)
+	ctx := context.Background()
+	want := store.Jock{ID: "sunny_marchetti", Name: "Sunny Marchetti",
+		VoiceID: "kokoro:af_nicole", SpeechStyle: "slow", Personality: "serene"}
+	if err := st.UpsertJock(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.CreateStation(ctx, store.Station{Name: "ROCK", Genre: "rock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := &personaLog{}
+	s.SetJocks(st, nil, seen)
+	path := "/admin/stations/" + strconv.FormatInt(id, 10) + "/jock"
+
+	if rec := as(t, s, http.MethodPut, path, `{"jock_id":"sunny_marchetti"}`, admin); rec.Code != http.StatusNoContent {
+		t.Fatalf("assign = %d: %s", rec.Code, rec.Body)
+	}
+	if len(seen.seen) != 1 || seen.seen[0].ID != "sunny_marchetti" {
+		t.Fatalf("stations on air were told %+v, want the newly assigned jock", seen.seen)
+	}
+	// The whole CARD travels, not the id: the voice and the personality are
+	// what the listener actually hears change.
+	if seen.seen[0].VoiceID != want.VoiceID {
+		t.Errorf("voice = %q, want %q", seen.seen[0].VoiceID, want.VoiceID)
+	}
+
+	// UNASSIGNING pushes nothing. There is no persona to swap to, and the
+	// station keeps whoever is speaking until it next starts.
+	if rec := as(t, s, http.MethodPut, path, `{"jock_id":null}`, admin); rec.Code != http.StatusNoContent {
+		t.Fatalf("unassign = %d: %s", rec.Code, rec.Body)
+	}
+	if len(seen.seen) != 1 {
+		t.Errorf("unassigning pushed %+v, want nothing", seen.seen[1:])
+	}
+}
+
+// TestStationsAPIAssignJockSurvivesAnUnreadableRoster: the assignment is SAVED
+// whatever happens next. A failed push leaves the previous jock on air until
+// the station restarts, which is worse than a jock nobody chose but better
+// than refusing an edit that already landed.
+func TestStationsAPIAssignJockSurvivesAnUnreadableRoster(t *testing.T) {
+	s, st, _ := stationsServer(t, 12, 0)
+	admin := adminCookie(t, s)
+	ctx := context.Background()
+	if err := st.UpsertJock(ctx, store.Jock{ID: "sunny_marchetti", Name: "Sunny",
+		VoiceID: "kokoro:af_nicole", SpeechStyle: "slow", Personality: "serene"}); err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.CreateStation(ctx, store.Station{Name: "ROCK", Genre: "rock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := &personaLog{}
+	s.SetJocks(brokenJocks{err: errors.New("the database went away")}, nil, seen)
+
+	rec := as(t, s, http.MethodPut, "/admin/stations/"+strconv.FormatInt(id, 10)+"/jock",
+		`{"jock_id":"sunny_marchetti"}`, admin)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("assign = %d: %s", rec.Code, rec.Body)
+	}
+	if row, _ := st.GetStation(ctx, id); row.JockID != "sunny_marchetti" {
+		t.Errorf("jock = %q, want the assignment saved anyway", row.JockID)
+	}
+	if len(seen.seen) != 0 {
+		t.Errorf("pushed %+v with no roster to read", seen.seen)
+	}
 }

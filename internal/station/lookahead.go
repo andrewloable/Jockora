@@ -80,7 +80,20 @@ func (l *Lookahead) SetT(t time.Duration) {
 // caller that polls every few seconds must not be able to step over the moment
 // and never generate at all.
 func (l *Lookahead) ShouldTrigger(now, insertionAt float64) bool {
-	return insertionAt-now <= l.T().Seconds() && now < insertionAt
+	// AS SOON AS THE SLOT EXISTS. This used to wait until insertionAt - now
+	// fell below T, which is a head start rather than a wait -- but it is the
+	// SMALLEST head start that usually works, and against a hosted model whose
+	// latency is somebody else's queue, "usually" is what produced breaks that
+	// finished after the boundary they were written for and were deleted
+	// unheard.
+	//
+	// Starting immediately costs nothing extra: the work is identical and the
+	// result is a file on disk either way. The only thing that changes is how
+	// much slack remains when the model is slow.
+	//
+	// T is NOT dead. It moved to where it was always doing the load-bearing
+	// work: InTime, which decides whether what came back is still worth airing.
+	return now < insertionAt
 }
 
 // Depth is how many track boundaries the trigger reaches across, given an

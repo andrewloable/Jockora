@@ -64,10 +64,10 @@
      humanist sans for prose, and a typewriter face for anything that behaves
      like station metadata, which is most of the numbers here. */
   --font-ui:
-    "Avenir Next", "Segoe UI", Inter, ui-sans-serif, system-ui, -apple-system, "Helvetica Neue",
+    'Avenir Next', 'Segoe UI', Inter, ui-sans-serif, system-ui, -apple-system, 'Helvetica Neue',
     sans-serif;
   --font-mono:
-    ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", "Roboto Mono", Menlo, Consolas,
+    ui-monospace, 'SF Mono', 'Cascadia Mono', 'JetBrains Mono', 'Roboto Mono', Menlo, Consolas,
     monospace;
 
   /* ---- light: the studio with the blinds open ---- */
@@ -91,7 +91,7 @@
 /* Dark is not an inversion: the surfaces get warmer as they rise, the way a lit
    room does, and the text is off-white rather than white so it does not buzz. */
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
+  :root:not([data-theme='light']) {
     --bg: #14100d;
     --surface: #1c1714;
     --raised: #241e19;
@@ -112,7 +112,7 @@
 
 /* The explicit choice wins in both directions, so the toggle works on a machine
    whose system preference disagrees with it. */
-:root[data-theme="dark"] {
+:root[data-theme='dark'] {
   --bg: #14100d;
   --surface: #1c1714;
   --raised: #241e19;
@@ -131,7 +131,7 @@
   color-scheme: dark;
 }
 
-:root[data-theme="light"] {
+:root[data-theme='light'] {
   color-scheme: light;
 }
 
@@ -218,7 +218,7 @@ small {
 /* Numbers line up. A column of counts that jitters is unreadable at a glance,
    and almost every number in this app sits in a column. */
 td,
-input[type="number"],
+input[type='number'],
 [data-overview],
 [data-playlist],
 [data-station],
@@ -268,7 +268,7 @@ button:disabled {
 }
 
 /* The primary action of a form. There is only ever one per view. */
-button[type="submit"] {
+button[type='submit'] {
   background: var(--ember);
   border-color: var(--ember);
   color: var(--on-ember);
@@ -276,7 +276,7 @@ button[type="submit"] {
   box-shadow: var(--glow);
 }
 
-button[type="submit"]:hover:not(:disabled) {
+button[type='submit']:hover:not(:disabled) {
   background: color-mix(in oklab, var(--ember) 88%, var(--ink));
   border-color: color-mix(in oklab, var(--ember) 88%, var(--ink));
 }
@@ -355,7 +355,11 @@ legend {
   text-transform: uppercase;
 }
 
-fieldset input,
+/* Text fields stretch. A CHECKBOX IS NOT A TEXT FIELD: this rule used to match
+ * every input in a fieldset, which sized the vocabulary's checkboxes like entry
+ * boxes -- 44px tall and up to 111px wide each -- and turned a 42-option picker
+ * into three visible rows. */
+fieldset input:not([type='checkbox']):not([type='radio']),
 fieldset select {
   flex: 1 1 12rem;
   min-width: 0;
@@ -382,6 +386,53 @@ table {
   }
 }
 
+/* BELOW 48rem A PLAYLIST ROW IS A CARD, not a row in a sideways scroller.
+ *
+ * Seven columns on a 390px phone put Pin and Exclude 654px in, off the right
+ * edge of a table that does scroll -- with nothing on screen to say so, which
+ * is the same as not being there. Stacked, every field of a track is in one
+ * block and both actions are always visible.
+ *
+ * The label comes from the cell's own data-label, so the card names its fields
+ * without the heading row that has just been hidden. */
+@media (max-width: 47.99rem) {
+  [data-playlist] thead {
+    display: none;
+  }
+
+  [data-playlist],
+  [data-playlist] tbody,
+  [data-playlist] tr,
+  [data-playlist] td {
+    display: block;
+    width: auto;
+  }
+
+  [data-playlist] tr {
+    margin-bottom: var(--s3);
+    padding: var(--s2) var(--s3);
+    border: var(--line-w) solid var(--line);
+    border-radius: var(--r-panel);
+  }
+
+  [data-playlist] td {
+    padding: 0.15rem 0;
+    border-bottom: 0;
+  }
+
+  [data-playlist] td[data-label]::before {
+    content: attr(data-label) ': ';
+    color: var(--ink-faint);
+    font-size: var(--t-sm);
+  }
+
+  /* A card of blank labels reads as missing data. An empty cell is simply not
+   * a fact about the track. */
+  [data-playlist] td:empty {
+    display: none;
+  }
+}
+
 td {
   padding: var(--s3) var(--s3);
   border-bottom: var(--line-w) solid var(--line);
@@ -404,7 +455,7 @@ thead th {
 
 /* The overview's key column is a row header, not a column heading. */
 tbody th,
-tr > th[scope="row"] {
+tr > th[scope='row'] {
   padding: var(--s3);
   border-bottom: var(--line-w) solid var(--line);
   text-align: right;
@@ -479,7 +530,7 @@ td button {
 
 /* The ember before the name: the station is on. */
 [data-masthead] h1::before {
-  content: "";
+  content: '';
   display: inline-block;
   width: 0.5em;
   height: 0.5em;
@@ -519,7 +570,7 @@ app-login h1 {
   margin-bottom: var(--s5);
 }
 
-app-login button[type="submit"] {
+app-login button[type='submit'] {
   width: 100%;
   margin-top: var(--s2);
 }
@@ -535,9 +586,43 @@ app-player {
   box-shadow: var(--shadow);
 }
 
+/* The audio element itself has no controls attribute any more and nothing to
+ * show, so it takes no room. */
 [data-player] {
-  width: 100%;
-  display: block;
+  display: none;
+}
+
+/* THE WHOLE TRANSPORT: on or off, how loud, and the fact that it is live.
+ * There is no scrub bar and no clock, because a live stream has no position
+ * and the browser's own widget insisted on inventing one. */
+[data-transport] {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin: 0;
+}
+
+[data-volume-label] {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--t-sm);
+  color: var(--ink-dim);
+}
+
+[data-volume] {
+  width: 8rem;
+  accent-color: var(--ember);
+}
+
+/* Pushed to the far end, where a running time used to be. */
+[data-live] {
+  margin-left: auto;
+  font-size: var(--t-sm);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ember);
 }
 
 [data-status] {
@@ -605,16 +690,20 @@ app-player {
   font-size: var(--t-xs);
   font-weight: 400;
   letter-spacing: -0.01em;
+  /* The mood line now has spaces to break at, but a jock name or a station
+   * name need not: anywhere is the backstop that keeps ANY long token inside
+   * the card rather than dragging the page sideways behind it. */
+  overflow-wrap: anywhere;
 }
 
 /* The tuned station. Not a border swap: it lights up. */
-[data-station][aria-pressed="true"] {
+[data-station][aria-pressed='true'] {
   border-color: var(--ember);
   background: var(--ember-soft);
   box-shadow: var(--glow);
 }
 
-[data-station][aria-pressed="true"] small {
+[data-station][aria-pressed='true'] small {
   color: var(--ink-dim);
 }
 
@@ -669,8 +758,8 @@ app-admin nav button:hover {
  * CURRENT tab handed its background back to the hover rule while the white
  * label stayed -- near-white text on a pale fill, and the one control that says
  * where you are became the least readable thing on the page. */
-app-admin nav button[aria-current="page"],
-app-admin nav button[aria-current="page"]:hover:not(:disabled) {
+app-admin nav button[aria-current='page'],
+app-admin nav button[aria-current='page']:hover:not(:disabled) {
   background: var(--ember);
   border-color: var(--ember);
   color: var(--on-ember);
@@ -777,4 +866,94 @@ app-admin nav button[aria-current="page"]:hover:not(:disabled) {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* Vocabulary pickers.
+ *
+ * CHECKBOXES IN A GRID, not a multiple select. Picking two things that are not
+ * next to each other in a multiple select needs ctrl-click, which is a keyboard
+ * trick people do not know and which the control gives no sign of. Every option
+ * and its state is visible here at once, so the ticks ARE the readout and
+ * nothing has to restate them underneath. */
+[data-genre],
+[data-mood],
+[data-edit-genre],
+[data-edit-mood],
+[data-edit-genres],
+[data-edit-moods] {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: 0.15rem 0.75rem;
+  align-items: center;
+  /* ITS OWN ROW in the form. As an ordinary flex item beside the name field
+   * each picker collapsed to a single column, so auto-fill had one column to
+   * fill and 42 options became a 1550px scroller inside a 174px box. */
+  flex: 1 1 100%;
+  /* Tall enough that a whole vocabulary fits at form width, and it still gives
+   * way rather than pushing the form off a phone. The stable gutter means the
+   * scrollbar is visible when there IS more to see, which is the only sign the
+   * old box gave that it scrolled at all. */
+  max-height: min(50vh, 22rem);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  margin: 0 0.5rem 0.5rem 0;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+[data-genre] legend,
+[data-mood] legend,
+[data-edit-genre] legend,
+[data-edit-mood] legend,
+[data-edit-genres] legend,
+[data-edit-moods] legend {
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+[data-genre] label,
+[data-mood] label,
+[data-edit-genre] label,
+[data-edit-mood] label,
+[data-edit-genres] label,
+[data-edit-moods] label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+[data-genre] input,
+[data-mood] input,
+[data-edit-genre] input,
+[data-edit-mood] input,
+[data-edit-genres] input,
+[data-edit-moods] input {
+  margin: 0;
+  accent-color: var(--ember);
+}
+
+/* The "nothing ticked" note spans the grid so it reads as a caption rather
+ * than as another option. */
+[data-genre] small,
+[data-mood] small,
+[data-edit-genre] small,
+[data-edit-mood] small,
+[data-edit-genres] small,
+[data-edit-moods] small {
+  grid-column: 1 / -1;
+  color: var(--ink-faint);
+  font-size: 0.75rem;
+}
+
+/* Signed-in identity in the console masthead. */
+[data-whoami] {
+  margin: 0;
+  color: var(--ink-faint);
+  font-size: 0.85rem;
 }

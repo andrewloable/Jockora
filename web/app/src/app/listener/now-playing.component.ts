@@ -1,4 +1,4 @@
-import { Component, OnDestroy, effect, inject, input, signal } from '@angular/core';
+import { Component, OnDestroy, effect, inject, input, output, signal } from '@angular/core';
 import { Api, NowPlaying } from '../api/api';
 
 /** How often the page asks what is playing. */
@@ -15,6 +15,12 @@ export const POLL_MS = 4000;
   standalone: true,
   template: `
     <p data-nowplaying>{{ label() }}</p>
+    <!-- WHETHER THE DJ IS ABOUT TO SPEAK. A break that is coming, one still
+         being written, and one that was never scheduled are the same silence
+         from here -- so a quiet station and a broken one read alike. -->
+    @if (breakLabel(); as b) {
+      <p data-nextbreak>{{ b }}</p>
+    }
     @if (transcript()) {
       <p data-transcript>“{{ transcript() }}”</p>
     }
@@ -30,7 +36,34 @@ export class NowPlayingView implements OnDestroy {
 
   readonly label = signal('Nothing playing yet.');
   readonly transcript = signal('');
+
+  /**
+   * The break the DJ last said, for whoever else needs it.
+   *
+   * This component owns the /now.json poll, so the transcript arrives HERE
+   * while the button that rates it lives one component sideways. An output
+   * rather than a second poll or a service: the parent already composes both,
+   * and asking the server the same question twice to get the same string is how
+   * two views end up disagreeing about what is on air.
+   *
+   * Emitted only when it CHANGES. The poll runs every few seconds and one break
+   * stands for minutes.
+   */
+  readonly spoke = output<string>();
   readonly enrichment = signal<NowPlaying['enrichment']>(null);
+  readonly nextBreak = signal('');
+
+  /** What the DJ is about to do, in words rather than a state name. */
+  breakLabel(): string {
+    switch (this.nextBreak()) {
+      case 'ready':
+        return 'The DJ speaks after this track.';
+      case 'writing':
+        return 'The DJ is writing a break…';
+      default:
+        return '';
+    }
+  }
 
   private timer: ReturnType<typeof setInterval> | null = null;
 
@@ -50,7 +83,12 @@ export class NowPlayingView implements OnDestroy {
     this.api.now(id).subscribe({
       next: (n) => {
         this.label.set(n.now ? `${n.now.artist} — ${n.now.title}` : 'Nothing playing yet.');
-        this.transcript.set(n.last_break?.text ?? '');
+        this.nextBreak.set(n.next_break ?? '');
+        const said = n.last_break?.text ?? '';
+        if (said !== this.transcript()) {
+          this.transcript.set(said);
+          this.spoke.emit(said);
+        }
         this.enrichment.set(n.enrichment ?? null);
       },
       // A poll that fails leaves the LAST answer on screen. Blanking it would

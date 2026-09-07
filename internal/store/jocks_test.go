@@ -302,3 +302,49 @@ func TestJocksNilListsBecomeEmptyNotNull(t *testing.T) {
 		t.Errorf("GoodForGenres = %#v, want an empty slice", got.GoodForGenres)
 	}
 }
+
+// TestJocksStationJock: the jock a station presents, which is what actually
+// reaches the microphone. Read as ONE query, so there is one answer to every
+// way a station has nobody to put on air.
+func TestJocksStationJock(t *testing.T) {
+	s := jockStore(t)
+	ctx := context.Background()
+	if err := s.UpsertJock(ctx, sampleJock()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().Exec(`
+		INSERT INTO stations (id, name, genre, jock_id, created_at) VALUES
+			(1, 'Rock',  'rock', 'dutch_mahoney', 1),
+			(2, 'Quiet', 'ambient', NULL, 1)`); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.StationJock(ctx, 1)
+	if err != nil {
+		t.Fatalf("StationJock: %v", err)
+	}
+	if got.ID != "dutch_mahoney" || got.VoiceID != "kokoro:am_fenrir" {
+		t.Errorf("StationJock = %q / %q, want the assigned jock and its voice", got.ID, got.VoiceID)
+	}
+	// The lists come back decoded, not as raw JSON: the persona is built from
+	// this row and matches stations on them.
+	if len(got.GoodForGenres) != 3 {
+		t.Errorf("genres = %v, want them decoded", got.GoodForGenres)
+	}
+
+	// A station with no jock, and a station that does not exist, are the same
+	// answer: there is nobody to put on air.
+	if _, err := s.StationJock(ctx, 2); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unassigned station = %v, want ErrNotFound", err)
+	}
+	if _, err := s.StationJock(ctx, 404); !errors.Is(err, ErrNotFound) {
+		t.Errorf("missing station = %v, want ErrNotFound", err)
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StationJock(ctx, 1); err == nil {
+		t.Error("StationJock reported success against a closed database")
+	}
+}

@@ -97,6 +97,23 @@ type PromptInput struct {
 	NextArtist    string
 	NextTitle     string
 
+	// CurrentAlbum, CurrentYear, NextAlbum and NextYear are the file's OWN
+	// tags, and they are rendered only where there is no dossier.
+	//
+	// The scanner has always read them and the DJ was never shown either, so an
+	// unenriched record left the jock a bare title to be interesting about. A
+	// track that HAS a dossier already carries a release field somebody
+	// reasoned about, and a raw tag beside it would sooner or later contradict
+	// it -- so these fill a hole rather than adding to a full page.
+	//
+	// CONTEXT, NOT FACT. They are spoken from, exactly as the title is, and
+	// never declared: asserted_facts stays an enum built from resolvable
+	// dossier facts and BreakSchema does not move.
+	CurrentAlbum string
+	CurrentYear  int
+	NextAlbum    string
+	NextYear     int
+
 	Prohibitions  Prohibitions
 	Placement     string
 	WindowSeconds float64
@@ -239,11 +256,18 @@ func assemble(in PromptInput, next *enrich.Dossier, prohib Prohibitions) string 
 			in.PreviousTitle, in.PreviousArtist)
 		b.WriteString("then hand off. You are talking over its tail, so it is still\n")
 		b.WriteString("in the listener's ear.\n")
-		writeDossier(&b, "THE TRACK THAT JUST FINISHED", in.Previous, in.PreviousArtist, in.PreviousTitle)
+		// No sleeve for the backsell. The track has already played, so the
+		// jock is naming it rather than introducing it, and the writer does
+		// not carry tags for it -- adding them here would print an empty line
+		// and a zero year.
+		writeDossier(&b, "THE TRACK THAT JUST FINISHED", "prev", in.Previous,
+			in.PreviousArtist, in.PreviousTitle, "", 0)
 	}
 
-	writeDossier(&b, "THE TRACK NOW ENDING", in.Current, in.CurrentArtist, in.CurrentTitle)
-	writeDossier(&b, "THE TRACK COMING UP", next, in.NextArtist, in.NextTitle)
+	writeDossier(&b, "THE TRACK NOW ENDING", "cur", in.Current,
+		in.CurrentArtist, in.CurrentTitle, in.CurrentAlbum, in.CurrentYear)
+	writeDossier(&b, "THE TRACK COMING UP", "next", next,
+		in.NextArtist, in.NextTitle, in.NextAlbum, in.NextYear)
 
 	if in.Current == nil && next == nil && in.Previous == nil {
 		// An empty dossier is a designed outcome, not a failure. The DJ has
@@ -256,7 +280,12 @@ func assemble(in PromptInput, next *enrich.Dossier, prohib Prohibitions) string 
 		b.WriteString("picture, to your own week. Wonder aloud. Be wrong out loud, as\n")
 		b.WriteString("long as everybody can hear that you are guessing.\n\n")
 		b.WriteString("What you may NOT do is state something as though you knew it.\n")
-		b.WriteString("Do not name a year, a place, a label or a band member as fact.\n")
+		// THE YEAR IS THE ONE EXCEPTION NOW. Forbidding it outright while an
+		// album year is printed above is a contradiction, and a model handed
+		// one contradiction discounts the rest of the paragraph with it.
+		b.WriteString("Do not name a place, a label or a band member as fact. The\n")
+		b.WriteString("only year you may say is one printed above, and it is a sleeve\n")
+		b.WriteString("date rather than research, so it may be a reissue.\n")
 		b.WriteString("A guess the listener can hear is a guess is entertainment; the\n")
 		b.WriteString("same sentence said flatly is a lie they will repeat.\n")
 	} else {
@@ -272,6 +301,11 @@ func assemble(in PromptInput, next *enrich.Dossier, prohib Prohibitions) string 
 		// dropped.
 		b.WriteString("Say them in YOUR OWN WORDS. Reading a fact out as written is how\n")
 		b.WriteString("two breaks end up sharing a sentence, and the second one is cut.\n")
+		// The bracketed labels, named once. Without this the model has seen the
+		// ids but not been told what they are for, and declares the fact text.
+		b.WriteString("In asserted_facts put the bracketed LABELS of the facts you used,\n")
+		b.WriteString("exactly as written, never the sentences themselves. Never say a\n")
+		b.WriteString("label out loud.\n")
 		// TRIED AND REVERTED, 2026-09-06. Four more lines here told the writer
 		// that a year is never a sentence of its own. Run against an identical
 		// seed, identical windows and an identical library, it changed the
@@ -361,7 +395,8 @@ func placementGuidance(placement string) string {
 // THE WRITER'S PROBLEM IS NOT THAT IT REPEATS FACTS. It is that it does not
 // have enough to say. Repetition is the symptom of a thin dossier, so the fix
 // is richer enrichment, not a stricter cooldown.
-func writeDossier(b *strings.Builder, heading string, d *enrich.Dossier, artist, title string) {
+func writeDossier(b *strings.Builder, heading, prefix string, d *enrich.Dossier,
+	artist, title, album string, year int) {
 	// The NAME is printed even with no dossier at all. Knowing what is playing
 	// is not the same as knowing anything about it, and a jock that knows the
 	// title has something true to be funny about instead of inventing one.
@@ -377,14 +412,33 @@ func writeDossier(b *strings.Builder, heading string, d *enrich.Dossier, artist,
 		b.WriteString("  artist: " + artist + "\n")
 	}
 	if d == nil {
+		// THE SLEEVE, where there is nothing else. One line, and the year rides
+		// on it rather than standing alone: a bare year reads as a fact stated
+		// flatly, and a tag year is frequently the REISSUE -- confidently wrong
+		// in a way a dossier release date is not.
+		if album == "" {
+			b.WriteString("  (nothing else is known about this record)\n")
+			return
+		}
+		b.WriteString("  album: " + album)
+		if year > 0 {
+			fmt.Fprintf(b, " (%d)", year)
+		}
+		b.WriteString("\n")
+		// ONE LINE, NO CAVEAT UNDER IT. A second line saying the sleeve is not
+		// research invited the model to talk ABOUT the sleeve -- measured live:
+		// "the sleeve is usually telling the truth, sometimes, mostly" -- and
+		// breaks then ran past the 200-token budget and were truncated, which
+		// drops them. The no-facts block below already says what the year is
+		// worth, once, where it belongs.
 		b.WriteString("  (nothing else is known about this record)\n")
 		return
 	}
 	if d.SubjectSummary != "" {
-		b.WriteString("  about: " + d.SubjectSummary + "\n")
+		fmt.Fprintf(b, "  about [%s.subject_summary]: %s\n", prefix, d.SubjectSummary)
 	}
 	if d.Release != "" {
-		b.WriteString("  release: " + d.Release + "\n")
+		fmt.Fprintf(b, "  release [%s.release]: %s\n", prefix, d.Release)
 	}
 	if len(d.StationTags) > 0 {
 		b.WriteString("  genre: " + strings.Join(d.StationTags, ", ") + "\n")
@@ -393,11 +447,24 @@ func writeDossier(b *strings.Builder, heading string, d *enrich.Dossier, artist,
 		b.WriteString("  mood: " + strings.Join(d.Mood, ", ") + "\n")
 	}
 
+	// EACH FACT CARRIES THE ID THE SCHEMA WILL ACCEPT FOR IT.
+	//
+	// asserted_facts is an enum of ids like "cur.artist_facts[0]", and under
+	// llama.cpp a grammar makes those the only emittable values -- so the model
+	// cannot get it wrong and never needed to be told. A hosted endpoint treats
+	// the schema as a REQUEST, and a model that has never seen an id declares
+	// the fact TEXT instead. Measured live on the first break after switching
+	// host: every fact-bearing break dropped as ungrounded.
+	//
+	// Showing them is only safe because saying one is caught:
+	// placeholderFieldRef refuses a break that speaks prev/cur/next dot
+	// anything, and the instructions already say a field name is plumbing
+	// rather than speech.
 	facts := d.ArtistFacts
 	if len(facts) > MaxFactsInPrompt {
 		facts = facts[:MaxFactsInPrompt]
 	}
-	for _, f := range facts {
-		b.WriteString("  fact: " + f + "\n")
+	for i, f := range facts {
+		fmt.Fprintf(b, "  fact [%s.artist_facts[%d]]: %s\n", prefix, i, f)
 	}
 }

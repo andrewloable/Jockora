@@ -66,6 +66,9 @@ func v01Fixture(t *testing.T) string {
 	// tables alone leaves the ADD COLUMNs behind and the migration then fails
 	// on a duplicate column -- which is not a v0.1 database, it is a broken one.
 	for _, stmt := range []string{
+		// The VIEW first: migration 9's view names track_tags, and SQLite will
+		// not let the table go while it does.
+		`DROP VIEW effective_tags`, `DROP TABLE track_tags`,
 		`DROP TABLE station_tracks`, `DROP TABLE stations`, `DROP TABLE jocks`,
 		`DROP TABLE sources`, `DROP TABLE users`, `DROP TABLE settings`,
 		`ALTER TABLE tracks DROP COLUMN source_id`,

@@ -46,3 +46,6 @@ docs/demo*.mp3
 /web/app/node_modules/
 /web/dist/*
 !/web/dist/.gitkeep
+
+# Ad-hoc UX review screenshots, not part of the distributed work.
+/screenshots/

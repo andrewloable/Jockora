@@ -20,6 +20,24 @@ what your library actually sounds like starts introducing your records.
 
 ---
 
+## The five sentences that make the rest obvious
+
+- **Your music library is read-only input.** Jockora never writes to it, retags
+  it or transcodes it. It layers on top of what you already have.
+- **Enrichment runs one language-model pass per track and stores a dossier.**
+  Lyrics are read and then discarded; the dossier is the only thing the DJ is
+  allowed to assert facts from. No dossier means personality-only talk, which is
+  a designed state rather than a broken one.
+- **A station is a genre and mood filter over those dossiers**, materialised
+  into a playlist you can pin and exclude tracks in. The admin owns the dial.
+- **A jock is a persona card**: a voice, a speech style, a personality, and a
+  list of things it will never say. One jock per station. Listeners pick
+  stations, never jocks.
+- **The server renders one shared HLS stream per station, only while somebody is
+  listening.** Clients are dumb players. Breaks are optional; the music is not.
+
+Everything below is a consequence of those five.
+
 ## Quickstart
 
 You need Docker, a music folder, and a GGUF language model. Everything else is
@@ -102,6 +120,123 @@ actually have (and when a GPU is worth nothing at all), what to verify before
 believing a deployment worked, and the ten failures that look like something
 else.
 
+## Install on a host, without containers
+
+The same program, assembled by hand. Every command below was run on a clean
+directory before it was written down; the output quoted is what it actually
+printed.
+
+**1. Build it.** The browser app first: `web/dist` is build output and the
+binary embeds it, so skipping this compiles, links, starts, and serves an
+"assets not built" notice to every listener.
+
+```sh
+cd web/app && npm ci && npx ng build && cd ../..
+CGO_ENABLED=0 go build -o jockora ./cmd/jockora
+```
+
+**2. Install ffmpeg, and check the two filters.** Operator-supplied and run out
+of process, never linked — that is a licensing requirement, not a preference.
+Both filters are used on every break:
+
+```sh
+ffmpeg -hide_banner -filters | grep -E ' (loudnorm|aresample) '
+```
+
+**3. Make the speech sidecar's virtualenv.** Python 3.10; kokoro-onnx pulls
+onnxruntime with it.
+
+```sh
+python3.10 -m venv tts
+./tts/bin/pip install kokoro-onnx
+./tts/bin/python -c "import kokoro_onnx"
+```
+
+**4. Fetch the voice models** (337 MB, operator-supplied for the same reason
+ffmpeg is):
+
+```sh
+mkdir -p models && cd models
+curl -LO https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
+curl -LO https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
+cd ..
+```
+
+**5. Start a language model.** Either `llama-server` from llama.cpp with a GGUF
+on disk, or a hosted OpenAI-compatible endpoint — see **Hosted endpoints** in
+[docs/configuration.md](docs/configuration.md). Note the port: Jockora looks at
+**8081**, because it is already using 8080 itself.
+
+```sh
+llama-server -m /path/to/model.gguf --host 127.0.0.1 --port 8081
+```
+
+**6. Point Jockora at all of it.** Every flag has an environment variable:
+`JOCKORA_` plus the flag name uppercased, dashes to underscores, so
+`-library-path` is `JOCKORA_LIBRARY_PATH`.
+
+```sh
+export JOCKORA_LIBRARY_PATH=/path/to/music
+export JOCKORA_DB_PATH=$PWD/jockora.db
+export JOCKORA_PERSONA=personas/
+export JOCKORA_TTS_PYTHON=$PWD/tts/bin/python
+export JOCKORA_KOKORO_MODEL=$PWD/models/kokoro-v1.0.onnx
+export JOCKORA_KOKORO_VOICES=$PWD/models/voices-v1.0.bin
+```
+
+**7. Check it before starting it.** `jockora doctor` names what is missing and
+what to do about it, and `serve` refuses to start on a failed check:
+
+```
+$ ./jockora doctor
+JOCKORA PREFLIGHT
+  [ok  ] ffmpeg                 /opt/homebrew/bin/ffmpeg
+  [ok  ] ffprobe                /opt/homebrew/bin/ffprobe
+  [ok  ] ffmpeg filters         loudnorm, aresample, afade, volume present
+  [ok  ] llama-server           http://127.0.0.1:8081/completion honoured a json_schema round-trip
+  [ok  ] tts sidecar            can import kokoro_onnx, and the voice models are present
+  [ok  ] library path           /path/to/music
+  [ok  ] segment dir            segments writable
+  [ok  ] database               jockora.db
+  [ok  ] free disk              139.0 GiB free
+```
+
+**8. Make yourself an account, then start.** Nobody can sign in until you do,
+and there is no self-registration:
+
+```sh
+./jockora admin create -name you     # asks for a password, twice, without echo
+./jockora serve
+```
+
+`admin create` writes to `JOCKORA_DB_PATH`, so **export it rather than putting
+it in front of a pipe** — a variable set on the left of a `|` belongs to the
+left-hand command, and the account lands in a different database than the one
+the server reads. The account is created, the message says so, and sign-in then
+fails with 401. It cost half an hour to find; it takes one `export` to avoid.
+
+Open **http://127.0.0.1:8080**, sign in, and pick a station.
+
+## What it will read
+
+A watched folder is scanned for six containers:
+
+`.mp3` &nbsp; `.flac` &nbsp; `.m4a` (AAC and ALAC) &nbsp; `.ogg` &nbsp; `.opus` &nbsp; `.wav`
+
+Anything else is passed over in silence rather than reported as broken, so a
+folder of `.wma`, `.aiff`, `.aac` or `.mp4` files looks empty. That list is a
+scanner filter, not a decoder limit — playback is ffmpeg, which reads far more
+than six formats.
+
+An **OpenSubsonic source has no such filter**: whatever the server lists is
+ingested and streamed through it, so a file Jockora skips on disk plays fine
+through Navidrome.
+
+A file with the right extension but no audio stream in it — a video somebody
+dropped in the folder — is marked unplayable during the scan and never
+selected. Deliberately at scan time: a scan is allowed to take an hour, a
+stream is not allowed to find out mid-transition.
+
 ## What to expect on a first run, honestly
 
 - **Scanning is fast.** ~8 minutes for 7,700 tracks over a network mount, and it
@@ -116,23 +251,41 @@ else.
   the first few days.
 - Enrichment is resumable. Stop the server, start it next week, it continues.
 
-## Security: there is no authentication
+## Security
 
-**None. At all.** Anyone who can reach the port can listen to your stream and
-read `/now.json`.
+**There are accounts, and there is no TLS.** Both matter.
+
+Sign-in is a bcrypt-hashed password for a signed, HttpOnly session cookie
+lasting 30 days, rate-limited to 10 failed attempts a minute. Every account is
+created by an admin — there is no self-registration anywhere, by design. The
+signing key comes from `JOCKORA_SESSION_KEY`, or is generated on first run and
+kept in the database.
+
+**The stream itself requires a session.** `/hls/` answers `401 sign in to
+listen` without one, because a listener *is* their session: presence is what
+keeps a station on air, so an anonymous one would let anyone hold a station up.
+
+Two things stay public on purpose:
+
+- **`/now.json`** — what is playing, the last thing the DJ said, and enrichment
+  progress. Anyone who can reach the port can read it.
+- **The app shell and the sign-in page.** The APIs behind them are guarded; the
+  HTML is not worth hiding.
 
 Jockora refuses to bind a non-loopback address unless you pass `--allow-lan`
-(`JOCKORA_ALLOW_LAN=1`), and it logs a warning on every start when you do. The
-supplied `docker-compose.yml` publishes on the LAN, which is a deliberate choice
-you should make consciously rather than inherit.
+(`JOCKORA_ALLOW_LAN=1`), and logs a warning on every start when you do. The
+supplied `docker-compose.yml` publishes on the LAN — a deliberate choice you
+should make consciously rather than inherit.
 
-**Do not port-forward this to the internet.** Do not point a tunnel at it. Put it
-behind something that authenticates, or keep it on your own network.
+**Do not port-forward this to the internet.** It speaks plain HTTP, so the
+session cookie's `Secure` flag never sets and every password crosses the wire in
+clear. None of this has been through a security review. If it has to leave your
+network, put it behind a reverse proxy that terminates TLS.
 
 ## How it works
 
 ```
-Music library  (local folder — READ-ONLY, never written)
+Music library  (local folder or OpenSubsonic — READ-ONLY, never written)
       │
       ├──► Enrichment worker ──► Track Dossier  (SQLite)
       │      one LLM pass per track, cached forever, resumable
@@ -159,6 +312,50 @@ Two rules shape everything else:
 
 There is also no skip button. Changing station is the escape hatch — which is
 what lets a break safely refer forward to what is coming up.
+
+## How it is built
+
+The diagram above is the audio. This is the program: **one Go binary**, two
+processes beside it that it does not own, and one file of state.
+
+```
+                    ┌──────────────── one Go binary: cmd/jockora ────────────────┐
+   browser  ───────►│  server + web       the Angular app, embedded              │
+   / at 8080        │                     / listener dial   /admin console       │
+                    │                                                            │
+                    │  AUDIO PATH         decode → mix → sched → encode          │
+                    │                     per-track ffmpeg, one paced mix bus,   │
+                    │                     one long-lived encoder per station     │
+                    │                                                            │
+                    │  STATION BRAIN      library → enrich → station → dj        │
+                    │                     scan, dossiers, playlists, breaks      │
+                    │                                                            │
+                    │  PLUMBING           store auth config clock obs doctor tts │
+                    └───┬──────────────┬──────────────┬────────────────┬─────────┘
+                        │              │              │                │
+                        ▼              ▼              ▼                ▼
+                   ┌─────────┐   ┌──────────┐   ┌───────────┐   ┌─────────────┐
+                   │ SQLite  │   │ ffmpeg   │   │ speech    │   │ language    │
+                   │ one file│   │ ffprobe  │   │ sidecar   │   │ model server│
+                   └─────────┘   └──────────┘   └───────────┘   └─────────────┘
+                    tracks,        OPERATOR-        shipped,       OPERATOR-
+                    dossiers,      SUPPLIED         supervised     SUPPLIED
+                    stations,      copyleft,        by the         llama.cpp or
+                    playlists,     out of           binary         a hosted
+                    jocks,         process,         (Python,       endpoint
+                    accounts,      never linked     Kokoro)
+                    said lines
+```
+
+Two things about that shape are decisions rather than accidents:
+
+- **Everything is rendered server-side and leaves as HLS**, which is what keeps
+  every client dumb. A browser, a phone, a car head unit and a Chromecast all
+  play the same stream, and none of them contains any mixing logic to get wrong.
+- **The copyleft tools run out of process and are supplied by you.** ffmpeg is
+  GPL; Jockora is AGPL-3.0-only with a commercial exception available. Shelling
+  out to a tool the operator installed is mere aggregation, and it is the reason
+  both licences can hold at once. Nothing GPL is ever linked into the binary.
 
 ## Where this actually is
 

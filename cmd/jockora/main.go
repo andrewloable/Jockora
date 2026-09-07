@@ -330,7 +330,10 @@ func runSubcommand(ctx context.Context, name string, args []string, out io.Write
 		opts.Library = lib
 		opts.Personas = loadRoster(cfg.PersonaPath, log)
 		opts.Enricher = buildEnricher(ctx, cfg, lib, log)
-		pipeline, writer, sidecar := buildBreaks(ctx, cfg, lib, log)
+		newBreaks, pipeline, writer, sidecar := buildBreaks(ctx, cfg, lib, log)
+		// The FACTORY is what a station-based deployment uses; the pair is the
+		// spike path's, and the default a station inherits before it has one.
+		opts.NewBreaks = newBreaks
 		opts.Breaks, opts.Writer = pipeline, writer
 		if sidecar != nil {
 			defer sidecar.Close() //nolint:errcheck // closing at shutdown

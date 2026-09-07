@@ -1,4 +1,4 @@
-import { Component, inject, input, signal } from '@angular/core';
+import { Component, effect, inject, input, signal } from '@angular/core';
 import { Api } from '../api/api';
 
 /**
@@ -31,6 +31,18 @@ export class Feedback {
 
   readonly said = signal('');
   readonly sent = signal(false);
+
+  constructor() {
+    // A NEW BREAK IS A NEW VERDICT. sent() stops a double press on the SAME
+    // break; carrying it into the next one let a listener rate exactly one
+    // thing per page load, and the panel that reads these would see a single
+    // row where there should be a shift's worth.
+    effect(() => {
+      this.transcript();
+      this.sent.set(false);
+      this.said.set('');
+    });
+  }
 
   send(): void {
     const station = this.station();

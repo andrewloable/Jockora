@@ -88,7 +88,29 @@ type Options struct {
 	Breaks *station.Pipeline
 
 	// Writer is told which tracks surround each break. Set with Breaks.
+	//
+	// THE SPIKE PATH'S pair. With a library, every station builds its own
+	// through NewBreaks; these two are the single-station fallback and the
+	// default a station inherits nothing from.
 	Writer *station.BreakWriter
+
+	// NewBreaks builds ONE STATION'S break machinery.
+	//
+	// A pipeline and a writer PER STATION, because almost everything in them is
+	// per-broadcast state that two stations cannot share: the track context a
+	// break is written about, the cold open, the fact cooldown, the exemption
+	// list of a station's own track names, and the drop counters. One shared
+	// box meant station B's break was written about station A's records, its
+	// first break was not a cold open because A had already aired one, and the
+	// drop rate described neither.
+	//
+	// TWO STATIONS MAY SHARE A JOCK and that is legal -- a station has one
+	// jock, a jock may have many stations -- so this is keyed on the station,
+	// never on the persona.
+	//
+	// Nil means no DJ, or the spike path, which has exactly one station and for
+	// which sharing is not sharing.
+	NewBreaks func(stationID int64) (*station.Pipeline, *station.BreakWriter)
 
 	// Enricher runs dossier generation in the background. Optional.
 	Enricher *enrich.Queue
@@ -205,6 +227,13 @@ type App struct {
 	tracker *presence.Tracker
 	mgr     *station.Manager
 
+	// breaks is one station's break machinery each, built on first use and kept
+	// for the life of the process: a station that stops and starts again keeps
+	// its cold-open state and its counters, which is what a listener coming
+	// back to a station they were on expects.
+	breaksMu sync.Mutex
+	breaks   map[int64]*stationBreaks
+
 	// stallUntil pauses the feeder, for the fault injection GATE 2 requires.
 	// Guarded because the signal handler and the feeder are different goroutines.
 	stallMu    sync.Mutex
@@ -299,7 +328,8 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 		}
 	}
 
-	a := &App{cfg: cfg, opts: opts, log: log, now: map[int64]nowPlaying{}}
+	a := &App{cfg: cfg, opts: opts, log: log, now: map[int64]nowPlaying{},
+		breaks: map[int64]*stationBreaks{}}
 
 	// THE SPIKE PATH keeps one runtime, started directly: no database means no
 	// stations, no listeners to count and nothing to reconcile. With a library
@@ -440,6 +470,11 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 		}
 		srv.SetJocks(opts.Library.Store, voices, a)
 		srv.SetPlaylists(opts.Library.Store)
+		// The library's accumulated enrichment, out and in. Named as the
+		// enrichment rather than as the database, because that distinction is
+		// the whole design: the file an operator hands to a friend carries no
+		// accounts, no stations and no said lines.
+		srv.SetEnrichmentPort(enrich.NewPort(opts.Library.Store))
 		srv.SetPresence(a.tracker)
 	}
 
@@ -583,17 +618,139 @@ func (a *App) newStationRuntime(ctx context.Context, id int64,
 // persona per break already, so the listener hears the change without hearing
 // a gap.
 func (a *App) PersonaChanged(j store.Jock) {
-	if a.opts.Writer == nil || a.mgr == nil || a.opts.Library == nil {
+	if a.opts.Library == nil || a.opts.Library.Store == nil {
 		return
 	}
-	for _, id := range a.mgr.Running() {
+	// EVERY station on that jock, not the first. Two stations may share one --
+	// the invariant is that a station has one jock, not that a jock has one
+	// station -- and returning after the first left the others speaking as the
+	// persona the operator had just edited away.
+	// EVERY STATION THAT HAS A WRITER, not only the ones on air. A station that
+	// is off air keeps its machinery, so an edit that skipped it would come
+	// back as the old persona the next time somebody tuned in.
+	a.eachBreaks(func(id int64, br *stationBreaks) {
+		if br.writer == nil {
+			return
+		}
 		st, err := a.opts.Library.Store.GetStation(context.Background(), id)
 		if err != nil || st.JockID != j.ID {
-			continue
+			return
 		}
-		a.opts.Writer.SetPersona(dj.FromRecord(j))
+		br.writer.SetPersona(dj.FromRecord(j))
+	})
+}
+
+// stationBreaks is one station's break machinery: the pipeline that decides
+// when a break happens, and the writer that writes it.
+//
+// Both belong to the STATION rather than to the server. See Options.NewBreaks
+// for the list of state that two stations sharing one of these got wrong.
+type stationBreaks struct {
+	pipeline *station.Pipeline
+	writer   *station.BreakWriter
+}
+
+// breaksFor is one station's own break machinery, built on first use.
+//
+// Nil when there is no DJ at all -- no persona, no language model, no speech
+// sidecar -- which is a supported way to run and must stay a shuffle rather
+// than a crash.
+func (a *App) breaksFor(id int64) *stationBreaks {
+	a.breaksMu.Lock()
+	defer a.breaksMu.Unlock()
+
+	if br, ok := a.breaks[id]; ok {
+		return br
+	}
+	// A zero-valued App is a legitimate thing to hold -- several tests build
+	// one directly -- and writing into a nil map panics.
+	if a.breaks == nil {
+		a.breaks = map[int64]*stationBreaks{}
+	}
+	// THE FACTORY FIRST. Options.Breaks is the spike path's single pair, and
+	// a deployment with a library never reaches it: one box shared by four
+	// stations is the bug this exists to fix.
+	if a.opts.NewBreaks != nil {
+		pipeline, writer := a.opts.NewBreaks(id)
+		if pipeline == nil {
+			return nil
+		}
+		br := &stationBreaks{pipeline: pipeline, writer: writer}
+		// The operator's cadence applies to every station, including one that
+		// comes up long after they set it.
+		if n := a.cfg.BreakEveryNTracks; n > 0 {
+			pipeline.SetCadence(station.NewCadence(n))
+		}
+		a.breaks[id] = br
+		return br
+	}
+	if a.opts.Breaks == nil {
+		return nil
+	}
+	br := &stationBreaks{pipeline: a.opts.Breaks, writer: a.opts.Writer}
+	a.breaks[id] = br
+	return br
+}
+
+// hasDJ reports whether this deployment can write breaks at all.
+//
+// A build with no persona, no language model or no speech sidecar runs as a
+// shuffle, which is a supported way to run: the question is asked here rather
+// than by testing one pipeline for nil, because with a library the pipelines
+// are built per station and none exists until one is on air.
+func (a *App) hasDJ() bool { return a.opts.NewBreaks != nil || a.opts.Breaks != nil }
+
+// eachBreaks runs fn over every station that has break machinery, so a setting
+// an operator changes once reaches all of them.
+func (a *App) eachBreaks(fn func(id int64, br *stationBreaks)) {
+	a.breaksMu.Lock()
+	live := make(map[int64]*stationBreaks, len(a.breaks))
+	for id, br := range a.breaks {
+		live[id] = br
+	}
+	a.breaksMu.Unlock()
+	for id, br := range live {
+		fn(id, br)
+	}
+}
+
+// applyStationJock puts the station's OWN jock on air.
+//
+// THE ASSIGNMENT HAD NO CONSUMER. station.jock_id was written by the console,
+// read back by the console and captioned on the dial, while the persona at the
+// microphone came from a genre vote over personas/ taken once at boot and never
+// changed again. A station assigned Sunny Marchetti -- slow, warm, af_nicole --
+// aired Dutch "The Hammer" Mahoney shouting in am_fenrir, under her name.
+//
+// Called where the break pipeline is already rebound to the station on air, so
+// the jock arrives with the queue it will speak into. SetPersona moves the
+// writing, the voice and the said-lines index together.
+//
+// A station with NO jock keeps whoever is speaking. That is the boot-time seed
+// rather than anybody's decision, and it is better than the alternative, which
+// is a station that plays music and never talks.
+func (a *App) applyStationJock(ctx context.Context, stationID int64) {
+	if a.opts.Library == nil || a.opts.Library.Store == nil {
 		return
 	}
+	br := a.breaksFor(stationID)
+	if br == nil || br.writer == nil {
+		return
+	}
+	// ONE error branch for every way there is nobody to put on air: no such
+	// station, no jock assigned, no database. All three keep the current jock.
+	j, err := a.opts.Library.Store.StationJock(ctx, stationID)
+	if err != nil {
+		return
+	}
+	// READ AGAIN AT EVERY FEED, not only when the writer is built. A station
+	// can be given a different jock while it is off air, and the next listener
+	// must hear the new one.
+	if p := br.writer.CurrentPersona(); p != nil && p.ID() == j.ID {
+		return
+	}
+	br.writer.SetPersona(dj.FromRecord(j))
+	a.log.Info("jock on air", "station", stationID, "jock", j.Name, "voice", j.VoiceID)
 }
 
 // ListenerGrace is how long a session counts as present after its last
@@ -799,8 +956,8 @@ func (a *App) Status() server.Status {
 			// Reported by what is actually WIRED, not by what the spike used
 			// to do. These read "not used by the spike" long after both were
 			// in use, which is a status endpoint inventing an answer.
-			LLM: dependencyHealth(a.opts.Breaks != nil || a.opts.Enricher != nil),
-			TTS: dependencyHealth(a.opts.Breaks != nil),
+			LLM: dependencyHealth(a.hasDJ() || a.opts.Enricher != nil),
+			TTS: dependencyHealth(a.hasDJ()),
 		},
 		Metrics: server.Metrics{
 			RingOccupancyS:    rst.RingOccupancyS,
@@ -819,6 +976,15 @@ func (a *App) Status() server.Status {
 	}
 	st.LastBreak = a.lastBreak
 	a.nowMu.Unlock()
+
+	// THE PRIMARY STATION'S, which is the spike path's only one. A listener
+	// asks about a station by name; see StatusForStation.
+	if br := a.breaksFor(a.primaryID()); br != nil {
+		// Told what the mixer queue is holding, because the pipeline is handed
+		// a queue only once a station is on air and must not reach for one.
+		br.pipeline.SetScheduled(a.PendingBreaks())
+		st.NextBreak = string(br.pipeline.Outlook())
+	}
 
 	st.Enrichment = a.enrichment()
 
@@ -903,6 +1069,13 @@ func (a *App) StatusForStation(id int64) server.Status {
 			st.Metrics.RingOccupancyS = rst.RingOccupancyS
 			st.Metrics.Underruns = rst.Underruns
 			st.Metrics.EncoderRestarts = rst.EncoderRestarts
+			// THIS STATION'S DJ, not the first one that happened to be built.
+			// "The DJ speaks after this track" on a station whose DJ is not
+			// writing anything is a promise the stream does not keep.
+			if br := a.breaksFor(id); br != nil {
+				br.pipeline.SetScheduled(rt.Queue().Pending())
+				st.NextBreak = string(br.pipeline.Outlook())
+			}
 		}
 	}
 	return st
@@ -1085,22 +1258,24 @@ func (a *App) feedFromLibrary(ctx context.Context, rt *station.Runtime) {
 	var boundary int
 	var prev, cur track
 
-	if a.opts.Breaks != nil {
+	// THIS STATION'S OWN break machinery. It used to be one box on the App,
+	// rebound to whichever station was fed last -- which with two stations
+	// airing meant B's breaks were written about A's records, in A's jock's
+	// voice, into A's queue.
+	if br := a.breaksFor(rt.StationID()); br != nil {
 		// THE QUEUE OF THE STATION ACTUALLY ON AIR. Every station owns its own
-		// ring and queue, so the pipeline cannot be wired to one when it is
-		// built -- and wiring it only where the single legacy runtime was built
-		// left it nil on every station-based deployment. Every break generated
-		// was then dropped with "break pipeline has no scheduler queue", the DJ
-		// never spoke, and nothing else reported a fault.
-		a.opts.Breaks.SetQueue(rt.Queue(), a.recordBreak)
-		a.opts.Breaks.Writer = a.opts.Writer
+		// ring and queue, and a runtime builds a fresh queue when it restarts,
+		// so this is bound per feed rather than once.
+		br.pipeline.SetQueue(rt.Queue(), a.recordBreak)
+		br.pipeline.Writer = br.writer
+		a.applyStationJock(ctx, rt.StationID())
 
 		// The boundary counter below starts at zero, so the cadence has to
 		// start there too. A station restarts whenever a listener comes back,
 		// and a cadence carrying the previous run's high-water mark rejects
 		// every boundary of this one -- silently, forever.
-		if a.opts.Breaks.Cadence != nil {
-			a.opts.Breaks.Cadence.Reset()
+		if br.pipeline.Cadence != nil {
+			br.pipeline.Cadence.Reset()
 		}
 	}
 
@@ -1172,32 +1347,70 @@ func (a *App) generateBreaks(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			if _, err := a.opts.Breaks.Tick(ctx, a.secondsPlayed()); err != nil && ctx.Err() == nil {
-				a.log.Warn("break generation failed", "err", err)
-			}
+			a.tickBreaks(ctx)
 		}
 	}
+}
+
+// tickBreaks polls every airing station's own pipeline, on its own clock.
+//
+// One ticker rather than one goroutine per station: generation is serial by
+// design -- the GPU holds one model at a time -- and a shared ticker makes that
+// ordering explicit rather than leaving four goroutines to contend for it.
+func (a *App) tickBreaks(ctx context.Context) {
+	for _, rt := range a.airing() {
+		br := a.breaksFor(rt.StationID())
+		if br == nil {
+			continue
+		}
+		if _, err := br.pipeline.Tick(ctx, secondsOn(rt)); err != nil && ctx.Err() == nil {
+			a.log.Warn("break generation failed", "station", rt.StationID(), "err", err)
+		}
+	}
+}
+
+// airing is every station currently on air, or the spike path's single one.
+func (a *App) airing() []*station.Runtime {
+	if a.mgr == nil {
+		if a.rt != nil {
+			return []*station.Runtime{a.rt}
+		}
+		return nil
+	}
+	ids := a.mgr.Running()
+	out := make([]*station.Runtime, 0, len(ids))
+	for _, id := range ids {
+		if rt := a.mgr.Runtime(id); rt != nil {
+			out = append(out, rt)
+		}
+	}
+	return out
 }
 
 // announceBoundary offers one transition to the cadence and lets the pipeline
 // generate anything it decides to.
 func (a *App) announceBoundary(ctx context.Context, rt *station.Runtime, boundary int, prev, cur, next track) {
-	if a.opts.Breaks == nil {
+	br := a.breaksFor(rt.StationID())
+	if br == nil {
 		return
 	}
 	curTrack := a.trackFor(ctx, cur)
 	nextTrack := a.trackFor(ctx, next)
 
-	// The boundary is when the track now STARTING will end, not now. Measured
-	// from the mixer's position rather than the wall clock, because that is the
-	// clock the break will be spliced against.
-	at := a.secondsPlayed() + curTrack.DurationS
-	took := a.opts.Breaks.Announce(station.Boundary{
+	// THIS STATION'S CLOCK. The boundary is when the track now STARTING will
+	// end, measured from the mixer's position rather than the wall clock,
+	// because that is the clock the break will be spliced against -- and every
+	// station has its own. Read from the primary runtime, a break on the second
+	// station was placed against the first station's position and landed
+	// wherever that happened to be.
+	now := secondsOn(rt)
+	at := now + curTrack.DurationS
+	took := br.pipeline.Announce(station.Boundary{
 		Index:           boundary,
 		Cur:             curTrack,
 		Next:            nextTrack,
 		InsertionAt:     at,
-		InsertionSample: a.samplePos() + int64(curTrack.DurationS*mix.SampleRate),
+		InsertionSample: rt.SamplePos() + int64(curTrack.DurationS*mix.SampleRate),
 
 		// CARRIED, not stashed in the writer. Generation happens up to a
 		// minute later, by which time later boundaries have arrived; the
@@ -1214,12 +1427,18 @@ func (a *App) announceBoundary(ctx context.Context, rt *station.Runtime, boundar
 	// "the cadence said no" from "generation ran late" from "the slot was never
 	// offered" is to say which one happened, at the moment it happens.
 	a.log.Info("break slot offered",
+		"station", rt.StationID(),
 		"boundary", boundary, "taken", took,
-		"cadence", a.opts.Breaks.EveryN(),
-		"now_s", math.Round(a.secondsPlayed()),
+		"cadence", br.pipeline.EveryN(),
+		"now_s", math.Round(now),
 		"insertion_at_s", math.Round(at),
 		"track_s", math.Round(curTrack.DurationS),
-		"pending", a.opts.Breaks.Pending())
+		"pending", br.pipeline.Pending())
+}
+
+// secondsOn is one station's position on its own bus clock.
+func secondsOn(rt *station.Runtime) float64 {
+	return float64(rt.SamplePos()) / mix.SampleRate
 }
 
 // trackFor reads the placement numbers a break needs about one track.
@@ -1703,12 +1922,81 @@ func (a *App) Overview() any {
 		`SELECT count(*) FROM tracks WHERE playable = 1 AND loudness_lufs = 0`).Scan(&failed)
 	out["analysis_failures"] = failed
 
+	// HOW THE DJ IS DOING, which the validator has always counted and nothing
+	// ever read. "Why is it quiet?" is answered by the drop reasons, and they
+	// were in memory with no way to see them.
+	if b := a.breakStats(); b != nil {
+		out["breaks"] = b
+	}
+
 	out["said_lines"] = countOf(ctx, db, `SELECT count(*) FROM said_lines`)
 	out["adverts"] = countOf(ctx, db, `SELECT count(*) FROM ads`)
 	out["feedback"] = recentFeedback(ctx, db)
 	out["cadence"] = a.liveCadence()
 	out["enriching"] = a.enriching.Load()
 	return out
+}
+
+// breakStats is how the DJ is doing, per station and in total.
+//
+// PER STATION, because a drop rate mixed across stations describes neither: two
+// stations are two broadcasts, with their own jocks, their own tracks and their
+// own reasons for dropping a break. The total is kept alongside it as the
+// answer to "is the DJ working at all", which is the question the console asks
+// first.
+func (a *App) breakStats() map[string]any {
+	perStation := map[string]any{}
+	var aired, dropped, ungrounded int
+	reasons := map[string]int{}
+	next := ""
+
+	a.eachBreaks(func(id int64, br *stationBreaks) {
+		if br.writer == nil {
+			return
+		}
+		st, ok := br.writer.Stats()
+		if !ok {
+			return
+		}
+		own := map[string]int{}
+		for r, n := range st.Reasons {
+			own[string(r)] = n
+			reasons[string(r)] += n
+		}
+		aired += st.Breaks
+		dropped += st.Drops
+		ungrounded += st.Ungrounded
+		outlook := string(br.pipeline.Outlook())
+		// The first station with something to say about the next break. A
+		// station writing one is more interesting than three that are not.
+		if next == "" || outlook == string(station.OutlookWriting) {
+			next = outlook
+		}
+		perStation[strconv.FormatInt(id, 10)] = map[string]any{
+			"aired": st.Breaks, "dropped": st.Drops,
+			"drop_rate": dropRate(st.Breaks, st.Drops), "reasons": own,
+			"mislabelled_facts": st.Ungrounded,
+			"next":              outlook,
+		}
+	})
+	if len(perStation) == 0 {
+		return nil
+	}
+	return map[string]any{
+		"aired": aired, "dropped": dropped,
+		"drop_rate": dropRate(aired, dropped), "reasons": reasons,
+		"mislabelled_facts": ungrounded,
+		"next":              next,
+		"by_station":        perStation,
+	}
+}
+
+func dropRate(aired, dropped int) float64 {
+	total := aired + dropped
+	if total == 0 {
+		return 0
+	}
+	return float64(dropped) / float64(total)
 }
 
 // liveCadence is the cadence the station is running, for the console.
@@ -1718,10 +2006,22 @@ func (a *App) Overview() any {
 // it, the second time the server remembered and the console drew its own
 // hardcoded default over the answer.
 func (a *App) liveCadence() int {
-	if a.opts.Breaks != nil {
-		if n := a.opts.Breaks.EveryN(); n > 0 {
-			return n
+	// ONE SETTING ACROSS EVERY STATION, so any live pipeline answers for all of
+	// them. Reading the first that has one avoids reporting zero from a station
+	// that has not started yet.
+	n := 0
+	a.eachBreaks(func(_ int64, br *stationBreaks) {
+		if n == 0 && br.pipeline != nil {
+			n = br.pipeline.EveryN()
 		}
+	})
+	// Then the single pair, which is the spike path's and the one a station
+	// inherits before any station has come up.
+	if n == 0 && a.opts.Breaks != nil {
+		n = a.opts.Breaks.EveryN()
+	}
+	if n > 0 {
+		return n
 	}
 	return a.cfg.BreakEveryNTracks
 }
@@ -1769,10 +2069,18 @@ func (a *App) SetCadence(n int) error {
 	if n < 1 || n > 100 {
 		return fmt.Errorf("cadence must be between 1 and 100 tracks, got %d", n)
 	}
-	if a.opts.Breaks == nil {
+	if !a.hasDJ() {
 		return fmt.Errorf("no DJ is running")
 	}
-	a.opts.Breaks.SetCadence(station.NewCadence(n))
+	// EVERY STATION, and the config default too, so a station that comes up
+	// tomorrow inherits the choice rather than the value it was built with.
+	a.cfg.BreakEveryNTracks = n
+	a.eachBreaks(func(_ int64, br *stationBreaks) {
+		br.pipeline.SetCadence(station.NewCadence(n))
+	})
+	if a.opts.Breaks != nil {
+		a.opts.Breaks.SetCadence(station.NewCadence(n))
+	}
 
 	// THE CONFIG FIELD IS NOT UPDATED HERE. It is the startup default, and
 	// writing it from an HTTP handler raced with the overview handler reading

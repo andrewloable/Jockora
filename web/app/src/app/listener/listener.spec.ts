@@ -67,4 +67,40 @@ describe('Listener', () => {
     expect(fixture.componentInstance.stationId()).toBeNull();
     expect(fixture.nativeElement.querySelector('[data-thumbsdown]')).toBeNull();
   });
+
+  // THE FEATURE WAS BUILT AND NEVER CONNECTED. The transcript lives in the
+  // component that polls /now.json; the button that rates it lives one
+  // component sideways, reading a signal nothing ever wrote to. Unit-tested at
+  // 100% against a directly-supplied input, and impossible to reach in the
+  // running app.
+  function tuned() {
+    const fixture = mounted();
+    fixture.nativeElement.querySelector('[data-station]').click();
+    ctrl.expectOne('/tune').flush({ hls: '/hls/3/stream.m3u8', station_id: 3 });
+    fixture.detectChanges();
+    return fixture;
+  }
+
+  it('rating a break offers nothing before a break has aired', () => {
+    const fixture = tuned();
+    ctrl.expectOne('/now.json?station=3').flush({ now: { artist: 'A', title: 'B' } });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-thumbsdown]')).toBeNull();
+  });
+
+  it('rating a break offers the thumbs-down once a break has aired', () => {
+    const fixture = tuned();
+    ctrl.expectOne('/now.json?station=3').flush({
+      now: { artist: 'A', title: 'B' },
+      last_break: { text: 'Three in the morning and that one still holds up.' },
+    });
+    fixture.detectChanges();
+
+    const button = fixture.nativeElement.querySelector('[data-thumbsdown]');
+    expect(button).toBeTruthy();
+    button.click();
+    const req = ctrl.expectOne('/feedback');
+    expect(req.request.body).toEqual({ station_id: 3, verdict: 'down' });
+    req.flush(null);
+  });
 });

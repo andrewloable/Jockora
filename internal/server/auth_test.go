@@ -397,6 +397,9 @@ func (f fakeUsers) ListUsers(context.Context) ([]store.User, error) {
 func (f fakeUsers) CreateUser(context.Context, string, string, string) (int64, error) {
 	return 0, errors.New("not implemented by this fake")
 }
+func (f fakeUsers) UpdateUser(context.Context, int64, string, string) error {
+	return errors.New("not implemented by this fake")
+}
 func (f fakeUsers) DisableUser(context.Context, int64) error {
 	return errors.New("not implemented by this fake")
 }

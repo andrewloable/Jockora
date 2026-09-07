@@ -298,7 +298,10 @@ func GenerateAdPool(ctx context.Context, w Writer, p *Persona, n int) ([]Ad, err
 func generateOneAd(ctx context.Context, w Writer, p *Persona, existing []Ad, category string) (Ad, error) {
 	var lastErr error
 	for attempt := 0; attempt < adAttempts; attempt++ {
-		raw, err := w.WriteBreak(ctx, buildAdPrompt(p, existing, category, lastErr), AdSchema())
+		// Zero: an advert's length is set by the writer it was built with, not
+		// by a window, because an advert is placed between tracks where the gap
+		// is as long as it needs to be.
+		raw, err := w.WriteBreak(ctx, buildAdPrompt(p, existing, category, lastErr), AdSchema(), 0)
 		if err != nil {
 			return Ad{}, err
 		}

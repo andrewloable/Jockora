@@ -26,8 +26,20 @@ func Ready(genre string, tracks int, enrichmentDone bool) (bool, string) {
 	// seeded dial station uses "unsorted" and the dossier vocabulary's fallback
 	// is "other", and a rule that knew only one of them would gate the very
 	// station that has to work on day one.
-	if isCatchAll(genre) || enrichmentDone || tracks >= WarnStationTracks {
+	if anyCatchAll(genre) || enrichmentDone || tracks >= WarnStationTracks {
 		return true, ""
 	}
 	return false, "still filling"
+}
+
+// anyCatchAll reads the stored, comma-joined genre and asks whether any of its
+// values is a catch-all. A station that includes the catch-all is ready for the
+// same reason a purely catch-all one is: its pool does not wait on enrichment.
+func anyCatchAll(genre string) bool {
+	for _, g := range SplitList(genre) {
+		if isCatchAll(g) {
+			return true
+		}
+	}
+	return false
 }

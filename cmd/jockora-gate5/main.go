@@ -120,7 +120,7 @@ func rawPass(ctx context.Context, w dj.Writer, p *dj.Persona, dossiers []*enrich
 				cooling = append(cooling, id)
 			}
 		}
-		out, err := w.WriteBreak(ctx, prompt, dj.BreakSchemaExcluding(prev, cur, next, cooling))
+		out, err := w.WriteBreak(ctx, prompt, dj.BreakSchemaExcluding(prev, cur, next, cooling), 0)
 		if err != nil {
 			fmt.Printf("  %2d  model error: %v\n", i+1, err)
 			continue
@@ -161,7 +161,7 @@ func validatedPass(ctx context.Context, v *dj.Validator, p *dj.Persona, dossiers
 		// measures a configuration the product never runs, and counts naming
 		// the record as repetition.
 		v.SetTrackNames(namesAt(names, i)...)
-		if _, err := v.Generate(ctx, prompt, prev, cur, next); err != nil {
+		if _, err := v.Generate(ctx, prompt, 0, prev, cur, next); err != nil {
 			dropped++
 			fmt.Printf("  %2d  DROPPED  %v\n", i+1, truncate(err.Error(), 88))
 			continue

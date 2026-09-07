@@ -15,7 +15,7 @@ import (
 // It exists from the very first migration, not from the first time the schema
 // changes. Retrofitting versioning after dossiers exist means either discarding
 // hours of enrichment or hand-writing a recovery script.
-const CurrentSchemaVersion = 8
+const CurrentSchemaVersion = 9
 
 // migrations are applied in order; index i brings the schema to version i+1.
 var migrations = []string{
@@ -253,6 +253,43 @@ var migrations = []string{
 	-- an index on genre would buy nothing measurable and would have to be
 	-- dropped before the column on any future schema change.
 	ALTER TABLE tracks ADD COLUMN genre TEXT;
+	`,
+
+	// 9: an operator's own tags for a track, and ONE definition of what a
+	// track's tags are.
+	//
+	// A HAND EDIT IS NOT A DOSSIER EDIT. Genres and moods live inside the
+	// dossier the enrichment wrote, and a dossier is rewritten whenever it is
+	// missing -- which includes the requeue path an operator reaches for after
+	// a model change. An edit written INTO the dossier would therefore survive
+	// until the next re-enrichment and then vanish, which is worse than not
+	// offering the edit at all.
+	//
+	// So the override is a row of its own that OUTRANKS the dossier, and
+	// effective_tags is the only place the two are combined. Every reader --
+	// the station filter, the playlist listing, the catch-all -- goes through
+	// it, so a future reader cannot forget the override exists.
+	`
+	CREATE TABLE track_tags (
+		track_id     INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+		station_tags TEXT NOT NULL,
+		mood         TEXT NOT NULL,
+		updated_at   INTEGER NOT NULL
+	);
+
+	-- overridden is carried because the CATCH-ALL needs it: a dossier that
+	-- could assert nothing belongs in "unsorted", but a track an operator has
+	-- since placed by hand does not, even though its dossier still says
+	-- nothing.
+	CREATE VIEW effective_tags AS
+	SELECT t.id AS track_id,
+	       coalesce(o.station_tags, json_extract(d.json, '$.station_tags'), '[]') AS station_tags,
+	       coalesce(o.mood,         json_extract(d.json, '$.mood'),         '[]') AS mood,
+	       coalesce(d.confidence, '') AS confidence,
+	       o.track_id IS NOT NULL AS overridden
+	  FROM tracks t
+	  LEFT JOIN dossiers d   ON d.track_id = t.id
+	  LEFT JOIN track_tags o ON o.track_id = t.id;
 	`,
 }
 

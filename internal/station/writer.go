@@ -105,6 +105,30 @@ func (w *BreakWriter) SetTrackNames(names ...string) {
 // the music continues; that is the designed outcome for a repetitive line, a
 // refusal, or a model that is not running at all.
 func (w *BreakWriter) Write(ctx context.Context, wordTarget int, placement mix.Placement) (string, error) {
+	in, err := w.promptInput(ctx, wordTarget, placement)
+	if err != nil {
+		return "", err
+	}
+	prompt, err := dj.BuildBreakPrompt(in)
+	if err != nil {
+		return "", fmt.Errorf("building the break prompt: %w", err)
+	}
+
+	b, err := w.Validator.Generate(ctx, prompt, wordTarget, in.Previous, in.Current, in.Next)
+	if err != nil {
+		return "", err
+	}
+	return b.Text(), nil
+}
+
+// promptInput gathers everything the prompt is built from.
+//
+// SPLIT OUT SO THE GATHERING IS TESTABLE ON ITS OWN. Reaching it through Write
+// costs a language model, and the half of this that goes wrong is exactly the
+// half in here: a query widened and nothing passing the new columns on reads
+// precisely like the bug it was meant to fix.
+func (w *BreakWriter) promptInput(ctx context.Context, wordTarget int,
+	placement mix.Placement) (dj.PromptInput, error) {
 	w.mu.Lock()
 	prevID, curID, nextID := w.prevID, w.curID, w.nextID
 	prevArtist, prevTitle := w.prevArtist, w.prevTitle
@@ -112,24 +136,27 @@ func (w *BreakWriter) Write(ctx context.Context, wordTarget int, placement mix.P
 
 	prev, err := w.dossier(ctx, prevID)
 	if err != nil {
-		return "", err
+		return dj.PromptInput{}, err
 	}
 	cur, err := w.dossier(ctx, curID)
 	if err != nil {
-		return "", err
+		return dj.PromptInput{}, err
 	}
 	next, err := w.dossier(ctx, nextID)
 	if err != nil {
-		return "", err
+		return dj.PromptInput{}, err
 	}
 
 	// The names of the records either side of the break, read from the same
 	// place the dossiers come from. Without them the writer has to invent a
 	// title for whatever it is introducing, and it does.
-	curArtist, curTitle := w.names(ctx, curID)
-	nextArtist, nextTitle := w.names(ctx, nextID)
+	// ALBUM AND YEAR TRAVEL WITH THEM. The scanner writes both and the prompt
+	// prints them only where there is no dossier, so an unenriched record has
+	// more than a bare title to be interesting about.
+	curArtist, curTitle, curAlbum, curYear := w.names(ctx, curID)
+	nextArtist, nextTitle, nextAlbum, nextYear := w.names(ctx, nextID)
 
-	prompt, err := dj.BuildBreakPrompt(dj.PromptInput{
+	return dj.PromptInput{
 		Persona:        w.persona(),
 		Previous:       prev,
 		Current:        cur,
@@ -140,22 +167,17 @@ func (w *BreakWriter) Write(ctx context.Context, wordTarget int, placement mix.P
 		CurrentTitle:   curTitle,
 		NextArtist:     nextArtist,
 		NextTitle:      nextTitle,
+		CurrentAlbum:   curAlbum,
+		CurrentYear:    curYear,
+		NextAlbum:      nextAlbum,
+		NextYear:       nextYear,
 		Placement:      placement.String(),
 		// The window the writer aims at, derived from the target it was given
 		// rather than passed separately, so the two can never disagree.
 		WindowSeconds: float64(wordTarget) / dj.WordsPerSecond,
 		Schema:        dj.BreakSchema(prev, cur, next),
 		IsColdOpen:    w.Session.IsColdOpen(),
-	})
-	if err != nil {
-		return "", fmt.Errorf("building the break prompt: %w", err)
-	}
-
-	b, err := w.Validator.Generate(ctx, prompt, prev, cur, next)
-	if err != nil {
-		return "", err
-	}
-	return b.Text(), nil
+	}, nil
 }
 
 // names reads one track's artist and title.
@@ -163,13 +185,14 @@ func (w *BreakWriter) Write(ctx context.Context, wordTarget int, placement mix.P
 // A missing name is not an error and not worth a log line: the scanner falls
 // back to the filename, so an empty result here means the row is genuinely
 // nameless, and the prompt simply omits it.
-func (w *BreakWriter) names(ctx context.Context, id int64) (artist, title string) {
+func (w *BreakWriter) names(ctx context.Context, id int64) (artist, title, album string, year int) {
 	if id == 0 || w.Store == nil {
-		return "", ""
+		return "", "", "", 0
 	}
-	_ = w.Store.DB().QueryRowContext(ctx,
-		`SELECT COALESCE(artist,''), COALESCE(title,'') FROM tracks WHERE id = ?`, id).Scan(&artist, &title)
-	return artist, title
+	_ = w.Store.DB().QueryRowContext(ctx, `
+		SELECT COALESCE(artist,''), COALESCE(title,''), COALESCE(album,''), COALESCE(year,0)
+		  FROM tracks WHERE id = ?`, id).Scan(&artist, &title, &album, &year)
+	return artist, title, album, year
 }
 
 // dossier reads one track's dossier. A track with none is not an error: it
@@ -190,3 +213,16 @@ func (w *BreakWriter) dossier(ctx context.Context, id int64) (*enrich.Dossier, e
 
 // Aired records that a break went out, which clears the cold open.
 func (w *BreakWriter) Aired() { w.Session.BreakAired() }
+
+// Stats is how the break writer has been doing, for the console.
+//
+// The validator has counted breaks, drops and the REASON for each drop since it
+// was written, and nothing outside a gate tool ever read them -- so an operator
+// asking why the DJ is quiet had the answer sitting in memory with no way to
+// see it.
+func (w *BreakWriter) Stats() (dj.Stats, bool) {
+	if w == nil || w.Validator == nil {
+		return dj.Stats{}, false
+	}
+	return w.Validator.Stats(), true
+}

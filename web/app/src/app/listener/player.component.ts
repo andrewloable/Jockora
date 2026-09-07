@@ -18,7 +18,37 @@ const RETRY_MS = 2000;
   selector: 'app-player',
   standalone: true,
   template: `
-    <audio data-player controls preload="none"></audio>
+    <!-- NO "controls" ATTRIBUTE. The browser's own widget hands a live stream a
+         draggable scrub bar and a running duration -- measured seekable
+         [0, 60.01] on the live station, with a readout of "0:28 / 0:44" that is
+         the HLS buffer window and not a length any listener could mean. What is
+         left is the two controls this product allows. -->
+    <audio
+      data-player
+      preload="none"
+      (play)="playing.set(true)"
+      (pause)="playing.set(false)"
+    ></audio>
+    <p data-transport>
+      <button type="button" data-playpause (click)="toggle()">
+        {{ playing() ? 'Stop' : 'Listen' }}
+      </button>
+      <label data-volume-label>
+        Volume
+        <input
+          data-volume
+          type="range"
+          min="0"
+          max="1"
+          step="0.01"
+          [value]="volume()"
+          (input)="setVolume($any($event.target).value)"
+        />
+      </label>
+      <!-- WHERE THE TIME USED TO BE. A live stream has no position, so it says
+           the one true thing about where the listener is in it. -->
+      <span data-live>Live</span>
+    </p>
     <p data-status>{{ status() }}</p>
   `,
 })
@@ -34,6 +64,37 @@ export class Player implements OnDestroy {
 
   readonly status = signal('Pick a station to start listening.');
 
+  /**
+   * Whether sound is coming out, followed from the ELEMENT rather than set on
+   * the click: a stream that stops on its own would otherwise leave the button
+   * claiming it was still playing.
+   */
+  readonly playing = signal(false);
+  readonly volume = signal(1);
+
+  private audio(): HTMLAudioElement {
+    return this.host.nativeElement.querySelector('[data-player]');
+  }
+
+  /** The only transport this product has: on, or off. */
+  toggle(): void {
+    const audio = this.audio();
+    if (!this.playing()) {
+      // A rejected play() is a browser refusing sound without a gesture, or a
+      // stream that is not there yet. The status line already says which, and
+      // an unhandled rejection in the console helps nobody.
+      void audio.play().catch(() => undefined);
+      return;
+    }
+    audio.pause();
+  }
+
+  setVolume(value: string): void {
+    const level = Number(value);
+    this.volume.set(level);
+    this.audio().volume = level;
+  }
+
   constructor() {
     effect(() => {
       const src = this.src();
@@ -44,7 +105,7 @@ export class Player implements OnDestroy {
   }
 
   private play(src: string): void {
-    const audio: HTMLAudioElement = this.host.nativeElement.querySelector('[data-player]');
+    const audio = this.audio();
 
     // HLS.JS FIRST, AND canPlayType IS NOT A RELIABLE ANSWER.
     //

@@ -119,4 +119,35 @@ describe('Dial', () => {
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-station]').disabled).toBe(false);
   });
+
+  // THE MOOD LINE RAN OUTSIDE ITS OWN CARD. The server joins moods with bare
+  // commas, and in the monospace face
+  // "melancholic,euphoric,calm,nocturnal,lonely,hypnotic" is one unbreakable
+  // 51-character token: measured 377px of text inside a 206px card at 1280px,
+  // and 20px of sideways scroll on the whole page at 390px.
+  it('dial card writes moods with breaks between them', () => {
+    const fixture = TestBed.createComponent(Dial);
+    ctrl.expectOne('/stations.json').flush({
+      stations: [
+        {
+          id: 1,
+          name: 'NIGHT ROCK',
+          genre: 'rock,alternative',
+          mood: 'melancholic,euphoric,calm,nocturnal,lonely,hypnotic',
+          tracks: 515,
+          listeners: 0,
+        },
+      ],
+    });
+    fixture.detectChanges();
+
+    const line = fixture.nativeElement.querySelector('[data-station] small').textContent;
+    expect(line).toContain('melancholic, euphoric, calm, nocturnal, lonely, hypnotic');
+    // Not truncated: a listener choosing a station is exactly who needs to know
+    // what is on it.
+    expect(line).not.toContain('…');
+    // And no token long enough to push the card open again.
+    const longest = Math.max(...line.trim().split(/\s+/).map((w: string) => w.length));
+    expect(longest).toBeLessThanOrEqual(12);
+  });
 });

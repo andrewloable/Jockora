@@ -44,6 +44,7 @@ type Users interface {
 	GetUserByID(ctx context.Context, id int64) (store.User, error)
 	ListUsers(ctx context.Context) ([]store.User, error)
 	CreateUser(ctx context.Context, name, pwHash, role string) (int64, error)
+	UpdateUser(ctx context.Context, id int64, name, role string) error
 	DisableUser(ctx context.Context, id int64) error
 	EnableUser(ctx context.Context, id int64) error
 	DeleteUser(ctx context.Context, id int64) error

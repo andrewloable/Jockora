@@ -19,6 +19,8 @@ export interface DialStation {
 /** What /now.json says about one station. */
 export interface NowPlaying {
   now?: { artist: string; title: string } | null;
+  /** "ready", "writing" or "none": what the DJ is about to do. */
+  next_break?: string;
   last_break?: { text: string; aired_at: number; placement: string } | null;
   enrichment?: { done: number; total: number; pct: number } | null;
 }
@@ -34,8 +36,11 @@ export interface Source {
 export interface Station {
   id: number;
   name: string;
+  /** The stored, comma-joined form. Read genres/moods to edit. */
   genre: string;
   mood?: string;
+  genres: string[];
+  moods: string[];
   jock_id?: string;
   enabled: boolean;
   tracks: number;
@@ -60,6 +65,17 @@ export interface User {
   disabled: boolean;
 }
 
+/** What an import did, counter by counter. */
+export interface ImportReport {
+  applied: number;
+  had_dossier: number;
+  had_override: number;
+  unmatched: number;
+  wrong_track: number;
+  rejected: number;
+  unreadable: number;
+}
+
 export interface PlaylistTrack {
   track_id: number;
   artist: string;
@@ -69,6 +85,19 @@ export interface PlaylistTrack {
   pinned: boolean;
   excluded: boolean;
   missing: boolean;
+  genres: string[];
+  moods: string[];
+  /** True when an operator re-tagged this track by hand. */
+  overridden?: boolean;
+  /** Measured tempo. Zero means the analyser has not reached it yet. */
+  bpm?: number;
+}
+
+/** What a track counts as: the operator's tags where they exist, else the dossier's. */
+export interface TrackTags {
+  genres: string[];
+  moods: string[];
+  overridden: boolean;
 }
 
 export interface Diff {
@@ -182,6 +211,16 @@ export class AdminApi {
     return this.http.post<void>(`/admin/sources/${id}/${on ? 'enable' : 'disable'}`, {});
   }
 
+  /**
+   * Merge an enrichment export into this library.
+   *
+   * The FILE ITSELF, not a form: the server reads a gzipped JSONL stream, and
+   * wrapping it in multipart would mean unwrapping it again for no gain.
+   */
+  importEnrichment(file: File): Observable<ImportReport> {
+    return this.http.post<ImportReport>('/admin/enrichment/import', file);
+  }
+
   rescan(): Observable<unknown> {
     return this.http.post<unknown>('/admin/rescan', {});
   }
@@ -190,11 +229,26 @@ export class AdminApi {
     return this.http.get<Station[]>('/admin/stations');
   }
 
-  addStation(body: { name: string; genre: string; mood?: string }): Observable<{
+  addStation(body: { name: string; genres: string[]; moods: string[] }): Observable<{
     id: number;
     tracks: number;
   }> {
     return this.http.post<{ id: number; tracks: number }>('/admin/stations', body);
+  }
+
+  /**
+   * Rename a station or change what it selects.
+   *
+   * Returns the playlist DIFF, because the server regenerates after an edit:
+   * a station's tracks are materialised from its genre and mood, so changing
+   * either restates the whole playlist and the operator has to be told by how
+   * much.
+   */
+  updateStation(
+    id: number,
+    body: { name: string; genres: string[]; moods: string[] },
+  ): Observable<Diff> {
+    return this.http.put<Diff>(`/admin/stations/${id}`, body);
   }
 
   removeStation(id: number): Observable<void> {
@@ -226,6 +280,21 @@ export class AdminApi {
     return this.http.post<void>(`/admin/stations/${stationId}/tracks/${trackId}/${action}`, {});
   }
 
+  /**
+   * Re-tag one track.
+   *
+   * TRACK-SCOPED, not station-scoped, because that is what it changes: the same
+   * track on another station shows the same tags, and both are right.
+   */
+  setTrackTags(trackId: number, genres: string[], moods: string[]): Observable<TrackTags> {
+    return this.http.put<TrackTags>(`/admin/tracks/${trackId}/tags`, { genres, moods });
+  }
+
+  /** Drop the edit and put the enrichment's own answer back. */
+  revertTrackTags(trackId: number): Observable<TrackTags> {
+    return this.http.delete<TrackTags>(`/admin/tracks/${trackId}/tags`);
+  }
+
   regenerate(id: number): Observable<Diff> {
     return this.http.post<Diff>(`/admin/stations/${id}/regenerate`, {});
   }
@@ -250,6 +319,11 @@ export class AdminApi {
 
   addUser(body: { name: string; password: string; role: string }): Observable<{ id: number }> {
     return this.http.post<{ id: number }>('/admin/users', body);
+  }
+
+  /** Rename an account or change its role. The password has its own route. */
+  updateUser(id: number, body: { name: string; role: string }): Observable<void> {
+    return this.http.put<void>(`/admin/users/${id}`, body);
   }
 
   setUserEnabled(id: number, on: boolean): Observable<void> {

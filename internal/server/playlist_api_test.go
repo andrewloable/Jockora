@@ -50,6 +50,7 @@ func playlistServer(t *testing.T, n int) (*Server, *store.Store, int64) {
 	}
 
 	s.SetPlaylists(st)
+	s.SetEnrichmentPort(enrich.NewPort(st))
 	s.SetStations(st, func(ctx context.Context, sid int64) (station.Diff, error) {
 		return station.Regenerate(ctx, st, sid)
 	}, nil)
@@ -323,8 +324,9 @@ func TestPlaylistAPIRoleMatrix(t *testing.T) {
 
 // brokenPlaylists fails every call.
 type brokenPlaylists struct {
-	err    error
-	pageOK bool
+	err        error
+	pageOK     bool
+	tagWriteOK bool
 }
 
 func (b brokenPlaylists) StationTrackPage(context.Context, int64, int, int) (
@@ -336,6 +338,23 @@ func (b brokenPlaylists) StationTrackPage(context.Context, int64, int, int) (
 }
 func (b brokenPlaylists) SetPinned(context.Context, int64, int64, bool) error   { return b.err }
 func (b brokenPlaylists) SetExcluded(context.Context, int64, int64, bool) error { return b.err }
+func (b brokenPlaylists) SetTrackTags(context.Context, int64, []string, []string) error {
+	// tagWriteOK separates "the write failed" from "the write landed and
+	// reading it back failed", which are different answers to the operator.
+	if b.tagWriteOK {
+		return nil
+	}
+	return b.err
+}
+func (b brokenPlaylists) ClearTrackTags(context.Context, int64) error {
+	if b.tagWriteOK {
+		return nil
+	}
+	return b.err
+}
+func (b brokenPlaylists) TrackTags(context.Context, int64) (store.TrackTags, error) {
+	return store.TrackTags{}, b.err
+}
 
 func TestPlaylistAPISurfacesFailures(t *testing.T) {
 	boom := errors.New("the database went away")

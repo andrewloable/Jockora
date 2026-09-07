@@ -39,7 +39,17 @@ var (
 const MaxNotableLine = 120
 
 // maxTags is how many station tags and moods a dossier may carry.
-const maxTags = 3
+//
+// FIVE. It was three, which is a reasonable number of labels for one record and
+// a poor one for a library: a station is now a UNION of genres and moods, so a
+// track carrying only its three strongest tags is a track that quietly misses
+// the stations it half belongs to. The cost is a slightly longer dossier, and
+// the vocabularies are closed so the extra two cannot be inventions.
+const maxTags = 5
+
+// MaxTags is maxTags for callers outside this package: the operator console
+// enforces the same cap on a hand edit that the schema enforces on the model.
+const MaxTags = maxTags
 
 // Dossier is the DJ's entire factual knowledge of one track.
 //

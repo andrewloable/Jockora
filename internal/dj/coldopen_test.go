@@ -87,7 +87,7 @@ func TestColdOpenObeysSaidLinesIndex(t *testing.T) {
 	w := &scriptedWriter{replies: []string{breakJSON(greeting), breakJSON(greeting)}}
 	v.Writer = w
 
-	if _, err := v.Generate(ctx, "cold open prompt", nil, nil, nil); err == nil {
+	if _, err := v.Generate(ctx, "cold open prompt", 0, nil, nil, nil); err == nil {
 		t.Error("a repeated cold-open greeting was allowed through the validator")
 	}
 	if w.calls != MaxAttempts {

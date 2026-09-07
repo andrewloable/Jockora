@@ -349,7 +349,7 @@ func mustServer(t *testing.T) *Server {
 // TestNonLoopbackRequiresExplicitOptIn: containers need 0.0.0.0 because
 // 127.0.0.1 is reachable only inside their own network namespace. That is a
 // real need, and it must still be a decision rather than a default: this
-// program has no authentication.
+// program speaks plain HTTP.
 func TestNonLoopbackRequiresExplicitOptIn(t *testing.T) {
 	for _, addr := range []string{"0.0.0.0:0", ":0", "192.168.1.10:0"} {
 		if _, err := New(Config{ListenAddr: addr, SegmentDir: t.TempDir()}, nil); err == nil {

@@ -22,7 +22,7 @@ type scriptedWriter struct {
 	calls   int
 }
 
-func (w *scriptedWriter) WriteBreak(ctx context.Context, prompt string, schema map[string]any) (string, error) {
+func (w *scriptedWriter) WriteBreak(ctx context.Context, prompt string, schema map[string]any, _ int) (string, error) {
 	i := w.calls
 	w.calls++
 	if i < len(w.errs) && w.errs[i] != nil {
@@ -47,7 +47,10 @@ func validator(t *testing.T, w Writer) *Validator {
 	return &Validator{Writer: w, Said: saidStore(t)}
 }
 
-func TestValidateCollisionTriggersOneRegeneration(t *testing.T) {
+// TestValidateCollisionDropsTheBreak. It used to regenerate once. The writer now
+// gets ONE generation and a rejected break is dropped, which is a designed
+// outcome: the music continues and nothing about it is audible as a fault.
+func TestValidateCollisionDropsTheBreak(t *testing.T) {
 	v := validator(t, nil)
 	ctx := context.Background()
 	if err := v.Said.Record(ctx, "They cut it in a converted chapel outside Bristol."); err != nil {
@@ -60,15 +63,11 @@ func TestValidateCollisionTriggersOneRegeneration(t *testing.T) {
 	}}
 	v.Writer = w
 
-	b, err := v.Generate(ctx, "prompt", nil, nil, nil)
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
+	if _, err := v.Generate(ctx, "prompt", 0, nil, nil, nil); !errors.Is(err, ErrBreakRepetitive) {
+		t.Fatalf("Generate returned %v, want ErrBreakRepetitive", err)
 	}
-	if w.calls != 2 {
-		t.Errorf("%d generate calls, want exactly 2", w.calls)
-	}
-	if !strings.Contains(b.Text(), "saxophones") {
-		t.Errorf("returned break = %q, want the clean one", b.Text())
+	if w.calls != 1 {
+		t.Errorf("%d generate calls, want exactly 1", w.calls)
 	}
 }
 
@@ -85,7 +84,7 @@ func TestValidateSecondCollisionDropsBreak(t *testing.T) {
 	}}
 	v.Writer = w
 
-	b, err := v.Generate(ctx, "prompt", nil, nil, nil)
+	b, err := v.Generate(ctx, "prompt", 0, nil, nil, nil)
 	if !errors.Is(err, ErrBreakRepetitive) {
 		t.Fatalf("err = %v, want ErrBreakRepetitive", err)
 	}
@@ -97,7 +96,11 @@ func TestValidateSecondCollisionDropsBreak(t *testing.T) {
 	}
 }
 
-func TestValidateUngroundedTriggersRegeneration(t *testing.T) {
+// TestValidateUngroundedKeepsTheBreakAndDropsTheClaim. It used to be fatal, on
+// the reasoning that the schema enum makes an ungrounded id unrepresentable --
+// true of a grammar-constrained backend and not of a hosted one. Measured live:
+// the model declared the fact TEXT and every fact-bearing break was lost.
+func TestValidateUngroundedKeepsTheBreakAndDropsTheClaim(t *testing.T) {
 	v := validator(t, nil)
 	cur := dossierWith(enrich.ConfidenceHigh, "The band formed in 1980.")
 
@@ -107,15 +110,19 @@ func TestValidateUngroundedTriggersRegeneration(t *testing.T) {
 	}}
 	v.Writer = w
 
-	b, err := v.Generate(context.Background(), "prompt", nil, cur, nil)
+	b, err := v.Generate(context.Background(), "prompt", 0, nil, cur, nil)
 	if err != nil {
-		t.Fatalf("Generate: %v", err)
+		t.Fatalf("a break was lost over its declaration: %v", err)
 	}
-	if w.calls != 2 {
-		t.Errorf("%d generate calls, want 2", w.calls)
+	if len(b.AssertedFacts) != 0 {
+		t.Errorf("AssertedFacts = %v, want the unresolvable one removed", b.AssertedFacts)
 	}
-	if len(b.AssertedFacts) != 1 || b.AssertedFacts[0] != "cur.artist_facts[0]" {
-		t.Errorf("AssertedFacts = %v", b.AssertedFacts)
+	if w.calls != 1 {
+		t.Errorf("%d generate calls, want 1", w.calls)
+	}
+	// Counted, so the console can show that the model is mislabelling.
+	if got := v.Stats().Ungrounded; got != 1 {
+		t.Errorf("Ungrounded = %d, want 1", got)
 	}
 }
 
@@ -132,8 +139,12 @@ func TestValidateCleanBreakIsRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	v.Writer = &scriptedWriter{replies: []string{breakJSON(rejected), breakJSON(accepted)}}
-	if _, err := v.Generate(ctx, "prompt", nil, nil, nil); err != nil {
+	// The clean one FIRST now: with a single generation there is no second
+	// chance, and what this test is about is that a rejected break is never
+	// recorded -- so the rejected text is put into the index up front and the
+	// break that airs is checked against it.
+	v.Writer = &scriptedWriter{replies: []string{breakJSON(accepted)}}
+	if _, err := v.Generate(ctx, "prompt", 0, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -184,14 +195,14 @@ func TestValidateDropRateIsCounted(t *testing.T) {
 				t.Fatal(err)
 			}
 			v.Writer = &scriptedWriter{replies: []string{breakJSON(line), breakJSON(line)}}
-			if _, err := v.Generate(ctx, "p", nil, nil, nil); !errors.Is(err, ErrBreakRepetitive) {
+			if _, err := v.Generate(ctx, "p", 0, nil, nil, nil); !errors.Is(err, ErrBreakRepetitive) {
 				t.Fatalf("break %d: err = %v, want a drop", i, err)
 			}
 			continue
 		}
 
 		v.Writer = &scriptedWriter{replies: []string{breakJSON(line)}}
-		if _, err := v.Generate(ctx, "p", nil, nil, nil); err != nil {
+		if _, err := v.Generate(ctx, "p", 0, nil, nil, nil); err != nil {
 			t.Fatalf("break %d (%q): %v", i, line, err)
 		}
 	}
@@ -212,7 +223,7 @@ func TestValidateLLMErrorIsADropNotAPanic(t *testing.T) {
 	v := validator(t, &scriptedWriter{errs: []error{
 		errors.New("connection refused"), errors.New("connection refused")}})
 
-	if _, err := v.Generate(context.Background(), "p", nil, nil, nil); err == nil {
+	if _, err := v.Generate(context.Background(), "p", 0, nil, nil, nil); err == nil {
 		t.Fatal("an unreachable model produced no error")
 	}
 	if got := v.Stats().Reasons[DropLLMError]; got != 1 {
@@ -305,7 +316,7 @@ func TestValidateGoldenCollisionOutsideInjectionWindow(t *testing.T) {
 	}}
 	v.Writer = w
 
-	_, err := v.Generate(context.Background(), "prompt", nil, nil, nil)
+	_, err := v.Generate(context.Background(), "prompt", 0, nil, nil, nil)
 	if !errors.Is(err, ErrBreakRepetitive) {
 		t.Fatalf("a collision with seeded row 1, 199 rows back, was not caught: %v\n"+
 			"the validator and the prompt are looking at the same narrow window", err)
@@ -321,7 +332,7 @@ func TestGenerateNamesTheRealDropReason(t *testing.T) {
 		Writer: &scriptedWriter{replies: []string{"not json at all", "still not json"}},
 		Said:   saidStore(t),
 	}
-	_, err := v.Generate(context.Background(), "prompt", nil, nil, nil)
+	_, err := v.Generate(context.Background(), "prompt", 0, nil, nil, nil)
 	if err == nil {
 		t.Fatal("accepted two malformed responses")
 	}

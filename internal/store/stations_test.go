@@ -466,6 +466,11 @@ func TestStationsTrackPage(t *testing.T) {
 	if err := s.ReplaceStationTracks(ctx, id, []int64{1, 2, 3, 4, 5}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.DB().Exec(
+		`INSERT INTO dossiers (track_id, json, confidence) VALUES (1, ?, 'high')`,
+		`{"station_tags":["rock","indie"],"mood":["upbeat"]}`); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.SetPinned(ctx, id, 2, true); err != nil {
 		t.Fatal(err)
 	}
@@ -494,6 +499,9 @@ func TestStationsTrackPage(t *testing.T) {
 	if !rows[1].Excluded {
 		t.Errorf("the excluded track is not flagged: %+v", rows[1])
 	}
+	if len(rows[0].Genres) != 0 || len(rows[0].Moods) != 0 {
+		t.Errorf("track 2 has no dossier, want empty genres/moods, got %+v", rows[0])
+	}
 
 	all, _, err := s.StationTrackPage(ctx, id, 50, 0)
 	if err != nil {
@@ -501,6 +509,14 @@ func TestStationsTrackPage(t *testing.T) {
 	}
 	if len(all) != 5 {
 		t.Fatalf("%d rows", len(all))
+	}
+	// The dossier's own tags travel with the row, so an operator curating a
+	// playlist can see why a track landed here.
+	if want := []string{"rock", "indie"}; !reflect.DeepEqual(all[0].Genres, want) {
+		t.Errorf("Genres = %v, want %v", all[0].Genres, want)
+	}
+	if want := []string{"upbeat"}; !reflect.DeepEqual(all[0].Moods, want) {
+		t.Errorf("Moods = %v, want %v", all[0].Moods, want)
 	}
 	// Missing tracks are LISTED and flagged, so an operator can see why a
 	// station shrank.

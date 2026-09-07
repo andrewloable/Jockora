@@ -23,7 +23,9 @@ describe('Admin', () => {
     for (const req of ctrl.match(() => true)) {
       const url = req.request.url;
       req.flush(
-        url === '/admin/vocab'
+        url === '/me'
+          ? { name: 'mandark', role: 'admin' }
+          : url === '/admin/vocab'
           ? { genres: ['rock'], moods: [] }
           : url === '/admin/voices'
             ? { voices: [] }
@@ -142,7 +144,7 @@ describe('Admin', () => {
 
     // Clicked for real, so the output BINDING is exercised too -- it was the
     // binding that was missing, not the handler.
-    const row = fixture.nativeElement.querySelector('[data-edit]');
+    const row = fixture.nativeElement.querySelector('[data-playlist]');
     expect(row).not.toBeNull();
     row.click();
     fixture.detectChanges();
@@ -174,5 +176,27 @@ describe('Admin', () => {
     expect(adminRoutes[0].path).toBe('');
     expect(adminRoutes[0].component).toBe(Admin);
     expect(adminRoutes[0].canActivate).toEqual([adminGuard]);
+  });
+
+  it('says who is signed in, so the title is not read as a name', () => {
+    // Reported as "i logged in as mandark but the admin page shows operator":
+    // the title said "Jockora — operator", meaning the operator CONSOLE, and a
+    // page that never named the account left that as the only candidate.
+    const fixture = mounted();
+    const who = fixture.nativeElement.querySelector('[data-whoami]').textContent;
+    expect(who).toContain('mandark');
+    expect(who).toContain('admin');
+    expect(fixture.nativeElement.querySelector('h1').textContent).toContain('console');
+  });
+
+  it('names nobody when the session has gone', () => {
+    const fixture = TestBed.createComponent(Admin);
+    fixture.detectChanges();
+    ctrl.expectOne('/me').flush(null, { status: 401, statusText: 'Unauthorized' });
+    for (const req of ctrl.match(() => true)) {
+      req.flush({});
+    }
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-whoami]')).toBeNull();
   });
 });

@@ -1,6 +1,6 @@
 import { Component, OnDestroy, inject, signal } from '@angular/core';
 import { DecimalPipe } from '@angular/common';
-import { AdminApi } from '../api/api';
+import { AdminApi, ImportReport } from '../api/api';
 
 /**
  * What the station knows about itself, and the two things worth changing
@@ -20,53 +20,162 @@ const REFRESH_MS = 10_000;
   imports: [DecimalPipe],
   template: `
     <h2>Overview</h2>
-    @if (rows().length) {
-      <table data-overview>
-        @for (row of rows(); track row.key) {
-          <tr>
-            <th>{{ row.key }}</th>
-            <td>{{ row.value }}</td>
-          </tr>
-        }
-      </table>
-    }
 
-    <fieldset>
-      <legend>Break cadence</legend>
-      <input
-        data-cadence
-        type="number"
-        min="1"
-        max="100"
-        [value]="cadence()"
-        (input)="editCadence(+$any($event.target).value)"
-      />
-      <button type="button" data-set-cadence (click)="saveCadence()">Set</button>
-    </fieldset>
+    <section>
+      <h3>Library</h3>
+      @if (lib(); as l) {
+        <p data-library-line>
+          <strong>{{ l.tracks | number }}</strong> files scanned,
+          <strong>{{ l.playable | number }}</strong> of them playable.
+        </p>
+      }
 
-    <fieldset>
-      <legend>Enrichment</legend>
       @if (progress(); as p) {
         <div data-enrich-progress>
           <progress [value]="p.done" [max]="p.total"></progress>
           <p data-enrich-line>
-            <strong>{{ p.done | number }} of {{ p.total | number }}</strong> tracks
-            ({{ p.pct }}%) · {{ p.state }}
+            Dossiers <strong>{{ p.done | number }} of {{ p.total | number }}</strong> ({{ p.pct }}%)
+            · {{ p.state }}
           </p>
           <p data-enrich-eta>{{ p.eta }}</p>
+        </div>
+
+        <!-- LOUDNESS IS THE OTHER SLOW PASS and it was a bare integer in a
+               flat table. It is the reason one record arrives louder than the
+               last, so how far along it is belongs beside the dossiers. -->
+        <div data-enrich-progress>
+          <progress [value]="loud().done" [max]="loud().total"></progress>
+          <p data-loudness-line>
+            Loudness <strong>{{ loud().done | number }} of {{ loud().total | number }}</strong> ({{
+              loud().pct
+            }}%)
+          </p>
         </div>
       } @else {
         <p data-enrich-progress>Nothing scanned yet.</p>
       }
-      <button type="button" data-pause (click)="setEnriching(false)">Pause</button>
+
+      <button type="button" data-pause (click)="setEnriching(false)">Pause enrichment</button>
       <button type="button" data-resume (click)="setEnriching(true)">Resume</button>
-    </fieldset>
+
+      @if (cost(); as c) {
+        <p data-cost-line>
+          {{ c.perTrack }} per track · {{ c.wall }} of model time so far · {{ c.tokens }} tokens.
+        </p>
+      }
+      @if (failures() > 0) {
+        <p data-failures>
+          {{ failures() | number }} tracks could not be measured for loudness. They play at their
+          own level.
+        </p>
+      }
+    </section>
+
+    <section>
+      <h3>The DJ</h3>
+      <p>
+        A break every
+        <input
+          data-cadence
+          type="number"
+          min="1"
+          max="100"
+          [value]="cadence()"
+          (input)="editCadence(+$any($event.target).value)"
+        />
+        tracks.
+        <button type="button" data-set-cadence (click)="saveCadence()">Set</button>
+      </p>
+      <p data-dj-line>
+        {{ num('said_lines') | number }} lines spoken so far · {{ num('adverts') | number }} adverts
+        in the pool.
+      </p>
+    </section>
+
+    <section>
+      <h3>What listeners said</h3>
+      <div data-feedback>
+        @if (feedback().length) {
+          <ul>
+            @for (f of feedback(); track f.at) {
+              <li>
+                {{ f.text }} <small>{{ f.jock }}</small>
+              </li>
+            }
+          </ul>
+        } @else {
+          <p>No thumbs-down yet.</p>
+        }
+      </div>
+    </section>
+
+    <!-- EVERY FIGURE, ONE CLICK AWAY. The flat dump was unreadable as a front
+         page and is still exactly what you want when something is wrong, so it
+         is kept rather than replaced -- in a native disclosure, which costs no
+         script and no state. -->
+    @if (rows().length) {
+      <details data-raw>
+        <summary>Every figure</summary>
+        <table data-overview>
+          @for (row of rows(); track row.key) {
+            <tr>
+              <th>{{ row.key }}</th>
+              <td>{{ row.value }}</td>
+            </tr>
+          }
+        </table>
+      </details>
+    }
+
+    <!-- ENRICHMENT IS THE MOST EXPENSIVE THING THIS SERVER MAKES: one model
+         pass per track, hours of wall clock, plus the loudness and ramp work on
+         top. It lived in exactly one place, so a rebuilt box started from
+         nothing. This is a download and an upload, and the REPORT is the half
+         that matters -- an import that silently does nothing is the failure to
+         design against. -->
+    <section>
+      <h3>Enrichment</h3>
+      <p>
+        <a data-export href="/admin/enrichment/export" download
+          >Download this library's enrichment</a
+        >
+        <small
+          >Dossiers, your own tag edits and the audio analysis. No accounts, no stations.</small
+        >
+      </p>
+      <p>
+        <label data-import-label>
+          Merge a file from another install
+          <input
+            data-import
+            type="file"
+            accept=".gz,application/gzip"
+            (change)="importEnrichment($event)"
+          />
+        </label>
+        <small>Fills holes only. Your own tag edits are never overwritten.</small>
+      </p>
+      @if (report(); as r) {
+        <ul data-import-report>
+          <li>{{ r.applied }} applied</li>
+          <li>{{ r.had_dossier }} already had a dossier</li>
+          <li>{{ r.had_override }} left alone because you had edited the tags</li>
+          <li>{{ r.unmatched }} unmatched, no file at that path here</li>
+          <li>{{ r.wrong_track }} refused, a different recording at that path</li>
+          <li>{{ r.rejected }} rejected</li>
+          <li>{{ r.unreadable }} unreadable lines</li>
+        </ul>
+      }
+    </section>
 
     <p data-said>{{ said() }}</p>
   `,
 })
 export class Overview implements OnDestroy {
   private readonly api = inject(AdminApi);
+
+  /** What the last import did. Null until one has been run. */
+  readonly report = signal<ImportReport | null>(null);
 
   readonly rows = signal<{ key: string; value: string }[]>([]);
   // The raw answer as well as the flattened rows: the table wants every field,
@@ -98,6 +207,62 @@ export class Overview implements OnDestroy {
    * track a minute needs a shape, not a pair of integers buried in a readout.
    * Reported as "does not show any progress" while it was in fact progressing.
    */
+  /** The library block, or null when the server has not said. */
+  lib(): { tracks: number; playable: number } | null {
+    const l = this.overview()['library'] as Record<string, number> | undefined;
+    if (!l || !l['tracks']) {
+      return null;
+    }
+    // No default on tracks: the guard above has already refused a library
+    // without one, so a fallback here would be a branch nothing can reach.
+    return { tracks: l['tracks'], playable: l['playable'] ?? 0 };
+  }
+
+  /** How much of the playable library has a loudness measurement. */
+  loud(): { done: number; total: number; pct: number } {
+    const l = (this.overview()['library'] ?? {}) as Record<string, number>;
+    const total = l['playable'] ?? 0;
+    const done = l['loudness_measured'] ?? 0;
+    return { done, total, pct: total ? Math.round((done / total) * 1000) / 10 : 0 };
+  }
+
+  /**
+   * What enrichment has cost, in units a person thinks in.
+   *
+   * The server reports 17.468946255848465 seconds a track and 25015.531038375
+   * seconds of wall time. Both are correct and neither is readable; seventeen
+   * significant figures in a console is noise pretending to be precision.
+   */
+  cost(): { perTrack: string; wall: string; tokens: string } | null {
+    const c = this.overview()['enrichment_cost'] as Record<string, number> | undefined;
+    if (!c || !c['tracks_measured']) {
+      return null;
+    }
+    return {
+      perTrack: `${Math.round(c['seconds_per_track'] ?? 0)}s`,
+      wall: duration(c['wall_seconds'] ?? 0),
+      tokens: compact(c['tokens'] ?? 0),
+    };
+  }
+
+  failures(): number {
+    return Number(this.overview()['analysis_failures'] ?? 0);
+  }
+
+  /** One top-level number, defaulting to zero rather than rendering undefined. */
+  num(key: string): number {
+    return Number(this.overview()[key] ?? 0);
+  }
+
+  feedback(): { verdict: string; jock: string; text: string; at: number }[] {
+    return (this.overview()['feedback'] ?? []) as {
+      verdict: string;
+      jock: string;
+      text: string;
+      at: number;
+    }[];
+  }
+
   progress(): { done: number; total: number; pct: number; state: string; eta: string } | null {
     const lib = (this.overview()['library'] ?? {}) as Record<string, number>;
     const total = lib['tracks'] ?? 0;
@@ -194,6 +359,30 @@ export class Overview implements OnDestroy {
 
   // The console mounts one section at a time, so a timer left running would
   // poll for a page nobody is looking at.
+  /**
+   * Merge an uploaded enrichment file.
+   *
+   * The report replaces the last one rather than accumulating: an operator
+   * reads the answer to the import they just ran, and a list of previous ones
+   * is a log, which is not what this screen is.
+   */
+  importEnrichment(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) {
+      return;
+    }
+    this.said.set('');
+    this.report.set(null);
+    this.api.importEnrichment(file).subscribe({
+      next: (r) => this.report.set(r),
+      // NAMED, not "something went wrong": the two things that go wrong here
+      // are a file this program did not write and one from a newer version,
+      // and both are the operator's to fix.
+      error: () => this.said.set('That file could not be read as an enrichment export.'),
+    });
+  }
+
   ngOnDestroy(): void {
     if (this.timer !== null) {
       clearInterval(this.timer);
@@ -214,4 +403,20 @@ export function flatten(o: unknown, prefix = ''): { key: string; value: string }
     out.push({ key, value: String(v) });
   }
   return out;
+}
+
+/** duration renders seconds as hours and minutes: 25015 -> "6h 57m". */
+export function duration(seconds: number): string {
+  const total = Math.round(seconds / 60);
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return h ? `${h}h ${m}m` : `${m}m`;
+}
+
+/** compact shortens a big count: 200933 -> "201k". */
+export function compact(n: number): string {
+  if (n >= 1_000_000) {
+    return `${Math.round(n / 100_000) / 10}M`;
+  }
+  return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
 }

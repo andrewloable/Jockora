@@ -30,7 +30,7 @@ import { Api, DialStation } from '../api/api';
               · {{ station.jock_name }}
             }
             @if (station.mood) {
-              · {{ station.mood }}
+              · {{ spaced(station.mood) }}
             }
             @if (station.listeners) {
               · {{ station.listeners }} listening
@@ -48,6 +48,23 @@ import { Api, DialStation } from '../api/api';
   `,
 })
 export class Dial {
+  /**
+   * The moods, with somewhere to break.
+   *
+   * The server stores and sends them comma-joined with no spaces, and in the
+   * monospace face "melancholic,euphoric,calm,nocturnal,lonely,hypnotic" is one
+   * unbreakable 51-character token: it drew 377px of text inside a 206px card
+   * and scrolled the whole listener page sideways on a phone. Not truncated --
+   * somebody choosing a station is exactly who needs to know what is on it.
+   */
+  spaced(list: string): string {
+    return list
+      .split(',')
+      .map((v) => v.trim())
+      .filter((v) => v)
+      .join(', ');
+  }
+
   private readonly api = inject(Api);
 
   readonly stations = signal<DialStation[]>([]);

@@ -35,7 +35,7 @@ func Regenerate(ctx context.Context, s *store.Store, stationID int64) (Diff, err
 	if err != nil {
 		return Diff{}, err
 	}
-	filter := Filter{Genre: st.Genre, Mood: st.Mood}
+	filter := Filter{Genres: SplitList(st.Genre), Moods: SplitList(st.Mood)}
 	wanted, err := filter.TrackIDs(ctx, s)
 	if err != nil {
 		return Diff{}, err

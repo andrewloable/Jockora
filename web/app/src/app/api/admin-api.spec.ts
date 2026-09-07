@@ -55,10 +55,10 @@ describe('AdminApi', () => {
     ['stations', () => api.stations().subscribe(), 'GET', '/admin/stations'],
     [
       'add station',
-      () => api.addStation({ name: 'ROCK', genre: 'rock' }).subscribe(),
+      () => api.addStation({ name: 'ROCK', genres: ['rock'], moods: [] }).subscribe(),
       'POST',
       '/admin/stations',
-      { name: 'ROCK', genre: 'rock' },
+      { name: 'ROCK', genres: ['rock'], moods: [] },
     ],
     ['remove station', () => api.removeStation(3).subscribe(), 'DELETE', '/admin/stations/3'],
     [

@@ -85,7 +85,7 @@ func TestFilterGenreOnly(t *testing.T) {
 	}
 	s := filterStore(t, rows...)
 
-	got := filterIDs(t, s, Filter{Genre: "synthwave"})
+	got := filterIDs(t, s, Filter{Genres: SplitList("synthwave")})
 	if !reflect.DeepEqual(got, []int64{1, 2, 3, 4, 5}) {
 		t.Errorf("= %v, want the five synthwave tracks in id order", got)
 	}
@@ -99,7 +99,7 @@ func TestFilterGenreAndMood(t *testing.T) {
 		filterTrack{tags: []string{"jazz"}, moods: []string{"nocturnal"}},
 	)
 
-	got := filterIDs(t, s, Filter{Genre: "synthwave", Mood: "nocturnal"})
+	got := filterIDs(t, s, Filter{Genres: SplitList("synthwave"), Moods: SplitList("nocturnal")})
 	if !reflect.DeepEqual(got, []int64{1, 3}) {
 		t.Errorf("= %v, want only the nocturnal synthwave", got)
 	}
@@ -114,7 +114,7 @@ func TestFilterEmptyMoodMeansAny(t *testing.T) {
 		filterTrack{tags: []string{"rock"}, moods: nil},
 	)
 
-	got := filterIDs(t, s, Filter{Genre: "rock"})
+	got := filterIDs(t, s, Filter{Genres: SplitList("rock")})
 	if !reflect.DeepEqual(got, []int64{1, 2, 3}) {
 		t.Errorf("= %v, want every rock track including the one with no mood", got)
 	}
@@ -129,11 +129,11 @@ func TestFilterExcludesMissingAndUnplayable(t *testing.T) {
 		filterTrack{tags: []string{"rock"}, moods: []string{"raw"}, unplayable: true},
 	)
 
-	if got := filterIDs(t, s, Filter{Genre: "rock"}); !reflect.DeepEqual(got, []int64{1}) {
+	if got := filterIDs(t, s, Filter{Genres: SplitList("rock")}); !reflect.DeepEqual(got, []int64{1}) {
 		t.Errorf("= %v, want only the track that is there and plays", got)
 	}
 	// The catch-all is held to the same rule.
-	if got := filterIDs(t, s, Filter{Genre: "other"}); len(got) != 0 {
+	if got := filterIDs(t, s, Filter{Genres: SplitList("other")}); len(got) != 0 {
 		t.Errorf("the catch-all offered %v", got)
 	}
 }
@@ -141,11 +141,16 @@ func TestFilterExcludesMissingAndUnplayable(t *testing.T) {
 func TestFilterUnknownGenreErrors(t *testing.T) {
 	s := filterStore(t, filterTrack{tags: []string{"synthwave"}})
 
-	for _, genre := range []string{"vaporwave", "Rock", "ROCK", "", "rock "} {
-		if err := (Filter{Genre: genre}).Validate(); !errors.Is(err, ErrBadVocabulary) {
+	// Case and near-misses are still refused. EMPTY IS NO LONGER HERE: an
+	// absent genre means "any genre" now, the same way an absent mood has
+	// always meant any mood. And an untrimmed "rock " never reaches Validate
+	// because SplitList is the parser and trimming is what it is for -- so it
+	// is asserted against the LIST directly, where a caller could still put it.
+	for _, genre := range []string{"vaporwave", "Rock", "ROCK", "rock "} {
+		if err := (Filter{Genres: []string{genre}}).Validate(); !errors.Is(err, ErrBadVocabulary) {
 			t.Errorf("genre %q validated: %v", genre, err)
 		}
-		if _, err := (Filter{Genre: genre}).TrackIDs(context.Background(), s); !errors.Is(err, ErrBadVocabulary) {
+		if _, err := (Filter{Genres: []string{genre}}).TrackIDs(context.Background(), s); !errors.Is(err, ErrBadVocabulary) {
 			t.Errorf("genre %q selected tracks: %v", genre, err)
 		}
 	}
@@ -155,7 +160,7 @@ func TestFilterUnknownMoodErrors(t *testing.T) {
 	s := filterStore(t, filterTrack{tags: []string{"rock"}, moods: []string{"raw"}})
 
 	for _, mood := range []string{"sad", "Raw", "happy"} {
-		f := Filter{Genre: "rock", Mood: mood}
+		f := Filter{Genres: SplitList("rock"), Moods: SplitList(mood)}
 		if err := f.Validate(); !errors.Is(err, ErrBadVocabulary) {
 			t.Errorf("mood %q validated: %v", mood, err)
 		}
@@ -163,7 +168,7 @@ func TestFilterUnknownMoodErrors(t *testing.T) {
 			t.Errorf("mood %q selected tracks: %v", mood, err)
 		}
 	}
-	if err := (Filter{Genre: "rock", Mood: "raw"}).Validate(); err != nil {
+	if err := (Filter{Genres: SplitList("rock"), Moods: SplitList("raw")}).Validate(); err != nil {
 		t.Errorf("a mood in the vocabulary was refused: %v", err)
 	}
 }
@@ -180,7 +185,7 @@ func TestFilterOtherIsCatchAll(t *testing.T) {
 		filterTrack{tags: []string{"rock"}, moods: []string{"raw"}},
 	)
 
-	got := filterIDs(t, s, Filter{Genre: "other"})
+	got := filterIDs(t, s, Filter{Genres: SplitList("other")})
 	if !reflect.DeepEqual(got, []int64{1, 2, 3}) {
 		t.Errorf("= %v, want the tagged, the unenriched and the unplaceable", got)
 	}
@@ -201,14 +206,14 @@ func TestFilterSecondaryTagMatches(t *testing.T) {
 		filterTrack{tags: []string{"electronic"}, moods: []string{"nocturnal"}},
 	)
 
-	if got := filterIDs(t, s, Filter{Genre: "synthwave"}); !reflect.DeepEqual(got, []int64{1}) {
+	if got := filterIDs(t, s, Filter{Genres: SplitList("synthwave")}); !reflect.DeepEqual(got, []int64{1}) {
 		t.Errorf("synthwave = %v, want the track whose second tag it is", got)
 	}
-	if got := filterIDs(t, s, Filter{Genre: "electronic"}); !reflect.DeepEqual(got, []int64{1, 2}) {
+	if got := filterIDs(t, s, Filter{Genres: SplitList("electronic")}); !reflect.DeepEqual(got, []int64{1, 2}) {
 		t.Errorf("electronic = %v, want both", got)
 	}
 	// Once each, not once per matching tag.
-	if got := filterIDs(t, s, Filter{Genre: "electronic"}); len(got) != 2 {
+	if got := filterIDs(t, s, Filter{Genres: SplitList("electronic")}); len(got) != 2 {
 		t.Errorf("a track with two tags was returned %d times", len(got))
 	}
 }
@@ -225,10 +230,10 @@ func TestFilterMatchesExactly(t *testing.T) {
 		filterTrack{tags: []string{"rock and roll"}, moods: []string{"raw"}},
 	)
 
-	if got := filterIDs(t, s, Filter{Genre: "rock"}); !reflect.DeepEqual(got, []int64{2, 3}) {
+	if got := filterIDs(t, s, Filter{Genres: SplitList("rock")}); !reflect.DeepEqual(got, []int64{2, 3}) {
 		t.Errorf("genre = %v, want only the exactly-tagged tracks", got)
 	}
-	if got := filterIDs(t, s, Filter{Genre: "rock", Mood: "raw"}); !reflect.DeepEqual(got, []int64{3}) {
+	if got := filterIDs(t, s, Filter{Genres: SplitList("rock"), Moods: SplitList("raw")}); !reflect.DeepEqual(got, []int64{3}) {
 		t.Errorf("genre and mood = %v, want only the exact match on both", got)
 	}
 }
@@ -242,10 +247,10 @@ func TestFilterCountsATrackOnce(t *testing.T) {
 		filterTrack{tags: []string{"rock"}, moods: []string{"raw", "raw"}},
 	)
 
-	if got := filterIDs(t, s, Filter{Genre: "rock"}); !reflect.DeepEqual(got, []int64{1, 2}) {
+	if got := filterIDs(t, s, Filter{Genres: SplitList("rock")}); !reflect.DeepEqual(got, []int64{1, 2}) {
 		t.Errorf("= %v, want each track once", got)
 	}
-	if got := filterIDs(t, s, Filter{Genre: "rock", Mood: "raw"}); !reflect.DeepEqual(got, []int64{1, 2}) {
+	if got := filterIDs(t, s, Filter{Genres: SplitList("rock"), Moods: SplitList("raw")}); !reflect.DeepEqual(got, []int64{1, 2}) {
 		t.Errorf("with a mood = %v, want each track once", got)
 	}
 }
@@ -258,7 +263,7 @@ func TestFilterExcludesMissingFromEveryQuery(t *testing.T) {
 		filterTrack{tags: []string{"rock"}, moods: []string{"raw"}, unplayable: true},
 		filterTrack{tags: []string{"rock"}, moods: []string{"raw"}},
 	)
-	for _, f := range []Filter{{Genre: "rock"}, {Genre: "rock", Mood: "raw"}} {
+	for _, f := range []Filter{{Genres: []string{"rock"}}, {Genres: []string{"rock"}, Moods: []string{"raw"}}} {
 		if got := filterIDs(t, s, f); !reflect.DeepEqual(got, []int64{3}) {
 			t.Errorf("%+v = %v, want only the playable, present track", f, got)
 		}
@@ -272,11 +277,11 @@ func TestFilterDeterministicOrder(t *testing.T) {
 	}
 	s := filterStore(t, rows...)
 
-	first := filterIDs(t, s, Filter{Genre: "rock"})
+	first := filterIDs(t, s, Filter{Genres: SplitList("rock")})
 	for i := 0; i < 5; i++ {
 		// An unstable pool makes a seeded selector produce a different
 		// sequence on every run of the same library.
-		if got := filterIDs(t, s, Filter{Genre: "rock"}); !reflect.DeepEqual(got, first) {
+		if got := filterIDs(t, s, Filter{Genres: SplitList("rock")}); !reflect.DeepEqual(got, first) {
 			t.Fatalf("call %d gave %v, the first gave %v", i, got, first)
 		}
 	}
@@ -292,10 +297,10 @@ func TestFilterSurfacesFailures(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	if _, err := (Filter{Genre: "rock"}).TrackIDs(ctx, s); err == nil {
+	if _, err := (Filter{Genres: SplitList("rock")}).TrackIDs(ctx, s); err == nil {
 		t.Error("a genre filter succeeded on a closed store")
 	}
-	if _, err := (Filter{Genre: "other"}).TrackIDs(ctx, s); err == nil {
+	if _, err := (Filter{Genres: SplitList("other")}).TrackIDs(ctx, s); err == nil {
 		t.Error("the catch-all succeeded on a closed store")
 	}
 }

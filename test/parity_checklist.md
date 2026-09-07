@@ -22,7 +22,7 @@ reach.
 
 | page | line | behaviour | spec file | spec name |
 |---|---|---|---|---|
-| index.html | 51 | `#player` — the audio element, with the browser's own controls | listener/player.component.spec.ts | offers the browser its own play, pause and volume |
+| index.html | 51 | `#player` — play, pause and volume (the browser's own controls were REPLACED, not lost: the native widget gave a live stream a scrub bar and a running duration, which the no-seek invariant forbids) | listener/player.component.spec.ts | player transport toggles play and pause |
 | index.html | 51 | `#player` — no skip and no seek, ever | listener/player.component.spec.ts | has no skip, next or seek control |
 | index.html | 55 | `#status` — what the page says before anybody has tuned | listener/listener.spec.ts | shows the player, the dial and what is on air |
 | index.html | 61 | `#dial` — the station list a person picks from | listener/dial.component.spec.ts | renders what a person picks a station by |
@@ -51,6 +51,6 @@ reach.
 | admin.html | 118 | `fetch(path)` — the write helper, POSTing enriching | admin/overview.component.spec.ts | pauses and resumes enrichment |
 | index.html | web_test | native HLS is used where hls.js cannot run, so iOS Safari still plays | listener/player.component.spec.ts | uses native HLS only where hls.js cannot run |
 | index.html | web_test | hls.js is the FIRST choice, because canPlayType lies — the old page checked native first and every non-Safari browser got silence | listener/player.component.spec.ts | uses hls.js on a browser that only CLAIMS it can play HLS |
-| index.html | web_test | no autoplay attribute and no `.play()`; browsers block it and the block looks like a broken stream | listener/player.component.spec.ts | never starts playing by itself |
+| index.html | web_test | no autoplay, and tuning alone never starts sound; browsers block autoplay and the block looks like a broken stream (the player now HAS a play button, so this is asserted on behaviour rather than on the absence of the string) | listener/player.component.spec.ts | never starts playing by itself |
 | index.html | web_test | no CDN; this has to work on a machine with no route to the internet | listener/player.component.spec.ts | loads nothing from a CDN |
 | index.html | web_test | hls.js is vendored rather than fetched | DROPPED | The hand-vendored `web/vendor/hls.light.min.js` is gone with the pages that loaded it. The Angular app takes hls.js from npm and Angular bundles it into the app, so it is still served from this server and never from a CDN — which is the guarantee that mattered — and `scripts/check-licences-node.sh` now covers its licence, which the vendored copy needed `LICENCES-MANUAL.md` to record by hand. |

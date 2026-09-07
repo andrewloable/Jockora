@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
-import { Overview, flatten } from './overview.component';
+import { Overview, compact, duration, flatten } from './overview.component';
 
 describe('Overview', () => {
   let ctrl: HttpTestingController;
@@ -324,5 +324,204 @@ describe('Overview', () => {
         'Nothing scanned yet',
       );
     });
+  });
+
+  describe('reading it without being the person who wrote it', () => {
+    // THE WHOLE PAGE WAS A FLATTENED JSON DUMP. Live, it read
+    // "enrichment_cost.seconds_per_track | 17.468946255848465" and
+    // "enrichment_cost.wall_seconds | 25015.531038375" beside dotted machine
+    // keys and a row for "feedback" that rendered as nothing at all, because
+    // an empty array stringifies to an empty string.
+    const live = {
+      adverts: 0,
+      analysis_failures: 0,
+      cadence: 1,
+      enriching: true,
+      enrichment_cost: {
+        seconds_per_track: 17.468946255848465,
+        tokens: 200933,
+        tracks_measured: 1432,
+        wall_seconds: 25015.531038375,
+      },
+      feedback: [],
+      library: {
+        bpm_measured: 0,
+        enriched: 1428,
+        loudness_measured: 4011,
+        playable: 7595,
+        tracks: 7696,
+      },
+      said_lines: 9,
+    };
+
+    it('says what the library holds in words and grouped digits', () => {
+      const text = mounted(live).nativeElement.querySelector('[data-library-line]').textContent;
+      expect(text).toContain('7,696');
+      expect(text).toContain('7,595');
+      expect(text).toMatch(/scanned|playable/);
+    });
+
+    it('shows loudness coverage as a bar, not a bare integer', () => {
+      const fixture = mounted(live);
+      const line = fixture.nativeElement.querySelector('[data-loudness-line]').textContent;
+      expect(line).toContain('4,011');
+      expect(line).toContain('7,595');
+      // 4011/7595 = 52.8%
+      expect(line).toContain('52.8');
+      const bars = fixture.nativeElement.querySelectorAll('progress');
+      expect(bars.length).toBe(2);
+    });
+
+    it('states the cost in units a person thinks in', () => {
+      const text = mounted(live).nativeElement.querySelector('[data-cost-line]').textContent;
+      // NOT 17.468946255848465, and NOT 25015.531038375.
+      expect(text).not.toContain('17.4689');
+      expect(text).not.toContain('25015');
+      expect(text).toContain('17s');
+      expect(text).toContain('6h 57m');
+      expect(text).toContain('201k');
+    });
+
+    it('says nobody has complained rather than rendering an empty row', () => {
+      expect(mounted(live).nativeElement.querySelector('[data-feedback]').textContent).toMatch(
+        /no thumbs-down|nothing/i,
+      );
+    });
+
+    it('lists thumbs-down when there are any', () => {
+      const fixture = mounted({
+        ...live,
+        feedback: [{ verdict: 'down', jock: 'dutch', text: 'that was rough', at: 1788780000 }],
+      });
+      const text = fixture.nativeElement.querySelector('[data-feedback]').textContent;
+      expect(text).toContain('that was rough');
+      expect(text).toContain('dutch');
+    });
+
+    it('mentions failures only when there are some', () => {
+      expect(mounted(live).nativeElement.querySelector('[data-failures]')).toBeNull();
+      const bad = mounted({ ...live, analysis_failures: 12 });
+      expect(bad.nativeElement.querySelector('[data-failures]').textContent).toContain('12');
+    });
+
+    it('keeps every raw figure, one click away', () => {
+      // The dump was unreadable as a front page and is still the thing you
+      // want when something is wrong.
+      const fixture = mounted(live);
+      const raw = fixture.nativeElement.querySelector('details[data-raw]');
+      expect(raw).not.toBeNull();
+      expect(raw.querySelector('[data-overview]').textContent).toContain('enrichment_cost.tokens');
+    });
+
+    it('survives an overview with nothing in it', () => {
+      const fixture = mounted({});
+      expect(fixture.nativeElement.querySelector('[data-library-line]')).toBeNull();
+      expect(fixture.nativeElement.querySelector('[data-cost-line]')).toBeNull();
+    });
+  });
+
+  it('renders an overview whose blocks are half filled in', () => {
+    // The server grows fields over time and an older one will not have them
+    // all. Every figure defaults rather than rendering "undefined" at an
+    // operator.
+    const fixture = mounted({
+      library: { tracks: 10 },
+      enrichment_cost: { tracks_measured: 5 },
+    });
+    expect(fixture.nativeElement.querySelector('[data-library-line]').textContent).toContain('10');
+    expect(fixture.nativeElement.querySelector('[data-loudness-line]').textContent).toContain('0');
+    expect(fixture.nativeElement.querySelector('[data-cost-line]').textContent).toContain('0s');
+    expect(fixture.nativeElement.querySelector('[data-dj-line]').textContent).toContain('0');
+    expect(fixture.nativeElement.querySelector('[data-feedback]').textContent).toContain(
+      'No thumbs-down',
+    );
+  });
+
+  it('reports no loudness coverage before anything is scanned', () => {
+    // Reached directly: the template only draws this bar inside the block that
+    // already proved there is a library, so nothing on screen can produce the
+    // empty case -- and a division by an absent total is worth pinning anyway.
+    expect(mounted({}).componentInstance.loud()).toEqual({ done: 0, total: 0, pct: 0 });
+  });
+
+  describe('units a person reads', () => {
+    it('turns seconds into hours and minutes', () => {
+      expect(duration(25015.531038375)).toBe('6h 57m');
+      expect(duration(180)).toBe('3m');
+      expect(duration(0)).toBe('0m');
+    });
+
+    it('shortens big counts and leaves small ones alone', () => {
+      expect(compact(200933)).toBe('201k');
+      expect(compact(1500)).toBe('2k');
+      expect(compact(999)).toBe('999');
+      // A long-running install passes a million tokens; "1000k" is not an
+      // improvement on the raw number.
+      expect(compact(2_450_000)).toBe('2.5M');
+    });
+  });
+
+  // ENRICHMENT IS THE MOST EXPENSIVE THING THIS PROGRAM MAKES and it lived in
+  // exactly one place. Moving it is a download and an upload, and the REPORT is
+  // the half that matters: an import that silently does nothing is the failure
+  // this screen exists to make impossible.
+  it('enrichment export offers the library as a file', () => {
+    const fixture = mounted();
+    const link = fixture.nativeElement.querySelector('[data-export]');
+    expect(link.getAttribute('href')).toBe('/admin/enrichment/export');
+    // download, so the browser saves it rather than navigating to it.
+    expect(link.hasAttribute('download')).toBe(true);
+  });
+
+  it('enrichment import reports what it did, counter by counter', () => {
+    const fixture = mounted();
+    const input = fixture.nativeElement.querySelector('[data-import]');
+    const file = new File(['x'], 'enrichment.jsonl.gz');
+    Object.defineProperty(input, 'files', { value: [file] });
+    input.dispatchEvent(new Event('change'));
+
+    const req = ctrl.expectOne('/admin/enrichment/import');
+    expect(req.request.method).toBe('POST');
+    req.flush({
+      applied: 412,
+      had_dossier: 9,
+      had_override: 2,
+      unmatched: 31,
+      wrong_track: 1,
+      rejected: 0,
+      unreadable: 0,
+    });
+    fixture.detectChanges();
+
+    const text = fixture.nativeElement.querySelector('[data-import-report]').textContent;
+    expect(text).toContain('412');
+    // EVERY counter, including the ones that are zero: "nothing was rejected"
+    // is a different statement from silence about rejections.
+    expect(text).toContain('unmatched');
+    expect(text).toContain('31');
+    expect(text).toContain('already had a dossier');
+  });
+
+  it('enrichment import says so when the file is refused', () => {
+    const fixture = mounted();
+    const input = fixture.nativeElement.querySelector('[data-import]');
+    Object.defineProperty(input, 'files', { value: [new File(['x'], 'notes.txt')] });
+    input.dispatchEvent(new Event('change'));
+    ctrl.expectOne('/admin/enrichment/import').flush('not an export', {
+      status: 400,
+      statusText: 'Bad Request',
+    });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain(
+      'could not be read',
+    );
+  });
+
+  it('enrichment import does nothing when no file is chosen', () => {
+    const fixture = mounted();
+    const input = fixture.nativeElement.querySelector('[data-import]');
+    Object.defineProperty(input, 'files', { value: [] });
+    input.dispatchEvent(new Event('change'));
+    ctrl.expectNone('/admin/enrichment/import');
   });
 });

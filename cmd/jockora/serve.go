@@ -85,22 +85,23 @@ func buildLibrary(ctx context.Context, cfg *config.Config, log *slog.Logger) (*a
 // for returning nil is logged at INFO with what to do about it, because the
 // failure a listener notices is silence, and the failure an operator needs to
 // see is "the DJ never started".
-func buildBreaks(ctx context.Context, cfg *config.Config, lib *app.Library, log *slog.Logger) (*station.Pipeline, *station.BreakWriter, *tts.Sidecar) {
+func buildBreaks(ctx context.Context, cfg *config.Config, lib *app.Library, log *slog.Logger) (
+	func(int64) (*station.Pipeline, *station.BreakWriter), *station.Pipeline, *station.BreakWriter, *tts.Sidecar) {
 	if cfg.PersonaPath == "" {
 		log.Info("no DJ: no persona configured", "fix", "start with -persona personas/ to pick a jock by genre")
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	persona, err := choosePersona(ctx, cfg.PersonaPath, lib, log)
 	if err != nil {
 		log.Error("no DJ: the persona could not be loaded", "path", cfg.PersonaPath, "err", err)
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	llm, _, err := newCompleter(ctx, cfg, log)
 	if err != nil {
 		log.Info("no DJ: no language model", "err", err,
 			"fix", "point -llm-url at a running server, add -llm-api ollama for Ollama, or set -llm-model to have Jockora run llama-server itself")
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	sidecar, err := tts.Start(ctx, tts.Config{
@@ -113,10 +114,40 @@ func buildBreaks(ctx context.Context, cfg *config.Config, lib *app.Library, log 
 	if err != nil {
 		log.Info("no DJ: the speech sidecar would not start",
 			"err", err, "fix", "check -tts-python and -tts-script, and that kokoro-onnx is installed")
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
+	// ONE PER STATION, built on demand.
+	//
+	// Almost everything below is per-broadcast state: the track context a break
+	// is written about, the cold open, the fact cooldown, the exemption list of
+	// a station's own titles, the drop counters, the cadence position. Two
+	// stations sharing one box meant B's break was written about A's records
+	// and B's first break was not a cold open because A had already aired one.
+	//
+	// SHARED ON PURPOSE, and only these: the model client, the speech sidecar
+	// and the store. All three are stateless per request, and the said-lines
+	// index is keyed by JOCK -- a listener moving between two stations with the
+	// same jock should not hear the same opening twice, which is the whole
+	// reason that index exists.
+	newBreaks := func(stationID int64) (*station.Pipeline, *station.BreakWriter) {
+		return buildStationBreaks(cfg, lib, log, llm, sidecar, persona, stationID)
+	}
+	pipeline, writer := newBreaks(0)
+	log.Info("DJ ready", "persona", persona.Name(), "voice", persona.VoiceID(),
+		"break_every_n_tracks", cfg.BreakEveryNTracks, "tts", sidecar.Addr())
+	return newBreaks, pipeline, writer, sidecar
+}
+
+// buildStationBreaks makes one station's pipeline and writer.
+func buildStationBreaks(cfg *config.Config, lib *app.Library, log *slog.Logger,
+	llm enrich.Completer, sidecar *tts.Sidecar, persona *dj.Persona,
+	stationID int64) (*station.Pipeline, *station.BreakWriter) {
+
 	writer := &station.BreakWriter{
+		// The station's own jock replaces this the moment it goes on air; the
+		// library-wide pick is what a station with no jock assigned falls back
+		// to, and what the spike path uses.
 		Persona:   persona,
 		Validator: &dj.Validator{Writer: dj.NewWriter(llm, 0), Said: &dj.SaidLines{Store: lib.Store, JockID: persona.ID()}},
 		Session:   dj.NewSession(),
@@ -146,11 +177,9 @@ func buildBreaks(ctx context.Context, cfg *config.Config, lib *app.Library, log 
 		},
 		FadeSeconds: cfg.CrossfadeSeconds,
 		Clock:       clock.Real{},
-		Log:         log,
+		Log:         log.With("station", stationID),
 	}
-	log.Info("DJ ready", "persona", persona.Name(), "voice", persona.VoiceID(),
-		"break_every_n_tracks", cfg.BreakEveryNTracks, "tts", sidecar.Addr())
-	return pipeline, writer, sidecar
+	return pipeline, writer
 }
 
 // startLLM attaches to a model server or starts one, whichever is configured.

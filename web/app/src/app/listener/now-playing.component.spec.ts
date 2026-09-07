@@ -120,4 +120,39 @@ describe('NowPlayingView', () => {
     ctrl.expectNone('/now.json?station=3');
     clear.mockRestore();
   });
+
+  // A break that is coming, one still being written, and one that was never
+  // scheduled are the same silence from here -- so a quiet station and a broken
+  // one read alike.
+  function tuned(payload: object) {
+    const fixture = TestBed.createComponent(Host);
+    fixture.detectChanges();
+    fixture.componentInstance.station.set(3);
+    fixture.detectChanges();
+    ctrl.expectOne('/now.json?station=3').flush(payload);
+    fixture.detectChanges();
+    return fixture;
+  }
+
+  it('says the DJ speaks after this track', () => {
+    const fixture = tuned({ now: null, next_break: 'ready' });
+    expect(fixture.nativeElement.querySelector('[data-nextbreak]').textContent).toContain(
+      'speaks after this track',
+    );
+  });
+
+  it('says the DJ is still writing', () => {
+    const fixture = tuned({ now: null, next_break: 'writing' });
+    expect(fixture.nativeElement.querySelector('[data-nextbreak]').textContent).toContain(
+      'writing a break',
+    );
+  });
+
+  it('says nothing when no break is coming', () => {
+    expect(
+      tuned({ now: null, next_break: 'none' }).nativeElement.querySelector('[data-nextbreak]'),
+    ).toBeNull();
+    // And a server that does not report it at all is not a crash.
+    expect(tuned({ now: null }).nativeElement.querySelector('[data-nextbreak]')).toBeNull();
+  });
 });

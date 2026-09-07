@@ -51,7 +51,7 @@ type Config struct {
 	// It exists for containers, where 127.0.0.1 is reachable only inside the
 	// container's own network namespace and a published port would never
 	// connect. It is an EXPLICIT opt-in and not a default, because this program
-	// still ships no authentication of any kind: turning it on publishes an
+	// still speaks plain HTTP: turning it on publishes an
 	// unauthenticated server to whatever network can reach the bind address.
 	AllowNonLoopback bool
 }
@@ -90,6 +90,7 @@ type Server struct {
 	jocks      Jocks
 	voices     Voices
 	personas   Personas
+	port       EnrichmentPort
 	playlists  Playlists
 	regenerate Regenerator
 	runtimes   Runtimes
@@ -105,7 +106,7 @@ func (s *Server) SetStatusSource(src StatusSource) { s.status = src }
 
 // New validates the configuration and opens the listener.
 //
-// A non-loopback listen address is refused. This program has no authentication
+// A non-loopback listen address is refused. This program speaks plain HTTP
 // of any kind, and self-hosters port-forward services routinely; binding
 // anywhere else publishes an unauthenticated server.
 func New(cfg Config, log *slog.Logger) (*Server, error) {
@@ -398,7 +399,7 @@ func checkLoopback(addr string) error {
 		return fmt.Errorf("server: listen address %q: %w", addr, err)
 	}
 	if host == "" {
-		return fmt.Errorf("server: listen address %q binds every interface; this server has no authentication, use 127.0.0.1", addr)
+		return fmt.Errorf("server: listen address %q binds every interface; this server speaks plain HTTP, use 127.0.0.1", addr)
 	}
 	if host == "localhost" {
 		return nil
@@ -408,7 +409,7 @@ func checkLoopback(addr string) error {
 		return fmt.Errorf("server: listen address %q: %q is not an IP address", addr, host)
 	}
 	if !ip.IsLoopback() {
-		return fmt.Errorf("server: listen address %q is not loopback; this server has no authentication, use 127.0.0.1", addr)
+		return fmt.Errorf("server: listen address %q is not loopback; this server speaks plain HTTP, use 127.0.0.1", addr)
 	}
 	return nil
 }

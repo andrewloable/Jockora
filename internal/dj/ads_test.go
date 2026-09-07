@@ -204,7 +204,7 @@ func saidLineCount(t *testing.T, s *SaidLines) int {
 // behaves once it has settled on a name it likes.
 type repeatWriter struct{ calls int }
 
-func (w *repeatWriter) WriteBreak(_ context.Context, _ string, _ map[string]any) (string, error) {
+func (w *repeatWriter) WriteBreak(_ context.Context, _ string, _ map[string]any, _ int) (string, error) {
 	w.calls++
 	return `{"brand":"Nordhaven Mattresses","script":"Nordhaven. Sleep like the tide went out and wake up somewhere better."}`, nil
 }

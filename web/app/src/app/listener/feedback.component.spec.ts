@@ -85,4 +85,27 @@ describe('Feedback', () => {
     fixture.nativeElement.querySelector('[data-thumbsdown]').click();
     ctrl.expectNone('/feedback');
   });
+
+  // ONE VERDICT PER BREAK, NOT ONE PER PAGE LOAD. sent() is what stops a double
+  // press on the same break; leaving it set through the next break meant a
+  // listener could rate exactly one thing per session, and the admin panel that
+  // reads these would see one row where there should be a shift's worth.
+  it('rating a break arms again when the next break airs', () => {
+    const fixture = mounted();
+    fixture.componentInstance.station.set(3);
+    fixture.componentInstance.transcript.set('Three in the morning.');
+    fixture.detectChanges();
+
+    fixture.nativeElement.querySelector('[data-thumbsdown]').click();
+    ctrl.expectOne('/feedback').flush(null);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-thumbsdown]').disabled).toBe(true);
+
+    fixture.componentInstance.transcript.set('And that is the news.');
+    fixture.detectChanges();
+    const button = fixture.nativeElement.querySelector('[data-thumbsdown]');
+    expect(button.disabled).toBe(false);
+    // And the acknowledgement of the PREVIOUS break is gone with it.
+    expect(fixture.nativeElement.querySelector('[data-said]').textContent.trim()).toBe('');
+  });
 });

@@ -27,7 +27,7 @@ func TestWriterPassesSchemaToTheSampler(t *testing.T) {
 	c := &stubCompleter{out: enrich.Completion{Content: `{"line":"hi"}`, StopType: "eos"}}
 	schema := map[string]any{"type": "object"}
 
-	got, err := NewWriter(c, 0).WriteBreak(context.Background(), "prompt", schema)
+	got, err := NewWriter(c, 0).WriteBreak(context.Background(), "prompt", schema, 0)
 	if err != nil {
 		t.Fatalf("WriteBreak: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestWriterPassesSchemaToTheSampler(t *testing.T) {
 // validator a clean drop reason instead of a parse failure it has to diagnose.
 func TestWriterRejectsTruncatedOutput(t *testing.T) {
 	c := &stubCompleter{out: enrich.Completion{Content: `{"line":"hi`, StopType: "limit", TokensPredicted: 200}}
-	_, err := NewWriter(c, 0).WriteBreak(context.Background(), "prompt", nil)
+	_, err := NewWriter(c, 0).WriteBreak(context.Background(), "prompt", nil, 0)
 	if err == nil {
 		t.Fatal("accepted a truncated break")
 	}
@@ -58,14 +58,14 @@ func TestWriterRejectsTruncatedOutput(t *testing.T) {
 
 func TestWriterRejectsEmptyContent(t *testing.T) {
 	c := &stubCompleter{out: enrich.Completion{Content: "", StopType: "eos"}}
-	if _, err := NewWriter(c, 0).WriteBreak(context.Background(), "p", nil); err == nil {
+	if _, err := NewWriter(c, 0).WriteBreak(context.Background(), "p", nil, 0); err == nil {
 		t.Fatal("accepted an empty break")
 	}
 }
 
 func TestWriterPropagatesModelErrors(t *testing.T) {
 	c := &stubCompleter{err: errors.New("connection refused")}
-	if _, err := NewWriter(c, 0).WriteBreak(context.Background(), "p", nil); err == nil {
+	if _, err := NewWriter(c, 0).WriteBreak(context.Background(), "p", nil, 0); err == nil {
 		t.Fatal("swallowed a model error")
 	}
 }
@@ -76,7 +76,7 @@ func TestWriterPropagatesModelErrors(t *testing.T) {
 // brand across forty attempts.
 func TestWriterUsesAWritingTemperature(t *testing.T) {
 	c := &stubCompleter{out: enrich.Completion{Content: `{"line":"hi"}`, StopType: "eos"}}
-	if _, err := NewWriter(c, 0).WriteBreak(context.Background(), "p", nil); err != nil {
+	if _, err := NewWriter(c, 0).WriteBreak(context.Background(), "p", nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	if c.got.Temperature != enrich.WritingTemperature {
@@ -84,7 +84,7 @@ func TestWriterUsesAWritingTemperature(t *testing.T) {
 			c.got.Temperature, enrich.WritingTemperature, enrich.DefaultTemperature)
 	}
 
-	if _, err := NewWriterAt(c, 0, enrich.InventionTemperature).WriteBreak(context.Background(), "p", nil); err != nil {
+	if _, err := NewWriterAt(c, 0, enrich.InventionTemperature).WriteBreak(context.Background(), "p", nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	if c.got.Temperature != enrich.InventionTemperature {

@@ -62,6 +62,11 @@ var matrix = []expectation{
 	{path: "/admin/sources", sample: "/admin/sources", role: auth.RoleAdmin},
 	{path: "/admin/stations", sample: "/admin/stations", role: auth.RoleAdmin},
 	{path: "/admin/jocks", sample: "/admin/jocks", role: auth.RoleAdmin},
+	// Re-filing a track is an admin act: it changes what every station
+	// containing it plays, not only the playlist it was edited from.
+	{path: "/admin/tracks", sample: "/admin/tracks/1/tags", role: auth.RoleAdmin},
+	// The library's accumulated enrichment, out and in.
+	{path: "/admin/enrichment", sample: "/admin/enrichment/export", role: auth.RoleAdmin},
 }
 
 func (e expectation) requestPath() string {

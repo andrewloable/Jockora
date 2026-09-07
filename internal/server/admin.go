@@ -15,7 +15,7 @@ import (
 // READS ARE OPEN AND WRITES ARE NOT. /now.json already exposes now-playing,
 // health and metrics on an unauthenticated service, so gating reads would break
 // the existing page and protect nothing new. Writes are different in kind: they
-// change what a listener hears, and Jockora ships no authentication at all.
+// change what a listener hears.
 type Admin interface {
 	// Overview is everything the operator page renders.
 	Overview() any

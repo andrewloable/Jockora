@@ -194,6 +194,35 @@ func (s *Store) DeleteUser(ctx context.Context, id int64) error {
 	return requireOneRow(res, id)
 }
 
+// UpdateUser changes an account's name and role.
+//
+// THE ROLE IS THE DANGEROUS HALF. Demoting the only enabled admin locks every
+// operator out of the console permanently -- there is no self-service way back,
+// only the jockora admin command on the host. So a demotion goes through the
+// same guard that refuses to delete or disable the last admin, and for the same
+// reason: these are three spellings of one mistake.
+//
+// A RENAME IS NOT A DEMOTION. The guard is asked only when the role is actually
+// leaving admin, so renaming a sole admin stays possible.
+func (s *Store) UpdateUser(ctx context.Context, id int64, name, role string) error {
+	if role != "admin" {
+		if err := s.guardLastAdmin(ctx, id); err != nil {
+			return err
+		}
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE users SET name = ?, role = ? WHERE id = ?`, name, role, id)
+	if err != nil {
+		// Same order as CreateUser: the nil check comes first, because
+		// isUniqueViolation reads the message and a nil error has none.
+		if isUniqueViolation(err) {
+			return fmt.Errorf("%w: %q", ErrUserExists, name)
+		}
+		return wrapErr(err, "updating user")
+	}
+	return requireOneRow(res, id)
+}
+
 // SetPassword replaces the stored hash.
 func (s *Store) SetPassword(ctx context.Context, id int64, pwHash string) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE users SET pw_hash = ? WHERE id = ?`, pwHash, id)
