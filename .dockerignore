@@ -27,3 +27,13 @@ CLAUDE.md
 segments/
 breaks-round-*.md
 test/gate2/results/
+
+# node_modules is hundreds of megabytes of the host's platform, and the web
+# stage runs npm ci to build its own from the lockfile. Sending it would be the
+# single largest thing in the context and would not be used.
+web/app/node_modules/
+
+# Build output. The web stage produces it; the host's copy is whatever somebody
+# last built by hand, and letting it into the context invites an image that
+# ships a stale bundle nobody can trace.
+web/dist/

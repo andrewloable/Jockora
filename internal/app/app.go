@@ -8,12 +8,17 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,15 +26,16 @@ import (
 
 	"database/sql"
 
+	"github.com/andrewloable/jockora/internal/auth"
 	"github.com/andrewloable/jockora/internal/clock"
 	"github.com/andrewloable/jockora/internal/config"
 	"github.com/andrewloable/jockora/internal/decode"
 	"github.com/andrewloable/jockora/internal/dj"
-	"github.com/andrewloable/jockora/internal/encode"
 	"github.com/andrewloable/jockora/internal/enrich"
 	"github.com/andrewloable/jockora/internal/library"
 	"github.com/andrewloable/jockora/internal/mix"
 	"github.com/andrewloable/jockora/internal/obs"
+	"github.com/andrewloable/jockora/internal/presence"
 	"github.com/andrewloable/jockora/internal/sched"
 	"github.com/andrewloable/jockora/internal/server"
 	"github.com/andrewloable/jockora/internal/station"
@@ -102,7 +108,13 @@ type track struct {
 
 // next chooses the following track from the database.
 func (l *Library) next(ctx context.Context) (track, error) {
-	id, err := l.Selector.Next()
+	return l.nextFrom(ctx, l.Selector)
+}
+
+// nextFrom draws from ONE STATION's selector. Each station is its own
+// timeline, so each has its own shuffle and its own position in it.
+func (l *Library) nextFrom(ctx context.Context, sel *station.Selector) (track, error) {
+	id, err := sel.Next()
 	if err != nil {
 		return track{}, err
 	}
@@ -116,6 +128,13 @@ func (l *Library) next(ctx context.Context) (track, error) {
 		return track{}, fmt.Errorf("reading track %d: %w", id, err)
 	}
 	t.artist, t.title, t.album, t.noCrossfadeNext = artist.String, title.String, album.String, gapless != 0
+
+	// A remote track is stored as a locator, not as a URL, so the credential
+	// stays out of the tracks table. It becomes an openable, signed URL HERE,
+	// one row before the decoder needs it.
+	if t.path, err = library.ResolvePath(ctx, l.Store, t.path); err != nil {
+		return track{}, err
+	}
 	return t, nil
 }
 
@@ -163,67 +182,21 @@ func applyTuning(cfg *config.Config, log *slog.Logger) {
 // anything slower leaves a new station invisible for most of an evening.
 const DialRefreshInterval = 5 * time.Minute
 
-// cachedDial holds the last computed dial and recomputes it on a timer.
-type cachedDial struct {
-	store    *store.Store
-	personas []*dj.Persona
-	log      *slog.Logger
-
-	mu sync.RWMutex
-	d  station.Dial
-}
-
-func (c *cachedDial) Dial() any {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.d
-}
-
-func (c *cachedDial) refresh(ctx context.Context) {
-	dial, err := station.ProposeDial(ctx, c.store, c.personas)
-	if err != nil {
-		// Not fatal, and the previous dial is kept: a stale dial is far better
-		// than an empty one. A dial is a nicety; the stream is not.
-		c.log.Warn("could not propose a dial", "err", err)
-		return
-	}
-
-	c.mu.Lock()
-	was := len(c.d.Stations)
-	c.d = dial
-	c.mu.Unlock()
-
-	if was != len(dial.Stations) {
-		c.log.Info("dial proposed", "stations", len(dial.Stations),
-			"enriched", dial.Enriched, "of", dial.Total)
-	}
-}
-
-// watch recomputes the dial until the context ends.
-func (c *cachedDial) watch(ctx context.Context) {
-	t := time.NewTicker(DialRefreshInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			c.refresh(ctx)
-		}
-	}
-}
-
-// App is one running station.
 type App struct {
 	cfg  *config.Config
 	opts Options
 	log  *slog.Logger
 
-	ring    *mix.Ring
-	queue   *sched.Queue
-	srv     *server.Server
-	sup     *encode.Supervisor
-	metrics mix.Metrics
+	// rt is the SPIKE PATH's single pipeline, used when there is no library to
+	// build stations from. With a library, the manager owns one runtime per
+	// station that has a listener and rt stays nil.
+	rt  *station.Runtime
+	srv *server.Server
+
+	// tracker counts listeners; mgr turns that into running stations. Both nil
+	// on the spike path, which has exactly one station and no presence.
+	tracker *presence.Tracker
+	mgr     *station.Manager
 
 	// stallUntil pauses the feeder, for the fault injection GATE 2 requires.
 	// Guarded because the signal handler and the feeder are different goroutines.
@@ -234,18 +207,18 @@ type App struct {
 	// schedules one window at startup and topUpBreaks continues from here.
 	nextBreak int64
 
-	nowMu               sync.Mutex
-	nowArtist, nowTitle string
-	lastBreak           *server.LastBreak
-
-	mixerMu sync.Mutex
-	mixer   *mix.Mixer
-
-	dial *cachedDial
+	nowMu     sync.Mutex
+	now       map[int64]nowPlaying
+	lastBreak *server.LastBreak
 
 	// enriching gates the background worker so an operator can hand the
 	// machine back for an evening without stopping the station.
 	enriching atomic.Bool
+
+	// rescan is the on-demand library scan. Present whenever there is a
+	// library to scan; the route that starts it lands with the rest of the
+	// admin API.
+	rescan *library.Rescan
 }
 
 // ringSeconds is how much decoded audio is buffered ahead of the mixer. Enough
@@ -255,6 +228,40 @@ const ringSeconds = 10
 
 // scheduleAhead bounds how far ahead repeating breaks are queued.
 const scheduleAhead = 2 * time.Hour
+
+// seedFromConfig fills the v0.2 tables on first run, in a FIXED ORDER.
+//
+// Sources, then jocks, then stations. Not a style choice: stations reference
+// jocks by foreign key, and the proposal reads the library the sources
+// describe. Any other order either fails on the key or proposes a dial for a
+// library nothing has scanned yet.
+//
+// Each step is a no-op once its table has a row, so this runs on every start
+// and does nothing on all but the first.
+func seedFromConfig(ctx context.Context, s *store.Store, cfg *config.Config,
+	personas []*dj.Persona, log *slog.Logger) error {
+	n, err := library.SeedSources(ctx, s, cfg)
+	if err != nil {
+		return err
+	}
+	log.Info("seeded sources", "n", n)
+
+	// An empty persona directory is NOT an error. A library with no jocks is a
+	// shuffle, and that is the state Jockora degrades to rather than refusing
+	// to boot -- and globbing an empty path would search the working directory.
+	if cfg.PersonaPath != "" {
+		if n, err = dj.SeedJocks(ctx, s, cfg.PersonaPath); err != nil {
+			return err
+		}
+		log.Info("seeded jocks", "n", n)
+	}
+
+	if n, err = station.SeedStations(ctx, s, personas); err != nil {
+		return err
+	}
+	log.Info("seeded stations", "n", n)
+	return nil
+}
 
 // New validates everything that can be validated before anything starts, then
 // opens the listener and spawns ffmpeg.
@@ -285,19 +292,19 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 		}
 	}
 
-	// The pipeline enqueues into the SAME queue the mixer drains, and it is
-	// wired here rather than by the caller because there is no way for the
-	// caller to have it: the queue is created below. Leaving it to be passed in
-	// produced a nil-pointer panic in the break goroutine that took the whole
-	// station off air.
-	queue := &sched.Queue{}
+	a := &App{cfg: cfg, opts: opts, log: log, now: map[int64]nowPlaying{}}
 
-	a := &App{
-		cfg:   cfg,
-		opts:  opts,
-		log:   log,
-		ring:  mix.NewRing(ringSeconds * mix.SampleRate),
-		queue: queue,
+	// THE SPIKE PATH keeps one runtime, started directly: no database means no
+	// stations, no listeners to count and nothing to reconcile. With a library
+	// the manager owns one runtime per station that has a listener, and this
+	// stays nil.
+	var queue *sched.Queue
+	if opts.Library == nil {
+		deps := a.runtimeDeps(nil)
+		deps.Feed = func(ctx context.Context, _ *mix.Ring, _ *sched.Queue) { a.feedTracks(ctx, a.rt) }
+		a.rt = station.NewRuntime(deps, singleStationID,
+			filepath.Join(cfg.SegmentDir, singleStationDir))
+		queue = a.rt.Queue()
 	}
 
 	// The pipeline enqueues into the SAME queue the mixer drains, and reports
@@ -305,12 +312,12 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 	// caller cannot have the queue -- it is created above. Leaving it to be
 	// passed in produced a nil-pointer panic in the break goroutine that took
 	// the whole station off air.
-	if opts.Breaks != nil {
+	if opts.Breaks != nil && queue != nil {
 		opts.Breaks.Queue = queue
 		opts.Breaks.OnScheduled = a.recordBreak
 	}
 
-	if opts.BreakPath != "" {
+	if opts.BreakPath != "" && queue != nil {
 		// Read it now rather than at airtime. A break that cannot be read is a
 		// dropped break, and finding that out mid-stream is much harder to
 		// diagnose than refusing to start.
@@ -325,7 +332,7 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 		}
 		for i := 0; i < count; i++ {
 			at := int64(opts.BreakAtSec+i*every) * mix.SampleRate
-			if err := a.queue.Enqueue(sched.Entry{
+			if err := queue.Enqueue(sched.Entry{
 				AfterSample: at,
 				Action:      sched.ActionSpliceAudio,
 				Path:        opts.BreakPath,
@@ -351,15 +358,14 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 		return nil, err
 	}
 	a.srv = srv
+	// Every listener needs an identity before they can be served, because
+	// presence is what starts and stops stations. Until sign-in lands this is
+	// a per-browser cookie, which is the right granularity anyway: two phones
+	// behind one NAT are two listeners.
+	srv.SetSessions(anonymousSession)
 	srv.SetStatusSource(a)
 	srv.SetTuner(a)
 	srv.SetAdmin(a)
-	srv.SetAdminToken(cfg.AdminToken)
-	if cfg.AdminToken == "" {
-		log.Info("admin writes are DISABLED",
-			"why", "no JOCKORA_ADMIN_TOKEN is set",
-			"detail", "the operator page reads fine; changing cadence or pausing enrichment needs a token")
-	}
 
 	// The dial is cached and REFRESHED PERIODICALLY, never computed per
 	// request: it reads every dossier in the library, which is fine every few
@@ -371,26 +377,220 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 	// would show "unsorted 7595" and nothing else until the operator happened
 	// to restart, and the dial is the PRIMARY UI.
 	if opts.Library != nil && opts.Library.Store != nil {
-		a.dial = &cachedDial{store: opts.Library.Store, personas: opts.Personas, log: log}
-		a.dial.refresh(context.Background())
-		srv.SetDialSource(a.dial)
+		// BEFORE the dial is built, so the first refresh sees the seeded
+		// tables rather than an empty database.
+		if err := seedFromConfig(context.Background(), opts.Library.Store, cfg,
+			opts.Personas, log); err != nil {
+			return nil, fmt.Errorf("app: seeding on first run: %w", err)
+		}
+		key, err := sessionKey(context.Background(), opts.Library.Store, cfg.SessionKey)
+		if err != nil {
+			return nil, err
+		}
+		signer, err := auth.NewSigner(key, time.Now)
+		if err != nil {
+			return nil, fmt.Errorf("app: session key: %w", err)
+		}
+		// SetAuth also makes the signed session the stream's identity, so the
+		// anonymous cookie above stops being used the moment accounts exist.
+		srv.SetAuth(signer, opts.Library.Store)
+
+		a.rescan = library.NewRescan(opts.Library.Store, clock.Real{})
+		srv.SetSources(opts.Library.Store, a.rescan)
+		srv.SetStations(opts.Library.Store, func(ctx context.Context, id int64) (station.Diff, error) {
+			return station.Regenerate(ctx, opts.Library.Store, id)
+		}, a.mgr)
+		var voices server.Voices
+		if cfg.TTSAddr != "" {
+			voices = newSidecarVoices(cfg.TTSAddr)
+		}
+		srv.SetJocks(opts.Library.Store, voices, a)
+		srv.SetPlaylists(opts.Library.Store)
+		// Presence is what starts and stops stations, so the server must be
+		// able to record a heartbeat before any of them can come up.
+		a.tracker = presence.New(clock.Real{}, ListenerGrace)
+		a.mgr = station.NewManager(a.tracker, opts.Library.Store, a.newStationRuntime,
+			clock.Real{}, ListenerGrace, MaxStations)
+		srv.SetPresence(a.tracker)
 	}
 
-	// The encoder comes up before the mixer, so the mixer never writes into a
-	// pipe that does not exist yet.
-	sup, err := encode.StartSupervisor(context.Background(), encode.Config{
-		SegmentDir:     cfg.SegmentDir,
-		SegmentSeconds: cfg.SegmentSeconds,
-		ListSize:       cfg.ListSize,
-		SampleRate:     cfg.SampleRate,
-		Channels:       cfg.Channels,
-	}, log)
+	// The encoder starts with the station, in Runtime.Start, rather than here.
+	// It used to spawn in New, which left an ffmpeg running for any caller
+	// that built an App and never ran it.
+	return a, nil
+}
+
+// singleStationID and singleStationDir are the one station this build runs.
+// 12d's manager replaces both with one runtime per active station.
+const (
+	singleStationID  = 1
+	singleStationDir = "1"
+)
+
+// sessionKeySetting is where the generated signing key lives.
+const sessionKeySetting = "session_key"
+
+// sessionKey resolves the secret that signs listener sessions.
+//
+// Generated once and kept in the database when the operator supplies none: a
+// key drawn fresh at every start would sign every listener out whenever the
+// server restarted, which on a home box is often.
+func sessionKey(ctx context.Context, s *store.Store, configured string) ([]byte, error) {
+	if configured != "" {
+		return []byte(configured), nil
+	}
+
+	stored, ok, err := s.Setting(ctx, sessionKeySetting)
 	if err != nil {
 		return nil, err
 	}
-	a.sup = sup
+	if !ok {
+		var b [32]byte
+		_, _ = rand.Read(b[:]) // documented never to fail; it crashes instead
+		stored = hex.EncodeToString(b[:])
+		if err := s.SetSetting(ctx, sessionKeySetting, stored); err != nil {
+			return nil, err
+		}
+	}
+	raw, err := hex.DecodeString(stored)
+	if err != nil {
+		return nil, fmt.Errorf("app: the stored session key is not readable: %w", err)
+	}
+	return raw, nil
+}
 
-	return a, nil
+// sessionCookie names the listener. A cookie rather than an address: two phones
+// behind one NAT are two listeners, and one laptop that changed network is
+// still one.
+const sessionCookie = "jockora_session"
+
+// anonymousSession identifies a listener without an account.
+//
+// A STOPGAP until sign-in lands, and deliberately not a security measure: it
+// says which browser is listening, which is all presence needs to start and
+// stop stations. Replaced wholesale when sessions become signed.
+func anonymousSession(w http.ResponseWriter, r *http.Request) (string, bool) {
+	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
+		return c.Value, true
+	}
+	// crypto/rand.Read is documented never to fail -- it crashes the program
+	// rather than handing back predictable bytes -- so there is no branch here
+	// that a test could reach.
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	id := hex.EncodeToString(b[:])
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookie, Value: id, Path: "/",
+		HttpOnly: true, SameSite: http.SameSiteLaxMode,
+	})
+	return id, true
+}
+
+// runtimeDeps is the pipeline configuration every station shares. sel is that
+// station's own draw; everything else is the same box.
+func (a *App) runtimeDeps(sel *station.Selector) station.Deps {
+	return station.Deps{
+		Log:            a.log,
+		Clock:          clock.Real{},
+		SampleRate:     a.cfg.SampleRate,
+		Channels:       a.cfg.Channels,
+		SegmentSeconds: a.cfg.SegmentSeconds,
+		ListSize:       a.cfg.ListSize,
+		Sel:            sel,
+		BreakOut:       a.opts.Writer,
+	}
+}
+
+// newStationRuntime builds one station's pipeline on demand.
+func (a *App) newStationRuntime(ctx context.Context, id int64,
+	state store.SelectorState, resume bool) (*station.Runtime, error) {
+	// The feeder needs the runtime it is feeding, and the runtime needs the
+	// feeder: the closure captures the variable, which is assigned before
+	// Start can ever call it.
+	var rt *station.Runtime
+	deps := a.runtimeDeps(nil)
+	deps.Feed = func(ctx context.Context, _ *mix.Ring, _ *sched.Queue) { a.feedTracks(ctx, rt) }
+
+	rt, err := station.NewRuntimeForStation(ctx, a.opts.Library.Store, deps, id,
+		filepath.Join(a.cfg.SegmentDir, strconv.FormatInt(id, 10)), state, resume)
+	return rt, err
+}
+
+// PersonaChanged pushes an edited jock to the stations already airing it.
+//
+// On the NEXT BREAK rather than by restarting the station: the writer reads the
+// persona per break already, so the listener hears the change without hearing
+// a gap.
+func (a *App) PersonaChanged(j store.Jock) {
+	if a.opts.Writer == nil || a.mgr == nil || a.opts.Library == nil {
+		return
+	}
+	for _, id := range a.mgr.Running() {
+		st, err := a.opts.Library.Store.GetStation(context.Background(), id)
+		if err != nil || st.JockID != j.ID {
+			continue
+		}
+		a.opts.Writer.SetPersona(dj.FromRecord(j))
+		return
+	}
+}
+
+// ListenerGrace is how long a session counts as present after its last
+// playlist fetch. Long enough to ride out a slow poll or a page reload, short
+// enough that a closed tab does not hold a station on air.
+const ListenerGrace = 30 * time.Second
+
+// MaxStations caps how many run at once. A per-station ffmpeg is the one cost
+// that scales with stations, and the target box is small.
+const MaxStations = 4
+
+// reconcileEvery is how often the manager compares listeners to runtimes. A
+// second is fast enough that a first listener waits no longer than that, and
+// slow enough that the work is invisible.
+const reconcileEvery = time.Second
+
+// reconcile keeps the running stations in step with the listeners.
+func (a *App) reconcile(ctx context.Context) {
+	t := time.NewTicker(reconcileEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := a.mgr.Tick(ctx); err != nil && ctx.Err() == nil {
+				// Not fatal and not retried in a loop here: the next tick is
+				// the retry, and a station that cannot start says so once a
+				// second rather than spinning.
+				a.log.Warn("reconciling stations", "err", err)
+			}
+		}
+	}
+}
+
+// primary is the runtime whose numbers /now.json reports.
+//
+// The one station on the spike path, or the lowest-numbered station on air.
+// Nil when nothing is running, which is what a server with no listeners looks
+// like and is not a fault.
+func (a *App) primary() *station.Runtime {
+	if a.mgr != nil {
+		for _, id := range a.mgr.Running() {
+			if rt := a.mgr.Runtime(id); rt != nil {
+				return rt
+			}
+		}
+		return nil
+	}
+	return a.rt
+}
+
+// primaryID is primary's station, or the single station when nothing runs.
+func (a *App) primaryID() int64 {
+	if rt := a.primary(); rt != nil {
+		return rt.StationID()
+	}
+	return singleStationID
 }
 
 // dependencyHealth says whether an optional dependency is in use.
@@ -426,10 +626,32 @@ func (a *App) recordBreak(text string, placement mix.Placement) {
 func (a *App) Addr() string { return a.srv.Addr() }
 
 // PendingBreaks reports how many scheduled items have not aired yet.
-func (a *App) PendingBreaks() int { return a.queue.Pending() }
+func (a *App) PendingBreaks() int {
+	if rt := a.primary(); rt != nil {
+		return rt.Queue().Pending()
+	}
+	return 0
+}
 
 // Metrics reports the run so far: inter-write gaps, ring occupancy, write count.
-func (a *App) Metrics() mix.MetricsSnapshot { return a.metrics.Snapshot() }
+func (a *App) Metrics() mix.MetricsSnapshot { return a.snapshot() }
+
+// snapshot is the primary station's mixer timing, or an empty record when no
+// station is on air -- which is what a server with no listeners has produced.
+func (a *App) snapshot() mix.MetricsSnapshot {
+	if rt := a.primary(); rt != nil {
+		return rt.Metrics().Snapshot()
+	}
+	return mix.MetricsSnapshot{}
+}
+
+// runtimeStatus is the primary station's pipeline, or a stopped one.
+func (a *App) runtimeStatus() station.RuntimeStatus {
+	if rt := a.primary(); rt != nil {
+		return rt.Status()
+	}
+	return station.RuntimeStatus{}
+}
 
 // Status implements server.StatusSource, feeding /now.json.
 //
@@ -449,7 +671,8 @@ func ffmpegHealth(degraded string) string {
 }
 
 func (a *App) Status() server.Status {
-	m := a.metrics.Snapshot()
+	m := a.snapshot()
+	rst := a.runtimeStatus()
 
 	st := server.Status{
 		Health: server.Health{
@@ -459,7 +682,7 @@ func (a *App) Status() server.Status {
 			// keeps the mixer running and the restart counter climbing while
 			// no new segment is ever written, which reads as healthy right up
 			// until a listener says the stream stopped.
-			FFmpeg: ffmpegHealth(a.sup.Degraded()),
+			FFmpeg: ffmpegHealth(a.encoderDegraded()),
 			// Reported by what is actually WIRED, not by what the spike used
 			// to do. These read "not used by the spike" long after both were
 			// in use, which is a status endpoint inventing an answer.
@@ -467,9 +690,9 @@ func (a *App) Status() server.Status {
 			TTS: dependencyHealth(a.opts.Breaks != nil),
 		},
 		Metrics: server.Metrics{
-			RingOccupancyS:    a.ring.Occupancy().Seconds(),
-			Underruns:         a.ring.UnderrunCount(),
-			EncoderRestarts:   a.sup.Restarts(),
+			RingOccupancyS:    rst.RingOccupancyS,
+			Underruns:         rst.Underruns,
+			EncoderRestarts:   rst.EncoderRestarts,
 			P99GapMs:          float64(m.P99Gap.Microseconds()) / 1000,
 			MaxGapMs:          float64(m.MaxGap.Microseconds()) / 1000,
 			MinRingOccupancyS: m.MinOccupancy.Seconds(),
@@ -478,31 +701,126 @@ func (a *App) Status() server.Status {
 	}
 
 	a.nowMu.Lock()
-	if a.nowArtist != "" || a.nowTitle != "" {
-		st.Now = &server.Track{Artist: a.nowArtist, Title: a.nowTitle}
+	if np, ok := a.now[a.primaryID()]; ok && (np.artist != "" || np.title != "") {
+		st.Now = &server.Track{Artist: np.artist, Title: np.title}
 	}
 	st.LastBreak = a.lastBreak
 	a.nowMu.Unlock()
 
+	st.Enrichment = a.enrichment()
+
+	// Only once one has been asked for. A station that has never rescanned
+	// should show nothing rather than a progress bar reading zero of zero.
+	if a.rescan != nil {
+		if p := a.rescan.Progress(); !p.StartedAt.IsZero() {
+			st.Rescan = &p
+		}
+	}
+
 	return st
+}
+
+// enrichment is how far the dossier worker has got.
+//
+// The field has existed since the spine and was never filled: /now.json has
+// carried an enrichment block in its type and nothing in its body since the
+// day it was written, so the operator page has always shown an empty bar. It
+// costs two counts.
+func (a *App) enrichment() *server.Enrichment {
+	if a.opts.Library == nil || a.opts.Library.Store == nil {
+		return nil
+	}
+	db := a.opts.Library.Store.DB()
+	ctx := context.Background()
+
+	var total, done int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM tracks WHERE playable = 1 AND missing_at IS NULL`).Scan(&total); err != nil {
+		return nil
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM dossiers`).Scan(&done); err != nil {
+		return nil
+	}
+
+	e := &server.Enrichment{Done: done, Total: total, Running: a.enriching.Load()}
+	if total > 0 {
+		// Rounded to a tenth: a bar that moves in ten-thousandths looks broken.
+		e.Pct = math.Round(float64(done)/float64(total)*1000) / 10
+	}
+
+	// The confidence split is what says whether the enrichment is WORKING. A
+	// library that is 90% enriched into "none" is 90% of nothing.
+	e.ConfidenceCounts = map[string]int{}
+	rows, err := db.QueryContext(ctx, `SELECT confidence, count(*) FROM dossiers GROUP BY confidence`)
+	if err != nil {
+		return e
+	}
+	defer rows.Close() //nolint:errcheck // read-only
+	// A row that will not scan is skipped rather than branched on: confidence
+	// is TEXT NOT NULL and the count is an integer, so there is nothing here a
+	// working database can fail at, and a partial split is still worth showing.
+	for rows.Next() {
+		var name string
+		var n int
+		if err := rows.Scan(&name, &n); err == nil {
+			e.ConfidenceCounts[name] = n
+		}
+	}
+	return e
+}
+
+// StatusForStation reports what ONE station is airing.
+//
+// There is no global now-playing once stations are per-listener: four running
+// stations are four different tracks, and naming one of them "now" would tell
+// three quarters of the listeners something false.
+func (a *App) StatusForStation(id int64) server.Status {
+	st := a.Status()
+	st.Now = nil
+
+	a.nowMu.Lock()
+	np, ok := a.now[id]
+	a.nowMu.Unlock()
+	if ok && (np.artist != "" || np.title != "") {
+		st.Now = &server.Track{Artist: np.artist, Title: np.title}
+	}
+	if a.mgr != nil {
+		if rt := a.mgr.Runtime(id); rt != nil {
+			rst := rt.Status()
+			st.Metrics.RingOccupancyS = rst.RingOccupancyS
+			st.Metrics.Underruns = rst.Underruns
+			st.Metrics.EncoderRestarts = rst.EncoderRestarts
+		}
+	}
+	return st
+}
+
+// StartRescan begins an on-demand library scan.
+//
+// Returns library.ErrScanRunning if one is already going, which the admin route
+// turns into a 409 rather than queueing: two walks marking missing against each
+// other is a race with no correct answer.
+func (a *App) StartRescan(ctx context.Context) error {
+	if a.rescan == nil {
+		return errors.New("app: there is no library to rescan")
+	}
+	return a.rescan.Start(ctx)
 }
 
 // drift reports how far behind schedule the mixer is, or zero before it starts.
 func (a *App) drift() time.Duration {
-	a.mixerMu.Lock()
-	defer a.mixerMu.Unlock()
-	if a.mixer == nil {
-		return 0
+	if rt := a.primary(); rt != nil {
+		return rt.Drift()
 	}
-	return a.mixer.Pacer.Drift()
+	return 0
 }
 
 // P99Gap and MaxGap expose the pacing tail for a soak harness.
-func (a *App) P99Gap() time.Duration { return a.metrics.Snapshot().P99Gap }
-func (a *App) MaxGap() time.Duration { return a.metrics.Snapshot().MaxGap }
+func (a *App) P99Gap() time.Duration { return a.snapshot().P99Gap }
+func (a *App) MaxGap() time.Duration { return a.snapshot().MaxGap }
 
 // MinRingOccupancy is the lowest the ring has been all run.
-func (a *App) MinRingOccupancy() time.Duration { return a.metrics.Snapshot().MinOccupancy }
+func (a *App) MinRingOccupancy() time.Duration { return a.snapshot().MinOccupancy }
 
 // StallFeeder pauses decoding for d, leaving the mixer to ride it out.
 //
@@ -526,15 +844,24 @@ func (a *App) feederStall() time.Duration {
 
 // Run streams until ctx is cancelled.
 func (a *App) Run(ctx context.Context) error {
-	defer a.sup.Stop()
+	// THE SPIKE PATH starts its one station immediately: there is nobody to
+	// count, so there is nothing to wait for.
+	if a.rt != nil {
+		if err := a.rt.Start(ctx); err != nil {
+			return err
+		}
+		defer a.rt.Stop() //nolint:errcheck // shutting down
+	}
+	if a.mgr != nil {
+		defer a.mgr.StopAll() //nolint:errcheck // shutting down
+		go a.reconcile(ctx)
+	}
 
 	go func() {
 		if err := a.srv.Run(ctx); err != nil && ctx.Err() == nil {
 			a.log.Error("http server stopped", "err", err)
 		}
 	}()
-
-	go a.feedTracks(ctx)
 
 	// Enrichment runs alongside the stream, never in front of it. A library of
 	// ten thousand tracks takes many hours to enrich and the station has to be
@@ -554,10 +881,6 @@ func (a *App) Run(ctx context.Context) error {
 	// on the deployed station for three hours before anyone asked.
 	if a.opts.BreakPath != "" && a.opts.BreakEverySec > 0 {
 		go a.topUpBreaks(ctx)
-	}
-
-	if a.dial != nil {
-		go a.dial.watch(ctx)
 	}
 
 	if a.opts.Analyser != nil {
@@ -593,49 +916,45 @@ func (a *App) Run(ctx context.Context) error {
 		"breaks", a.opts.Breaks != nil,
 		"enriching", a.opts.Enricher != nil)
 
-	// One mixer goroutine, owning the bus clock, sole writer to the encoder.
-	m := &mix.Mixer{
-		Ring:    a.ring,
-		Queue:   a.queue,
-		Chain:   mix.NewChain(),
-		Pacer:   mix.NewPacer(clock.Real{}),
-		W:       a.sup.Writer(),
-		Log:     a.log,
-		Metrics: &a.metrics,
+	// One mixer goroutine per station, owning that station's bus clock and
+	// sole writer to its encoder -- inside the runtime. With a manager there
+	// is no single mixer to wait for, so the context is what ends the run.
+	var err error
+	if a.rt != nil {
+		err = a.rt.Wait()
+	} else {
+		<-ctx.Done()
 	}
-	a.mixerMu.Lock()
-	a.mixer = m
-	a.mixerMu.Unlock()
-
-	err := m.Run(ctx)
 
 	// The four numbers GATE 2 asserts on, logged at shutdown so a long
 	// unattended run needs no extra tooling to be judged.
-	s := a.metrics.Snapshot()
+	s := a.snapshot()
+	st := a.runtimeStatus()
+	frames := int64(0)
+	if rt := a.primary(); rt != nil {
+		frames = rt.SamplePos()
+	}
 	a.log.Info("off air",
-		"frames", m.SamplePos(),
-		"audio", mix.FramesToDuration(int(m.SamplePos())).Round(time.Second),
+		"frames", frames,
+		"audio", mix.FramesToDuration(int(frames)).Round(time.Second),
 		"p99_inter_write_gap", s.P99Gap.Round(time.Millisecond),
 		"max_inter_write_gap", s.MaxGap.Round(time.Millisecond),
 		"min_ring_occupancy", s.MinOccupancy.Round(time.Millisecond),
-		"final_drift", m.Pacer.Drift().Round(time.Millisecond),
-		"underruns", a.ring.UnderrunCount(),
-		"encoder_restarts", a.sup.Restarts())
+		"final_drift", a.drift().Round(time.Millisecond),
+		"underruns", st.Underruns,
+		"encoder_restarts", st.EncoderRestarts)
 
-	if errors.Is(err, context.Canceled) {
-		return nil
-	}
 	return err
 }
 
 // feedTracks decodes the track list into the ring, looping forever. A track that
 // will not decode is logged and skipped: one bad file must not end the stream.
-func (a *App) feedTracks(ctx context.Context) {
+func (a *App) feedTracks(ctx context.Context, rt *station.Runtime) {
 	if a.opts.Library != nil {
-		a.feedFromLibrary(ctx)
+		a.feedFromLibrary(ctx, rt)
 		return
 	}
-	a.feedFromList(ctx)
+	a.feedFromList(ctx, rt)
 }
 
 // feedFromLibrary plays the scanned database and schedules breaks between
@@ -645,7 +964,7 @@ func (a *App) feedTracks(ctx context.Context) {
 // own: no pipeline is a shuffle, a failed selection is one skipped track, a
 // dropped break is silence where speech would have been. None of them stops the
 // music, which is the invariant this whole program is arranged around.
-func (a *App) feedFromLibrary(ctx context.Context) {
+func (a *App) feedFromLibrary(ctx context.Context, rt *station.Runtime) {
 	blocks := make(chan []mix.Frame, 8)
 	var boundary int
 	var prev, cur track
@@ -654,7 +973,7 @@ func (a *App) feedFromLibrary(ctx context.Context) {
 	// only known at the instant it arrives, which leaves the lookahead no time
 	// at all -- ShouldTrigger requires now < insertionAt, so a break announced
 	// at its own boundary can never be generated and none would ever air.
-	upcoming, err := a.opts.Library.next(ctx)
+	upcoming, err := a.opts.Library.nextFrom(ctx, rt.Selector())
 	if err != nil {
 		a.log.Error("could not choose a first track", "err", err)
 		return
@@ -663,7 +982,7 @@ func (a *App) feedFromLibrary(ctx context.Context) {
 	for ctx.Err() == nil {
 		cur = upcoming
 		var chooseErr error
-		upcoming, chooseErr = a.opts.Library.next(ctx)
+		upcoming, chooseErr = a.opts.Library.nextFrom(ctx, rt.Selector())
 		if chooseErr != nil {
 			a.log.Error("could not choose the next track", "err", chooseErr)
 			upcoming = track{}
@@ -673,11 +992,11 @@ func (a *App) feedFromLibrary(ctx context.Context) {
 		// a whole track early, which is exactly the room the lookahead needs.
 		if upcoming.path != "" {
 			boundary++
-			a.announceBoundary(ctx, boundary, prev, cur, upcoming)
+			a.announceBoundary(ctx, rt, boundary, prev, cur, upcoming)
 		}
 
-		done := a.startFeeder(ctx, blocks)
-		a.setNowPlayingTrack(cur)
+		done := a.startFeeder(ctx, rt, blocks)
+		a.setNowPlayingTrack(rt.StationID(), cur)
 		decodeErr := decode.Decode(ctx, cur.path, blocks)
 		blocks = a.finishFeeder(ctx, blocks, done)
 
@@ -727,7 +1046,7 @@ func (a *App) generateBreaks(ctx context.Context) {
 
 // announceBoundary offers one transition to the cadence and lets the pipeline
 // generate anything it decides to.
-func (a *App) announceBoundary(ctx context.Context, boundary int, prev, cur, next track) {
+func (a *App) announceBoundary(ctx context.Context, rt *station.Runtime, boundary int, prev, cur, next track) {
 	if a.opts.Breaks == nil {
 		return
 	}
@@ -800,7 +1119,7 @@ func (a *App) markUnplayable(ctx context.Context, t track) {
 //
 // Kept because GATE 2 and room test A run against it, and because it is the one
 // mode that needs no database, no model and no sidecar.
-func (a *App) feedFromList(ctx context.Context) {
+func (a *App) feedFromList(ctx context.Context, rt *station.Runtime) {
 	blocks := make(chan []mix.Frame, 8)
 
 	for ctx.Err() == nil {
@@ -810,8 +1129,8 @@ func (a *App) feedFromList(ctx context.Context) {
 				return
 			}
 
-			done := a.startFeeder(ctx, blocks)
-			a.setNowPlaying(path)
+			done := a.startFeeder(ctx, rt, blocks)
+			a.setNowPlaying(rt.StationID(), path)
 			err := decode.Decode(ctx, path, blocks)
 			blocks = a.finishFeeder(ctx, blocks, done)
 
@@ -832,7 +1151,7 @@ func (a *App) feedFromList(ctx context.Context) {
 }
 
 // startFeeder moves decoded blocks into the ring until the channel closes.
-func (a *App) startFeeder(ctx context.Context, blocks chan []mix.Frame) chan struct{} {
+func (a *App) startFeeder(ctx context.Context, rt *station.Runtime, blocks chan []mix.Frame) chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -847,7 +1166,7 @@ func (a *App) startFeeder(ctx context.Context, blocks chan []mix.Frame) chan str
 				case <-time.After(min(d, 100*time.Millisecond)):
 				}
 			}
-			if err := feedRing(ctx, a.ring, b); err != nil {
+			if err := feedRing(ctx, rt.Ring(), b); err != nil {
 				return
 			}
 		}
@@ -867,16 +1186,17 @@ func (a *App) finishFeeder(ctx context.Context, blocks chan []mix.Frame, done ch
 }
 
 // setNowPlayingTrack reports a track the library knows the tags for.
-func (a *App) setNowPlayingTrack(t track) {
-	a.nowMu.Lock()
-	defer a.nowMu.Unlock()
-	a.nowArtist, a.nowTitle = t.artist, t.title
-	if a.nowTitle == "" {
+func (a *App) setNowPlayingTrack(stationID int64, t track) {
+	np := nowPlaying{artist: t.artist, title: t.title}
+	if np.title == "" {
 		// An untagged file still has to be called something, and its filename
 		// is the only honest answer. Never the full path: the status endpoint
 		// must not leak the library layout.
-		a.nowTitle = strings.TrimSuffix(filepath.Base(t.path), filepath.Ext(t.path))
+		np.title = strings.TrimSuffix(filepath.Base(t.path), filepath.Ext(t.path))
 	}
+	a.nowMu.Lock()
+	defer a.nowMu.Unlock()
+	a.now[stationID] = np
 }
 
 // secondsPlayed is the mixer's position on the bus clock, in seconds.
@@ -886,12 +1206,10 @@ func (a *App) secondsPlayed() float64 {
 
 // samplePos is the mixer's absolute bus position, or zero before it starts.
 func (a *App) samplePos() int64 {
-	a.mixerMu.Lock()
-	defer a.mixerMu.Unlock()
-	if a.mixer == nil {
-		return 0
+	if rt := a.primary(); rt != nil {
+		return rt.SamplePos()
 	}
-	return a.mixer.SamplePos()
+	return 0
 }
 
 // trackCount is how many tracks are available to play.
@@ -951,7 +1269,11 @@ func (a *App) topUpOnce(horizon, every int64) int {
 	}
 	added := 0
 	for a.nextBreak < horizon {
-		if err := a.queue.Enqueue(sched.Entry{
+		rt := a.primary()
+		if rt == nil {
+			return added
+		}
+		if err := rt.Queue().Enqueue(sched.Entry{
 			AfterSample: a.nextBreak,
 			Action:      sched.ActionSpliceAudio,
 			Path:        a.opts.BreakPath,
@@ -972,12 +1294,16 @@ func (a *App) topUpOnce(horizon, every int64) int {
 // The spike is handed file paths rather than a scanned library, so the file name
 // is all it honestly knows. It is deliberately NOT reported as a filesystem path
 // -- the status endpoint must not leak the library layout.
-func (a *App) setNowPlaying(path string) {
+func (a *App) setNowPlaying(stationID int64, path string) {
 	a.nowMu.Lock()
 	defer a.nowMu.Unlock()
-	a.nowArtist = ""
-	a.nowTitle = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	a.now[stationID] = nowPlaying{
+		title: strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
+	}
 }
+
+// nowPlaying is what one station is airing.
+type nowPlaying struct{ artist, title string }
 
 // feedRing writes every frame into the ring, retrying while it is full.
 //
@@ -1005,7 +1331,25 @@ func feedRing(ctx context.Context, ring *mix.Ring, frames []mix.Frame) error {
 }
 
 // encoderPID exposes the running ffmpeg so tests can prove it was reaped.
-func (a *App) encoderPID() int { return a.sup.PID() }
+func (a *App) encoderPID() int {
+	if rt := a.primary(); rt != nil {
+		if enc := rt.Encoder(); enc != nil {
+			return enc.PID()
+		}
+	}
+	return 0
+}
+
+// encoderDegraded reports the encoder's health, treating "not started yet" as
+// healthy: an App that has not been run has not failed at anything.
+func (a *App) encoderDegraded() string {
+	if rt := a.primary(); rt != nil {
+		if enc := rt.Encoder(); enc != nil {
+			return enc.Degraded()
+		}
+	}
+	return ""
+}
 
 // Tune switches the station to a tag, and reports how many tracks it holds.
 //
@@ -1013,27 +1357,78 @@ func (a *App) encoderPID() int { return a.sup.PID() }
 // cutting audio mid-song to honour a click is the stutter this design exists to
 // avoid. The change is heard at the next boundary, which is also how a real
 // radio behaves when you turn the dial slowly.
-func (a *App) Tune(tag string) (int, error) {
-	if a.opts.Library == nil || a.opts.Library.Store == nil || a.opts.Library.Selector == nil {
-		return 0, fmt.Errorf("no library to tune")
+// Dial lists the stations a listener may choose from.
+//
+// From the TABLE, not from a proposal. What the operator built is what the
+// listener sees; the proposal is a seed, and re-deriving it here would show a
+// dial nobody configured.
+func (a *App) Dial(ctx context.Context) ([]server.DialStation, error) {
+	if a.opts.Library == nil || a.opts.Library.Store == nil {
+		return nil, fmt.Errorf("app: no library to build a dial from")
 	}
-	pool, err := station.PoolForTag(context.Background(), a.opts.Library.Store, tag)
+	s := a.opts.Library.Store
+	rows, err := s.ListStations(ctx)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	if err := a.opts.Library.Selector.Tune(pool); err != nil {
-		return 0, fmt.Errorf("station %q has no playable tracks", tag)
+
+	out := []server.DialStation{}
+	for _, st := range rows {
+		// DISABLED STATIONS ARE NOT ON THE DIAL. An operator switching one off
+		// means listeners should stop seeing it, not see it and fail to tune.
+		if !st.Enabled {
+			continue
+		}
+		ids, err := s.StationTrackIDs(ctx, st.ID)
+		if err != nil {
+			return nil, err
+		}
+		d := server.DialStation{ID: st.ID, Name: st.Name, Genre: st.Genre,
+			Mood: st.Mood, Tracks: len(ids)}
+		if a.tracker != nil {
+			d.Listeners = a.tracker.Count(st.ID)
+		}
+		if st.JockID != "" {
+			if j, err := s.GetJock(ctx, st.JockID); err == nil {
+				d.JockName = j.Name
+			}
+		}
+		out = append(out, d)
 	}
-	a.log.Info("tuned", "station", tag, "tracks", len(pool))
-	return len(pool), nil
+	return out, nil
+}
+
+// Tune puts a session on a station and says where to listen.
+//
+// IT IS THE FIRST HEARTBEAT. The station starts because somebody tuned to it,
+// so the touch has to happen here rather than waiting for the client's first
+// playlist fetch -- which cannot succeed until the station is running.
+func (a *App) Tune(ctx context.Context, session string, stationID int64) (string, error) {
+	if a.opts.Library == nil || a.opts.Library.Store == nil {
+		return "", fmt.Errorf("app: no library to tune")
+	}
+	st, err := a.opts.Library.Store.GetStation(ctx, stationID)
+	if err != nil {
+		return "", err
+	}
+	if !st.Enabled {
+		// The same answer as a station that does not exist: a listener has no
+		// business knowing which stations the operator has switched off.
+		return "", store.ErrNotFound
+	}
+	if a.tracker != nil {
+		a.tracker.Touch(stationID, session)
+	}
+	a.log.Info("tuned", "station", stationID, "name", st.Name)
+	return "/hls/" + strconv.FormatInt(stationID, 10) + "/stream.m3u8", nil
 }
 
 // Feedback records what a listener thought of the break that just aired.
 //
-// It stores the TEXT rather than an id, because a break is not a row: it is
-// written, aired and gone. What a later prompt-tuning pass needs is the
-// sentence somebody disliked, not a reference to something no longer there.
-func (a *App) Feedback(verdict string) error {
+// ATTRIBUTED to the person and the station: a household is several people with
+// different taste, and "somebody disliked this" is much less useful than
+// knowing who, on what.
+func (a *App) Feedback(ctx context.Context, userID, stationID int64, verdict string) error {
 	if a.opts.Library == nil || a.opts.Library.Store == nil {
 		return fmt.Errorf("no store to record feedback in")
 	}
@@ -1048,13 +1443,14 @@ func (a *App) Feedback(verdict string) error {
 	if a.opts.Writer != nil && a.opts.Writer.Persona != nil {
 		jockID = a.opts.Writer.Persona.ID()
 	}
-	_, err := a.opts.Library.Store.DB().ExecContext(context.Background(),
-		`INSERT INTO break_feedback (jock_id, text, verdict, aired_at, at) VALUES (?, ?, ?, ?, ?)`,
-		jockID, last.Text, verdict, last.AiredAt, time.Now().Unix())
+	_, err := a.opts.Library.Store.DB().ExecContext(ctx,
+		`INSERT INTO break_feedback (jock_id, text, verdict, aired_at, at, user_id)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		jockID, last.Text, verdict, last.AiredAt, time.Now().Unix(), userID)
 	if err != nil {
 		return fmt.Errorf("recording feedback: %w", err)
 	}
-	a.log.Info("break feedback", "verdict", verdict, "text", last.Text)
+	a.log.Info("break feedback", "verdict", verdict, "user", userID, "station", stationID)
 	return nil
 }
 
@@ -1072,28 +1468,6 @@ type Jock struct {
 //
 // The roster was invisible until this existed: nine personas shipped, the
 // station chose one from what the library sounded like, and a listener had no
-// way to see the others, let alone pick one.
-func (a *App) Jocks() any {
-	out := make([]Jock, 0, len(a.opts.Personas))
-
-	current := ""
-	if a.opts.Writer != nil {
-		if p := a.opts.Writer.Voice(); p != "" {
-			// Identify by id rather than voice, which two jocks could share.
-			if pp := a.currentPersona(); pp != nil {
-				current = pp.ID()
-			}
-		}
-	}
-	for _, p := range a.opts.Personas {
-		out = append(out, Jock{
-			ID: p.ID(), Name: p.Name(), Voice: p.VoiceID(),
-			Genres: p.GoodForGenres(), Moods: p.GoodForMoods(),
-			OnAir: p.ID() == current,
-		})
-	}
-	return map[string]any{"jocks": out}
-}
 
 // currentPersona is whoever is writing breaks right now.
 func (a *App) currentPersona() *dj.Persona {
@@ -1108,21 +1482,6 @@ func (a *App) currentPersona() *dj.Persona {
 // The break already being generated is NOT recalled: it was written by the
 // previous jock and airs in that jock's voice. Cancelling a half-rendered break
 // to honour a click is the stutter this whole design avoids, and the listener
-// hears the change at the next break either way.
-func (a *App) SetJock(id string) error {
-	if a.opts.Writer == nil {
-		return fmt.Errorf("no DJ is running")
-	}
-	for _, p := range a.opts.Personas {
-		if p.ID() == id {
-			a.opts.Writer.SetPersona(p)
-			a.log.Info("jock changed", "jock", p.Name(), "voice", p.VoiceID(),
-				"note", "the break already in flight airs in the previous voice")
-			return nil
-		}
-	}
-	return fmt.Errorf("no jock with id %q", id)
-}
 
 // Overview is everything the operator page renders.
 //

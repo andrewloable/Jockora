@@ -5,7 +5,6 @@ package server
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -17,15 +16,27 @@ import (
 	"testing"
 )
 
+// newServer returns the server and STATION 1's segment directory. Stations got
+// their own directories in 12e, so the place a test writes a segment is one
+// level below the configured root.
 func newServer(t *testing.T, retain int) (*Server, string) {
 	t.Helper()
-	dir := t.TempDir()
+	root := t.TempDir()
+	dir := filepath.Join(root, "1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 
-	s, err := New(Config{ListenAddr: "127.0.0.1:0", SegmentDir: dir, RetainSegments: retain},
+	s, err := New(Config{ListenAddr: "127.0.0.1:0", SegmentDir: root, RetainSegments: retain},
 		slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// Every listener is identified; the tests that care about the refusal
+	// install their own source.
+	s.SetSessions(func(http.ResponseWriter, *http.Request) (string, bool) {
+		return "test-session", true
+	})
 	return s, dir
 }
 
@@ -52,7 +63,7 @@ func TestServesPlaylist(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec := get(t, s, "/hls/stream.m3u8")
+	rec := get(t, s, "/hls/1/stream.m3u8")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d, want 200", rec.Code)
@@ -74,7 +85,7 @@ func TestServesSegment(t *testing.T) {
 	s, dir := newServer(t, 20)
 	writeSegs(t, dir, 0)
 
-	rec := get(t, s, "/hls/seg0.ts")
+	rec := get(t, s, "/hls/1/seg0.ts")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d, want 200", rec.Code)
@@ -95,14 +106,14 @@ func TestRejectsPathTraversal(t *testing.T) {
 	}
 
 	for _, path := range []string{
-		"/hls/../../etc/passwd",
-		"/hls/..%2f..%2fetc%2fpasswd",
-		"/hls/..%2F..%2Fetc%2Fpasswd",
-		"/hls/../secret.txt",
-		"/hls/..%2fsecret.txt",
-		"/hls/%2e%2e%2fsecret.txt",
-		"/hls/seg0.ts/../../secret.txt",
-		"/hls/./seg0.ts",
+		"/hls/1/../../etc/passwd",
+		"/hls/1/..%2f..%2fetc%2fpasswd",
+		"/hls/1/..%2F..%2Fetc%2Fpasswd",
+		"/hls/1/../secret.txt",
+		"/hls/1/..%2fsecret.txt",
+		"/hls/1/%2e%2e%2fsecret.txt",
+		"/hls/1/seg0.ts/../../secret.txt",
+		"/hls/1/./seg0.ts",
 	} {
 		rec := get(t, s, path)
 		if rec.Code != http.StatusBadRequest {
@@ -123,12 +134,12 @@ func TestRejectsBadSegmentName(t *testing.T) {
 	}
 
 	for _, name := range []string{"evil.sh", "seg.ts", "segX.ts", "seg0.TS", "stream.m3u", "SEG0.ts", "seg0.ts.bak", ""} {
-		rec := get(t, s, "/hls/"+name)
+		rec := get(t, s, "/hls/1/"+name)
 		if rec.Code != http.StatusBadRequest {
-			t.Errorf("GET /hls/%s: status %d, want 400", name, rec.Code)
+			t.Errorf("GET /hls/1/%s: status %d, want 400", name, rec.Code)
 		}
 		if strings.Contains(rec.Body.String(), "rm -rf") {
-			t.Errorf("GET /hls/%s served the file", name)
+			t.Errorf("GET /hls/1/%s served the file", name)
 		}
 	}
 }
@@ -166,7 +177,7 @@ func TestPrunedSegmentStillServedWithinRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if rec := get(t, s, "/hls/seg0.ts"); rec.Code != http.StatusOK {
+	if rec := get(t, s, "/hls/1/seg0.ts"); rec.Code != http.StatusOK {
 		t.Errorf("a segment pruned from the playlist but inside retention returned %d, want 200", rec.Code)
 	}
 }
@@ -175,7 +186,7 @@ func TestTrulyMissingSegmentReturns404WithNoStore(t *testing.T) {
 	s, dir := newServer(t, 20)
 	writeSegs(t, dir, 5)
 
-	rec := get(t, s, "/hls/seg999.ts")
+	rec := get(t, s, "/hls/1/seg999.ts")
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status %d, want 404", rec.Code)
@@ -269,11 +280,21 @@ func TestServesIndexPage(t *testing.T) {
 	}
 }
 
+// TestUnknownPathIs404: an unknown ASSET is a 404. An unknown PAGE is the app.
+//
+// The split matters in both directions. A deep link the Angular router owns --
+// /login, or anything a bookmark still points at -- has to reach the app, or
+// reloading the page a listener is looking at logs them out of it. But a
+// missing .js must stay a 404: answering it with html makes a broken build
+// look like a working one right up until the browser tries to parse it.
 func TestUnknownPathIs404(t *testing.T) {
 	s, _ := newServer(t, 20)
 
-	if rec := get(t, s, "/nope"); rec.Code != http.StatusNotFound {
-		t.Errorf("GET /nope returned %d, want 404", rec.Code)
+	if rec := get(t, s, "/nope.js"); rec.Code != http.StatusNotFound {
+		t.Errorf("GET /nope.js returned %d, want 404: a missing asset is not a page", rec.Code)
+	}
+	if rec := get(t, s, "/nope"); rec.Code == http.StatusNotFound {
+		t.Error("GET /nope returned 404; a path with no extension is the app's to route")
 	}
 }
 
@@ -285,106 +306,18 @@ func TestOnlyGetIsAllowed(t *testing.T) {
 
 	for _, method := range []string{http.MethodPost, http.MethodDelete, http.MethodPut} {
 		rec := httptest.NewRecorder()
-		s.Handler().ServeHTTP(rec, httptest.NewRequest(method, "/hls/seg0.ts", nil))
+		s.Handler().ServeHTTP(rec, httptest.NewRequest(method, "/hls/1/seg0.ts", nil))
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Errorf("%s /hls/seg0.ts returned %d, want 405", method, rec.Code)
 		}
 	}
 }
 
-// --- player page (ep0.15) ---
-
-func TestServesPlayerPage(t *testing.T) {
-	s, _ := newServer(t, 20)
-
-	rec := get(t, s, "/")
-	body := rec.Body.String()
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET / returned %d, want 200", rec.Code)
-	}
-	for _, want := range []string{"<audio", "/hls/stream.m3u8", "canPlayType", "Hls.isSupported"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("player page is missing %q", want)
-		}
-	}
-}
-
 // TestPlayerChecksNativeHLSBeforeHlsJs pins the order. iOS Safari has no Media
-// Source Extensions, so hls.js cannot work there at all; checking it first would
-// break the one platform that has no fallback.
-func TestPlayerChecksNativeHLSBeforeHlsJs(t *testing.T) {
-	body := get(t, mustServer(t), "/").Body.String()
-
-	native := strings.Index(body, "canPlayType('application/vnd.apple.mpegurl')")
-	polyfill := strings.Index(body, "Hls.isSupported()")
-
-	if native < 0 || polyfill < 0 {
-		t.Fatalf("feature detection not found: native=%d hlsjs=%d", native, polyfill)
-	}
-	if native > polyfill {
-		t.Error("hls.js is checked before native HLS; iOS Safari would take the path it cannot run")
-	}
-}
-
-func TestPlayerDoesNotAutoplay(t *testing.T) {
-	body := strippedPage(t)
-
-	if strings.Contains(body, "autoplay") {
-		t.Error("the page has an autoplay attribute; browsers block it and the block looks like a broken stream")
-	}
-	if strings.Contains(body, ".play()") {
-		t.Error("the page calls play() itself, which is autoplay by another name")
-	}
-}
-
-// TestPlayerHasNoSkipControl: there is no skip in this product by design.
-func TestPlayerHasNoSkipControl(t *testing.T) {
-	body := strings.ToLower(strippedPage(t))
-
-	for _, banned := range []string{"skip", "next track", "currenttime ="} {
-		if strings.Contains(body, banned) {
-			t.Errorf("the player page contains %q", banned)
-		}
-	}
-}
 
 // TestHlsJsIsServedLocally: no CDN. This is a self-hosted product that has to
-// work with no internet connection.
-func TestHlsJsIsServedLocally(t *testing.T) {
-	s := mustServer(t)
-	body := get(t, s, "/").Body.String()
-
-	for _, cdn := range []string{"//cdn.", "https://unpkg", "jsdelivr", "cdnjs"} {
-		if strings.Contains(body, cdn) {
-			t.Errorf("the page loads a script from %q instead of a vendored copy", cdn)
-		}
-	}
-
-	rec := get(t, s, "/vendor/hls.light.min.js")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /vendor/hls.light.min.js returned %d, want 200", rec.Code)
-	}
-	if rec.Body.Len() < 100_000 {
-		t.Errorf("vendored hls.js is only %d bytes; that is not the library", rec.Body.Len())
-	}
-	if got := rec.Header().Get("Content-Type"); !strings.Contains(got, "javascript") {
-		t.Errorf("Content-Type = %q, want a JavaScript type", got)
-	}
-}
 
 // TestVendoredLicenceIsShipped: hls.js is Apache-2.0, which requires the licence
-// to travel with the copy.
-func TestVendoredLicenceIsShipped(t *testing.T) {
-	rec := get(t, mustServer(t), "/vendor/hls.js.LICENSE")
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("the vendored licence is not served: %d", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), "Apache License") {
-		t.Error("the shipped licence is not the Apache License")
-	}
-}
 
 func TestUnknownAssetIs404(t *testing.T) {
 	if rec := get(t, mustServer(t), "/vendor/../server.go"); rec.Code == http.StatusOK {
@@ -471,198 +404,28 @@ func TestLoopbackNeverWarns(t *testing.T) {
 	}
 }
 
-type fakeDial struct{ v any }
-
-func (f fakeDial) Dial() any { return f.v }
-
-// TestServerServesTheDial: the dial is the primary UI per §22A, so it needs a
-// route a client can actually fetch.
-func TestServerServesTheDial(t *testing.T) {
-	s, _ := newServer(t, 0)
-	s.SetDialSource(fakeDial{v: map[string]any{
-		"stations": []map[string]any{{"tag": "rock", "tracks": 412, "jock": "dutch_mahoney"}},
-		"enriched": 412, "total": 652,
-	}})
-
-	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/stations.json", nil))
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /stations.json = %d, want 200", rec.Code)
-	}
-	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
-		t.Errorf("Content-Type = %q", ct)
-	}
-	var got map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("body is not JSON: %v", err)
-	}
-	if got["total"] == nil {
-		t.Error("the payload omits total, so a client cannot say how provisional the dial is")
-	}
-}
-
-// TestServerDialUnavailableWithoutASource: 503, not 404. The route exists; the
-// dial does not yet, which is a real state on an unenriched library.
-func TestServerDialUnavailableWithoutASource(t *testing.T) {
-	s, _ := newServer(t, 0)
-
-	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/stations.json", nil))
-
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Errorf("GET /stations.json with no source = %d, want 503", rec.Code)
-	}
-}
-
-type fakeTuner struct {
-	tuned   string
-	tracks  int
-	verdict string
-	jock    string
-	err     error
-}
-
-func (f *fakeTuner) Tune(tag string) (int, error) {
-	if f.err != nil {
-		return 0, f.err
-	}
-	f.tuned = tag
-	return f.tracks, nil
-}
-func (f *fakeTuner) Feedback(v string) error { f.verdict = v; return f.err }
-func (f *fakeTuner) Jocks() any {
-	return map[string]any{"jocks": []map[string]any{
-		{"id": "dutch_mahoney", "name": "Dutch", "on_air": true},
-		{"id": "roxy_sinclair", "name": "Roxy", "on_air": false},
-	}}
-}
-func (f *fakeTuner) SetJock(id string) error {
-	if f.err != nil {
-		return f.err
-	}
-	f.jock = id
-	return nil
-}
-
-func post(t *testing.T, s *Server, path, body string) *httptest.ResponseRecorder {
+// post sends a JSON body. header is an optional name/value pair.
+func post(t *testing.T, s *Server, path, body string, header ...string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	if len(header) == 2 {
+		req.Header.Set(header[0], header[1])
+	}
 	s.Handler().ServeHTTP(rec, req)
 	return rec
 }
 
-// TestServerTunes: the dial is the primary UI, so changing station has to be a
-// real endpoint rather than a restart.
-func TestServerTunes(t *testing.T) {
-	s, _ := newServer(t, 0)
-	tuner := &fakeTuner{tracks: 36}
-	s.SetTuner(tuner)
+// The player-page tests moved to package web in 15a. They are about the PAGE,
+// and once the Angular app is built the route no longer serves it -- so they
+// assert against the embedded file, where the answer does not depend on whether
+// somebody has run `make web`.
 
-	rec := post(t, s, "/tune", `{"tag":"alternative"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("POST /tune = %d, want 200: %s", rec.Code, rec.Body)
-	}
-	if tuner.tuned != "alternative" {
-		t.Errorf("tuned to %q", tuner.tuned)
-	}
-	if !strings.Contains(rec.Body.String(), "36") {
-		t.Errorf("the reply does not say how big the station is: %s", rec.Body)
-	}
-}
-
-// TestServerRecordsAThumbsDown. This is the only signal the writing ever gets
-// from a real ear; everything else is a machine checking rules it was handed.
-func TestServerRecordsAThumbsDown(t *testing.T) {
-	s, _ := newServer(t, 0)
-	tuner := &fakeTuner{}
-	s.SetTuner(tuner)
-
-	if rec := post(t, s, "/feedback", `{"verdict":"down"}`); rec.Code != http.StatusNoContent {
-		t.Fatalf("POST /feedback = %d, want 204: %s", rec.Code, rec.Body)
-	}
-	if tuner.verdict != "down" {
-		t.Errorf("verdict recorded as %q", tuner.verdict)
-	}
-	if rec := post(t, s, "/feedback", `{"verdict":"maybe"}`); rec.Code != http.StatusBadRequest {
-		t.Errorf("an invalid verdict returned %d, want 400", rec.Code)
-	}
-}
-
-// TestServerTuningRequiresAPost: a GET that changed what is playing would be
-// followed by any prefetcher on the network and retuned by a page reload.
-func TestServerTuningRequiresAPost(t *testing.T) {
-	s, _ := newServer(t, 0)
-	s.SetTuner(&fakeTuner{tracks: 5})
-
-	tuner := &fakeTuner{tracks: 5}
-	s.SetTuner(tuner)
-
-	// The request carries a VALID BODY. Neither a status check nor an
-	// "was the tuner called" check catches a mis-routed GET on its own: with
-	// an empty body the handler fails on decoding and returns 400 before it
-	// reaches the tuner, so both assertions pass for the wrong reason. A GET
-	// that would actually have worked is the only thing that distinguishes
-	// "the router refused it" from "the body happened to be missing".
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/tune", strings.NewReader(`{"tag":"alternative"}`))
-	req.Header.Set("Content-Type", "application/json")
-	s.Handler().ServeHTTP(rec, req)
-
-	if tuner.tuned != "" {
-		t.Errorf("GET /tune reached the tuner and tuned to %q", tuner.tuned)
-	}
-	if rec.Code == http.StatusOK {
-		t.Error("GET /tune returned 200")
-	}
-}
-
-// TestServerTuningUnavailableWithoutATuner: 503, because the route exists and
-// the capability does not -- the spike path has no library to tune.
-func TestServerTuningUnavailableWithoutATuner(t *testing.T) {
-	s, _ := newServer(t, 0)
-	for _, p := range []string{"/tune", "/feedback"} {
-		if rec := post(t, s, p, `{}`); rec.Code != http.StatusServiceUnavailable {
-			t.Errorf("POST %s with no tuner = %d, want 503", p, rec.Code)
-		}
-	}
-}
-
-// TestServerListsAndChangesTheJock.
-//
-// Nine personas shipped and the roster was INVISIBLE: the station picked one
-// from what the library sounded like and a listener could not see the others,
-// let alone choose.
-func TestServerListsAndChangesTheJock(t *testing.T) {
-	s, _ := newServer(t, 0)
-	tuner := &fakeTuner{}
-	s.SetTuner(tuner)
-
-	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/jocks.json", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /jocks.json = %d, want 200", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), "on_air") {
-		t.Error("the roster does not say who is on air")
-	}
-
-	if rec := post(t, s, "/jock", `{"id":"roxy_sinclair"}`); rec.Code != http.StatusNoContent {
-		t.Fatalf("POST /jock = %d, want 204: %s", rec.Code, rec.Body)
-	}
-	if tuner.jock != "roxy_sinclair" {
-		t.Errorf("jock set to %q", tuner.jock)
-	}
-
-	tuner.err = errNoSuchJock
-	if rec := post(t, s, "/jock", `{"id":"nobody"}`); rec.Code != http.StatusBadRequest {
-		t.Errorf("an unknown jock returned %d, want 400", rec.Code)
-	}
-}
-
-var errNoSuchJock = fmt.Errorf("no jock with id \"nobody\"")
+// The dial, tuning, feedback and jock tests that lived here were replaced in
+// 13g: /stations.json now comes from the stations table behind a login, /tune
+// names a station id rather than a tag, and the /jock routes are gone. Their
+// replacements are in listener_test.go, beside the code that answers them.
 
 type fakeAdmin struct {
 	cadence   int
@@ -680,96 +443,97 @@ func (f *fakeAdmin) SetCadence(n int) error {
 }
 func (f *fakeAdmin) SetEnriching(on bool) error { f.enriching = on; return f.err }
 
-func postAuth(t *testing.T, s *Server, path, body, token string) *httptest.ResponseRecorder {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set(AdminTokenHeader, token)
-	}
-	s.Handler().ServeHTTP(rec, req)
-	return rec
-}
+// oldTokenHeader is the header the shared-secret path used to accept. Spelled
+// out here rather than imported, because the constant it came from is deleted:
+// the point of the test is that sending it changes nothing.
+const oldTokenHeader = "X-Jockora-Admin"
 
-// TestAdminWritesRefusedWithoutAToken is the safety property, and the one that
-// matters most on a product shipping no authentication at all.
-//
-// An UNSET token must refuse every write. Treating unset as "allow anyone"
-// would make the default configuration -- the one the supplied compose file
-// publishes on the LAN -- the dangerous one.
-func TestAdminWritesRefusedWithoutAToken(t *testing.T) {
+// TestAdminTokenNoLongerOpensWrites is the safety property of removing a
+// second authority: an operator who still has the old secret in a script must
+// not keep write access that nobody is tracking any more.
+func TestAdminTokenNoLongerOpensWrites(t *testing.T) {
 	s, _ := newServer(t, 0)
 	admin := &fakeAdmin{cadence: 4}
 	s.SetAdmin(admin)
-	// No SetAdminToken call at all: this is the default configuration.
 
 	for _, tc := range []struct{ path, body string }{
 		{"/admin/cadence", `{"cadence":99}`},
 		{"/admin/enriching", `{"enriching":false}`},
 	} {
-		rec := postAuth(t, s, tc.path, tc.body, "")
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("POST %s with no token configured = %d, want 403", tc.path, rec.Code)
-		}
-		if !strings.Contains(rec.Body.String(), "JOCKORA_ADMIN_TOKEN") {
-			t.Errorf("the refusal does not name the fix: %s", rec.Body)
+		rec := post(t, s, tc.path, tc.body, oldTokenHeader, "correct-horse")
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("POST %s with the old token = %d, want 401", tc.path, rec.Code)
 		}
 	}
 	if admin.cadence != 4 {
-		t.Errorf("cadence was changed to %d despite no token", admin.cadence)
+		t.Errorf("cadence was changed to %d by the deleted token path", admin.cadence)
+	}
+	if admin.enriching {
+		t.Error("enrichment was toggled by the deleted token path")
 	}
 }
 
-// TestAdminWritesRejectAWrongToken.
-func TestAdminWritesRejectAWrongToken(t *testing.T) {
-	s, _ := newServer(t, 0)
+// TestAdminTokenGoneAdminCanWrite.
+//
+// This used to assert that the door was closed to EVERYONE, which was the right
+// state while 10g had deleted the shared token and no accounts existed yet.
+// 13a built the accounts; the door now opens for an operator and nobody else.
+func TestAdminTokenGoneAdminCanWrite(t *testing.T) {
+	s, st, _ := authServer(t)
 	admin := &fakeAdmin{cadence: 4}
 	s.SetAdmin(admin)
-	s.SetAdminToken("correct-horse")
+	_ = st
 
-	if rec := postAuth(t, s, "/admin/cadence", `{"cadence":99}`, "wrong"); rec.Code != http.StatusForbidden {
-		t.Errorf("a wrong token = %d, want 403", rec.Code)
+	// Anonymous is still refused, and told to sign in rather than told the
+	// route does not exist.
+	rec := post(t, s, "/admin/cadence", `{"cadence":8}`)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("POST /admin/cadence anonymously = %d, want 401: %s", rec.Code, rec.Body)
 	}
 	if admin.cadence != 4 {
-		t.Errorf("cadence changed to %d on a wrong token", admin.cadence)
+		t.Errorf("cadence changed to %d through a closed door", admin.cadence)
 	}
-	if rec := postAuth(t, s, "/admin/cadence", `{"cadence":8}`, "correct-horse"); rec.Code != http.StatusNoContent {
-		t.Fatalf("the right token = %d, want 204: %s", rec.Code, rec.Body)
+
+	// A listener is 403: they signed in, and it is not enough.
+	if rec := as(t, s, http.MethodPost, "/admin/cadence", `{"cadence":8}`,
+		listenerCookie(t, s)); rec.Code != http.StatusForbidden {
+		t.Errorf("a listener = %d, want 403", rec.Code)
+	}
+	if admin.cadence != 4 {
+		t.Errorf("a listener changed the cadence to %d", admin.cadence)
+	}
+
+	// An operator gets through, which is the whole point of the account.
+	if rec := as(t, s, http.MethodPost, "/admin/cadence", `{"cadence":8}`,
+		adminCookie(t, s)); rec.Code != http.StatusNoContent {
+		t.Fatalf("an operator = %d, want 204: %s", rec.Code, rec.Body)
 	}
 	if admin.cadence != 8 {
-		t.Errorf("cadence = %d after an authorised write, want 8", admin.cadence)
+		t.Errorf("cadence = %d after an operator changed it, want 8", admin.cadence)
 	}
 }
 
-// TestAdminReadsAreOpen: /now.json already exposes this class of information on
-// an unauthenticated service, so gating reads would break the page and protect
-// nothing new.
-func TestAdminReadsAreOpen(t *testing.T) {
+// TestAdminReadsNeedAnOperator.
+//
+// This used to assert the opposite: the overview was open, on the reasoning
+// that /now.json already exposed that class of information. 13a gave the server
+// accounts and 13g took the library detail off /now.json, so the overview is
+// now the one place that carries it -- track counts, enrichment progress, what
+// the operator has configured -- and it belongs behind the operator's door with
+// everything else on that page.
+func TestAdminReadsNeedAnOperator(t *testing.T) {
 	s, _ := newServer(t, 0)
 	s.SetAdmin(&fakeAdmin{cadence: 4})
 
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/overview.json", nil))
-	if rec.Code != http.StatusOK {
-		t.Errorf("GET /admin/overview.json = %d, want 200", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("GET /admin/overview.json anonymously = %d, want 401", rec.Code)
 	}
 }
 
-// TestListenerControlsAreNotBehindTheAdminToken: tuning and picking a jock
-// change what is playing now, which is what the dial is for. The token guards
-// operator CONFIGURATION, which outlives the session.
-func TestListenerControlsAreNotBehindTheAdminToken(t *testing.T) {
-	s, _ := newServer(t, 0)
-	tuner := &fakeTuner{tracks: 12}
-	s.SetTuner(tuner)
-	s.SetAdmin(&fakeAdmin{})
-	s.SetAdminToken("correct-horse")
-
-	if rec := postAuth(t, s, "/tune", `{"tag":"rock"}`, ""); rec.Code != http.StatusOK {
-		t.Errorf("POST /tune without the admin token = %d, want 200", rec.Code)
-	}
-	if rec := postAuth(t, s, "/jock", `{"id":"roxy_sinclair"}`, ""); rec.Code != http.StatusNoContent {
-		t.Errorf("POST /jock without the admin token = %d, want 204", rec.Code)
-	}
-}
+// TestListenerControlsStayOpen was about /tune and /jock not being behind the
+// admin token. 13g made both routes require a listener session instead, and
+// /jock no longer exists; listener_test.go's TestListenerCannotReachAdmin
+// carries what this was protecting -- that a listener's own controls and the
+// operator's are different doors.

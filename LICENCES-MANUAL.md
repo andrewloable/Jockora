@@ -1,9 +1,15 @@
 # Manual licence checklist
 
-`scripts/check-licences.sh` inspects Go modules only. The five components below
-are invisible to it: four are separate processes and one is a browser asset.
-None of them is linked into the Jockora binary, and that distinction is the whole
-reason the commercial track survives.
+Two automated gates cover what ships: `scripts/check-licences.sh` over Go
+modules, and `scripts/check-licences-node.sh` over the npm packages that reach
+the browser bundle. The four components below are invisible to both: every one
+is a separate process. None of them is linked into the Jockora binary, and that
+distinction is the whole reason the commercial track survives.
+
+**hls.js used to be a fifth.** It was hand-vendored at `web/vendor/` for the
+hand-written pages; those pages and that copy were deleted in the row 15 gate,
+and the Angular app takes hls.js from npm, where the node gate covers it
+automatically. One fewer thing to remember by hand.
 
 This file exists so that a commercial licensee's lawyer finds a documented
 finding rather than an accident.
@@ -19,12 +25,54 @@ Allowed for anything linked: **MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause,
 ISC**. Not LGPL. Not MPL. Both impose obligations a commercial exception cannot
 absorb.
 
-## The five components go-licenses cannot see
+The npm gate allows those five plus **0BSD, CC0-1.0 and Unlicense**, which are
+public-domain-equivalent grants and strictly more permissive than MIT. `tslib`
+is the only current package that needs one.
+
+## The Angular build is inside the gate
+
+**The bundle is what ships.** `web/dist` is embedded in the binary by
+`web/web.go` and served to every listener, so an npm package that reaches it is
+distributed exactly as surely as a linked Go module. `scripts/check-licences-node.sh`
+is the `go-licenses` of npm and runs in the same CI job.
+
+It checks `--production` only: devDependencies — the Angular CLI, Vitest, the
+TypeScript compiler — are build tools that never reach a browser, the same
+reason the Go gate walks the import graph rather than the module graph.
+
+Everything in the bundle today, verified 2026-09-07 with `e9a.36`:
+
+| Package | Licence |
+|---|---|
+| `@angular/common`, `compiler`, `core`, `forms`, `platform-browser`, `router` 22.1.5 | MIT |
+| `hls.js` 1.7.2 | Apache-2.0 |
+| `rxjs` 7.8.2 | Apache-2.0 |
+| `tslib` 2.8.1 | 0BSD |
+| `@standard-schema/spec` 1.1.0, `zod` 4.4.3 | MIT |
+
+Two notes on the gate's own flags:
+
+- **`--excludePrivatePackages`** skips `jockora-web` itself, which is
+  AGPL-3.0-only because it is ours. This is the same exemption the Go gate
+  spells as `--ignore github.com/andrewloable/jockora`: the gate is about what
+  we link, not what we are. Nothing published to npm can be marked private, so
+  it cannot hide a third-party package.
+- **`--failOn` is not used.** The tool refuses it in combination with
+  `--onlyAllow`. It is not needed: a package with no licence field is reported
+  as `UNKNOWN`, which is not on the allowed list and is therefore rejected — a
+  package whose terms nobody has read is the same risk as one with bad terms.
+  `test/licence_node_test.go` proves both the GPL and the missing-licence case
+  by planting a package and watching the gate reject it by name.
+
+`license-checker-rseidelsohn` is itself **MIT**. It is fetched by `npx` at gate
+time and is not a dependency of the app, so it neither ships nor appears in the
+lockfile.
+
+## The four components neither gate can see
 
 | Component | Licence | Relationship | Verdict |
 |---|---|---|---|
 | **ffmpeg / ffprobe** | GPL-2.0+ or LGPL-2.1+ depending on build flags | Separate process, invoked via `exec`, operator-supplied | **Safe.** Never vendored, never linked. Jockora exchanges bytes with it over pipes and command-line arguments, which is not a derivative work. |
-| **hls.js** v1.5.17 | Apache-2.0 | Browser asset, served to the client, vendored at `web/vendor/` | **Safe and permissive anyway.** Its licence ships beside it at `web/vendor/hls.js.LICENSE`, as Apache-2.0 requires. |
 | **Kokoro TTS** | Model weights **Apache-2.0** (hexgrad/Kokoro-82M); the `kokoro-onnx` runtime wrapper **MIT**; onnxruntime **MIT** | Python sidecar, separate process, spoken to over local HTTP; model files and the venv are operator-supplied, never vendored | **Safe, and permissive even if it were linked.** Recorded 2026-09-06 with 96e.1. Nothing here enters the Go binary: there is no cgo ONNX binding, deliberately, because one would end the static cross-compile as well as pull a second licence surface into the executable. |
 | **llama.cpp / llama-server** | MIT | Separate service the operator runs and points Jockora at | **Safe.** MIT regardless, and out-of-process. |
 | **librosa** and its stack (numpy, scipy, numba, llvmlite) | librosa **ISC**; numpy, scipy, soundfile **BSD-3-Clause**; numba, llvmlite **BSD-2-Clause** | Imported by the Python sidecar for vocal-onset analysis; separate process, operator-installed into its own venv | **Safe, and permissive anyway.** Recorded 2026-09-06 with 96e.9. Every one is on the allowed list even for linked code, and none of it is linked: the sidecar is reached over local HTTP and the audio it analyses is decoded by ffmpeg, not by this stack. |
@@ -60,5 +108,6 @@ discovered later by a licensee.
 
 ## Adding a dependency
 
-Run `bash scripts/check-licences.sh` **before** committing it. The gate is not
-advisory.
+Run `bash scripts/check-licences.sh` for a Go module, or
+`bash scripts/check-licences-node.sh` for an npm package, **before** committing
+it. `make gates` runs both. Neither is advisory.

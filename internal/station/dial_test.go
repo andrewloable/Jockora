@@ -68,9 +68,12 @@ func rep(s string, n int) []string {
 // the library, not a blank form.
 func TestDialProposesBucketsBiggestFirst(t *testing.T) {
 	s := dialStore(t, map[string][]string{
-		"rock":      rep("aggressive", 20),
-		"ambient":   rep("calm", 12),
-		"synthwave": rep("nocturnal", 9),
+		"rock":    rep("aggressive", 20),
+		"ambient": rep("calm", 12),
+		// Exactly MinStationTracks: the smallest bucket that is still a
+		// station, so this test says something about ordering and not about
+		// the threshold.
+		"synthwave": rep("nocturnal", 10),
 	}, 0)
 
 	d, err := ProposeDial(context.Background(), s, nil)

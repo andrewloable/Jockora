@@ -40,3 +40,9 @@ jockora_brainstorming_product_direction.md
 # copyright holder; see Jockora-l6o.10.
 docs/demo*.mp3
 *.wav
+
+# The browser app's dependencies and its build output. The app's SOURCE is
+# tracked; what npm and ng produce from it is not.
+/web/app/node_modules/
+/web/dist/*
+!/web/dist/.gitkeep

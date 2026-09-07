@@ -1,6 +1,25 @@
 # Copyright (C) 2026 Andrew Loable
 # SPDX-License-Identifier: AGPL-3.0-only
 
+# --- the browser app --------------------------------------------------------
+#
+# A STAGE OF ITS OWN, and it has to run: web/dist is gitignored build output, so
+# an image that skipped this would compile, link, start, and serve the "assets
+# not built" notice to every listener. test/docker_test.go exists to catch
+# exactly that.
+#
+# Alpine is fine here. Nothing from this stage runs in the final image -- only
+# the JavaScript it emits, which has no libc of its own.
+FROM node:lts-alpine AS web
+WORKDIR /src
+
+# The lockfile first, so a source change does not re-download node_modules.
+COPY web/app/package.json web/app/package-lock.json ./web/app/
+RUN cd web/app && npm ci
+
+COPY web/ ./web/
+RUN cd web/app && npx ng build --configuration production
+
 # --- build ------------------------------------------------------------------
 FROM golang:1.25-alpine AS build
 WORKDIR /src
@@ -10,6 +29,11 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+# The bundle, embedded by web/web.go. AFTER the source copy, or it would be
+# overwritten by the working tree's own web/dist -- which on a developer's
+# machine holds whatever was last built by hand, and in a clean checkout holds
+# only .gitkeep.
+COPY --from=web /src/web/dist/ ./web/dist/
 # CGO_ENABLED=0 is not incidental: the SQLite driver is modernc.org/sqlite
 # precisely so this binary is static and cross-compilable, and the CI
 # cross-compile gate exists to keep it that way.

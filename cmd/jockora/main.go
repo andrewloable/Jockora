@@ -26,6 +26,7 @@ import (
 	"github.com/andrewloable/jockora/internal/doctor"
 	"github.com/andrewloable/jockora/internal/errs"
 	"github.com/andrewloable/jockora/internal/library"
+	"golang.org/x/term"
 )
 
 // Version is the release this binary reports. Semver, so an operator can tell
@@ -41,7 +42,7 @@ var Version = "0.1.0"
 // Naming it here rather than letting it accrue is the point of this list: a
 // tool whose commands arrived one at a time feels arbitrary to use, and every
 // one of them is a promise that has to keep working.
-var subcommands = []string{"serve", "scan", "enrich", "doctor", "version"}
+var subcommands = []string{"serve", "scan", "enrich", "admin", "doctor", "version"}
 
 // usageExit is what an unusable command line exits with. Two, not one, so a
 // script can tell "you asked for something that does not exist" from "the thing
@@ -81,11 +82,52 @@ func dispatch(ctx context.Context, args []string, out io.Writer) int {
 		return 0
 	}
 
+	// admin parses its own flags: its arguments are a verb and a name, which
+	// the server's flag set knows nothing about.
+	if name == "admin" {
+		cfg, err := config.LoadArgs(nil, nil)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "jockora:", err)
+			return 1
+		}
+		if err := runAdmin(ctx, args[1:], cfg.DBPath, promptPassword(out), out); err != nil {
+			fmt.Fprintln(os.Stderr, "jockora:", err)
+			return 1
+		}
+		return 0
+	}
+
 	if err := runSubcommand(ctx, name, args[1:], out); err != nil {
 		fmt.Fprintln(os.Stderr, "jockora:", err)
 		return 1
 	}
 	return 0
+}
+
+// promptPassword reads a password from the terminal WITHOUT ECHO, falling back
+// to a plain line when stdin is a pipe.
+//
+// Not a flag and not an environment variable: a password in a flag is a
+// password in the shell history and in every ps listing on the machine while
+// the command runs.
+//
+// Lives here rather than beside runAdmin because it needs a real terminal, and
+// a function that can only be exercised under a pseudo-terminal does not belong
+// in the file that has to be tested without one.
+func promptPassword(out io.Writer) passwordFunc {
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return stdinPassword(os.Stdin)
+	}
+	return func() (string, error) {
+		fmt.Fprint(out, "password: ")
+		b, err := term.ReadPassword(fd)
+		fmt.Fprintln(out)
+		if err != nil {
+			return "", fmt.Errorf("reading the password: %w", err)
+		}
+		return string(b), nil
+	}
 }
 
 func printUsage(out io.Writer, unknown string) {
@@ -97,6 +139,7 @@ func printUsage(out io.Writer, unknown string) {
   serve     stream the station
   scan      read the music library into the database
   enrich    build dossiers for scanned tracks
+  admin     create the first operator account
   doctor    check that everything this needs is present
   version   print the version
 

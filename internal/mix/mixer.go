@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"runtime/debug"
+	"sync/atomic"
 	"time"
 
 	"github.com/andrewloable/jockora/internal/clock"
@@ -84,7 +85,12 @@ type Mixer struct {
 	// exists so a test can drive the loop deterministically.
 	onBlock func(pos int64)
 
-	samplePos   int64
+	// samplePos is ATOMIC because /now.json reads it from the HTTP goroutine
+	// while Run writes it on the audio one. It is written exactly once per
+	// block and read as a whole number of frames, so an atomic load is all the
+	// synchronisation a reader needs -- and without it every poll of the
+	// player page races the audio thread.
+	samplePos   atomic.Int64
 	speech      []Frame // speech waiting to be mixed in
 	speechPos   int     // frames of speech already mixed
 	speechStart int64   // absolute input sample at which speech[0] belongs
@@ -106,9 +112,9 @@ func (m *Mixer) guard(log *slog.Logger, fn func()) (panicked bool) {
 	return false
 }
 
-// SamplePos reports how many frames the mixer has produced. Safe to read only
-// after Run has returned.
-func (m *Mixer) SamplePos() int64 { return m.samplePos }
+// SamplePos reports how many frames the mixer has produced. Safe to read while
+// Run is going, which is when a status endpoint asks.
+func (m *Mixer) SamplePos() int64 { return m.samplePos.Load() }
 
 // Run produces audio until ctx is cancelled, and returns ctx.Err() when it is.
 func (m *Mixer) Run(ctx context.Context) error {
@@ -175,7 +181,7 @@ func (m *Mixer) Run(ctx context.Context) error {
 			// sub-block placement below: a break due mid-block would otherwise wait
 			// for the next boundary and land up to a whole block late.
 			latency := int64(m.Chain.LatencyFrames())
-			for _, e := range m.Queue.DrainDue(m.samplePos + int64(block) + latency - 1) {
+			for _, e := range m.Queue.DrainDue(m.samplePos.Load() + int64(block) + latency - 1) {
 				frames, err := ReadWAV(e.Path)
 				if err != nil {
 					// Breaks are optional, music is not. Log it and keep going.
@@ -190,14 +196,14 @@ func (m *Mixer) Run(ctx context.Context) error {
 					continue
 				}
 				m.speech, m.speechPos = frames, 0
-				m.speechStart = max(e.AfterSample-latency, m.samplePos)
+				m.speechStart = max(e.AfterSample-latency, m.samplePos.Load())
 			}
 
 			// 3. Place this block's speech at its exact offset within the block.
 			clear(speech)
 			speaking := false
 			if m.speechPos < len(m.speech) {
-				off := int(m.speechStart + int64(m.speechPos) - m.samplePos)
+				off := int(m.speechStart + int64(m.speechPos) - m.samplePos.Load())
 				if off < 0 {
 					off = 0 // enqueued late; start it now rather than losing it
 				}
@@ -239,10 +245,10 @@ func (m *Mixer) Run(ctx context.Context) error {
 
 		// 6. Pace to the wall clock, then 7. advance the sample clock.
 		m.Pacer.Wait(len(out))
-		m.samplePos += int64(len(out))
+		pos := m.samplePos.Add(int64(len(out)))
 
 		if m.onBlock != nil {
-			m.onBlock(m.samplePos)
+			m.onBlock(pos)
 		}
 	}
 }

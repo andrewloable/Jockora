@@ -36,6 +36,12 @@ type Subsonic struct {
 	Password string
 	Client   *http.Client
 
+	// SourceID stamps the rows and namespaces their paths.
+	SourceID int64
+
+	// Stamp marks every row this walk sees. Zero means the clock.
+	Stamp int64
+
 	// PageSize overrides how many albums are requested at a time. Zero means
 	// pageSize. It exists so paging can actually be TESTED: with the real value
 	// a test would need 500 fake albums before the loop fetched a second page,
@@ -252,17 +258,13 @@ func (s Subsonic) Scan(ctx context.Context, st *store.Store, progress ScanProgre
 					progress(stats.Found, song.Artist+" - "+song.Title)
 				}
 
-				streamURL, err := s.StreamURL(song.ID)
-				if err != nil {
-					return stats, err
-				}
-				added, err := upsert(ctx, st, streamURL, metadata{
+				added, err := upsert(ctx, st, SubsonicLocator(s.SourceID, song.ID), metadata{
 					artist:   song.Artist,
 					title:    song.Title,
 					album:    song.Album,
 					year:     song.Year,
 					duration: float64(song.Duration),
-				}, true, song.Size, 0)
+				}, true, song.Size, 0, s.SourceID, orNow(s.Stamp))
 				if err != nil {
 					return stats, err
 				}

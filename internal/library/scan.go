@@ -44,6 +44,7 @@ type Stats struct {
 	Updated    int // existing rows refreshed
 	Skipped    int // unchanged since the last scan, not re-probed
 	Unplayable int // files ffprobe could not read
+	Marked     int // rows flagged missing because the walk did not see them
 
 	// Rejected carries one wrapped errs.ErrUnsupportedFormat per unplayable
 	// file, so a caller can report WHICH files were refused rather than only
@@ -83,6 +84,13 @@ func Scan(ctx context.Context, s *store.Store, root string) (Stats, error) {
 
 // ScanWithProgress is Scan, reporting as it goes.
 func ScanWithProgress(ctx context.Context, s *store.Store, root string, progress ScanProgress) (Stats, error) {
+	return scanFolder(ctx, s, root, 0, time.Now().Unix(), progress)
+}
+
+// scanFolder is ScanWithProgress with the source the rows belong to. A zero id
+// records NULL, which is what a v0.1 database and a bare `jockora scan` leave
+// behind, and what ScanSources later adopts.
+func scanFolder(ctx context.Context, s *store.Store, root string, sourceID, stamp int64, progress ScanProgress) (Stats, error) {
 	var stats Stats
 
 	fi, err := os.Stat(root)
@@ -120,7 +128,9 @@ func ScanWithProgress(ctx context.Context, s *store.Store, root string, progress
 			}
 			if unchanged {
 				stats.Skipped++
-				return nil
+				// Seen, even though not read. Skipping without recording it
+				// would make every unchanged track look gone.
+				return touch(ctx, s, path, stamp)
 			}
 		}
 
@@ -153,7 +163,7 @@ func ScanWithProgress(ctx context.Context, s *store.Store, root string, progress
 		if info, statErr := d.Info(); statErr == nil {
 			size, modified = info.Size(), info.ModTime().Unix()
 		}
-		added, upsertErr := upsert(ctx, s, path, meta, probeErr == nil, size, modified)
+		added, upsertErr := upsert(ctx, s, path, meta, probeErr == nil, size, modified, sourceID, stamp)
 		if upsertErr != nil {
 			return upsertErr
 		}
@@ -254,7 +264,7 @@ func unchangedSince(ctx context.Context, s *store.Store, path string, size, modi
 	return storedSize.Int64 == size && storedMod.Int64 == modified, nil
 }
 
-func upsert(ctx context.Context, s *store.Store, path string, m metadata, playable bool, size, modified int64) (bool, error) {
+func upsert(ctx context.Context, s *store.Store, path string, m metadata, playable bool, size, modified, sourceID, stamp int64) (bool, error) {
 	playableInt := 0
 	if playable {
 		playableInt = 1
@@ -271,8 +281,8 @@ func upsert(ctx context.Context, s *store.Store, path string, m metadata, playab
 	}
 
 	_, err = s.DB().ExecContext(ctx, `
-		INSERT INTO tracks (path, artist, title, album, year, duration_s, playable, scanned_at, size_bytes, modified_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO tracks (path, artist, title, album, year, duration_s, playable, scanned_at, size_bytes, modified_at, source_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET
 			artist      = excluded.artist,
 			title       = excluded.title,
@@ -282,8 +292,15 @@ func upsert(ctx context.Context, s *store.Store, path string, m metadata, playab
 			playable    = excluded.playable,
 			scanned_at  = excluded.scanned_at,
 			size_bytes  = excluded.size_bytes,
-			modified_at = excluded.modified_at`,
-		path, m.artist, m.title, m.album, m.year, m.duration, playableInt, time.Now().Unix(), size, modified)
+			modified_at = excluded.modified_at,
+			-- coalesce, never a plain assignment: a bare 'jockora scan' passes
+			-- no source, and overwriting would UNCLAIM every row it touched.
+			source_id   = coalesce(excluded.source_id, tracks.source_id),
+			-- Present again. A row that is being written is by definition not
+			-- missing, so the mark clears itself with no separate pass.
+			missing_at  = NULL`,
+		path, m.artist, m.title, m.album, m.year, m.duration, playableInt, stamp,
+		size, modified, nullableID(sourceID))
 	if err != nil {
 		return false, fmt.Errorf("library: recording %s: %w", path, err)
 	}
@@ -311,4 +328,13 @@ func parseYear(s string) int {
 		return 0
 	}
 	return y
+}
+
+// nullableID records an unset source as NULL rather than as source 0, which is
+// not a source and would fail the foreign key.
+func nullableID(id int64) any {
+	if id == 0 {
+		return nil
+	}
+	return id
 }

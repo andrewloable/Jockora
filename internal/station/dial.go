@@ -25,10 +25,28 @@ const UnsortedTag = "unsorted"
 
 // MinStationTracks is the smallest bucket worth showing as its own station.
 //
-// Below this a station is a novelty that runs out after two records and then
-// repeats. Everything smaller is folded into the catch-all, which is honest:
-// those tracks are still there, they just do not deserve a dial position.
-const MinStationTracks = 8
+// TEN, not eight: at ten tracks of average length a listener hears the same
+// record again inside forty minutes, which is the point where a station stops
+// sounding like a station. Everything smaller is folded into the catch-all,
+// which is honest -- those tracks are still there, they just do not deserve a
+// dial position.
+const MinStationTracks = 10
+
+// WarnStationTracks is where a station stops feeling thin.
+//
+// Not a refusal: fifty is a judgement, and an operator who wants a station of
+// twelve deep cuts is entitled to one. It is the number the console warns at so
+// they choose it rather than discover it.
+const WarnStationTracks = 50
+
+// CheckThreshold reports whether a station may run, and whether to warn.
+//
+// Two answers rather than one, because "too small to work" and "smaller than
+// most people want" are different things and a console says different words
+// about them.
+func CheckThreshold(n int) (ok, warn bool) {
+	return n >= MinStationTracks, n >= MinStationTracks && n < WarnStationTracks
+}
 
 // Station is one position on the dial.
 type Station struct {

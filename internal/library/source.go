@@ -5,6 +5,7 @@ package library
 
 import (
 	"context"
+	"time"
 
 	"github.com/andrewloable/jockora/internal/store"
 )
@@ -32,12 +33,30 @@ type Source interface {
 
 // Folder is the local-directory Source: the original scanner, behind the
 // interface.
-type Folder struct{ Root string }
+type Folder struct {
+	Root string
+	// SourceID stamps every row with the source it came from. Zero records
+	// NULL, which is what the standalone scan command produces.
+	SourceID int64
+
+	// Stamp marks every row this walk sees, so removal detection can tell
+	// what it did not see. Zero means the clock.
+	Stamp int64
+}
 
 func (f Folder) Name() string { return "folder " + f.Root }
 
 func (f Folder) Scan(ctx context.Context, s *store.Store, progress ScanProgress) (Stats, error) {
-	return ScanWithProgress(ctx, s, f.Root, progress)
+	return scanFolder(ctx, s, f.Root, f.SourceID, orNow(f.Stamp), progress)
+}
+
+// orNow resolves an unset stamp to the clock, so a Source built by hand still
+// records a sensible scanned_at.
+func orNow(stamp int64) int64 {
+	if stamp == 0 {
+		return time.Now().Unix()
+	}
+	return stamp
 }
 
 // compile-time proof that the local scanner satisfies the interface a remote

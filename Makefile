@@ -21,10 +21,34 @@ test-race:
 vet:
 	go vet ./...
 
-# The three gates CI enforces, runnable by hand.
+# The four gates CI enforces, runnable by hand.
+#
+# check-licences-node.sh SKIPS when web/app/node_modules is absent, so this
+# target still works on a machine with no Node -- the same reason `web` is not a
+# dependency of anything. CI installs Node, so there it always runs.
 gates:
 	bash scripts/check-headers.sh
 	bash scripts/check-licences.sh
+	bash scripts/check-licences-node.sh
 	bash scripts/check-crosscompile.sh
 
 all: test vet gates
+
+# web builds the browser app into web/dist, which the Go binary embeds.
+#
+# NOT a dependency of anything else. The Go build has to work on a machine with
+# no Node installed -- that is what web/fallback.html is for -- so this is run
+# deliberately, by whoever is changing the app.
+.PHONY: web web-test
+web:
+	cd web/app && npm ci && npx ng build --configuration production
+	# `ng build` CLEANS its output directory, which takes .gitkeep with it --
+	# and .gitkeep is the only thing that makes `//go:embed all:dist` legal on a
+	# tree that has never built the app. Without this, `make web` followed by a
+	# clean of dist leaves a package that will not compile.
+	touch web/dist/.gitkeep
+
+# web-test runs the app's own tests with the 100% coverage thresholds that
+# match the Go side's.
+web-test:
+	cd web/app && npx ng test --watch=false

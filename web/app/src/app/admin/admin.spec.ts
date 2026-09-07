@@ -1,0 +1,151 @@
+import { describe, expect, it, beforeEach } from 'vitest';
+import { TestBed } from '@angular/core/testing';
+import { provideHttpClient } from '@angular/common/http';
+import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
+import { Admin } from './admin';
+import { adminRoutes } from './admin.routes';
+import { adminGuard } from './admin.guard';
+
+describe('Admin', () => {
+  let ctrl: HttpTestingController;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [Admin],
+      providers: [provideHttpClient(), provideHttpClientTesting()],
+    }).compileComponents();
+    ctrl = TestBed.inject(HttpTestingController);
+  });
+
+  // Whatever the section that just mounted asked for. The shell's job is to
+  // mount one section; what each of them fetches is its own spec's problem.
+  function settle(fixture: { detectChanges(): void }) {
+    for (const req of ctrl.match(() => true)) {
+      const url = req.request.url;
+      req.flush(
+        url === '/admin/vocab'
+          ? { genres: ['rock'], moods: [] }
+          : url === '/admin/voices'
+            ? { voices: [] }
+            : url.includes('/tracks')
+              ? { tracks: [], total: 0 }
+              : url === '/admin/overview.json'
+                ? {}
+                : url === '/admin/stations'
+                  ? [{ id: 1, name: 'Rock', genre: 'rock', enabled: true, tracks: 90 }]
+                  : [],
+      );
+    }
+    fixture.detectChanges();
+  }
+
+  function mounted() {
+    const fixture = TestBed.createComponent(Admin);
+    fixture.detectChanges();
+    settle(fixture);
+    return fixture;
+  }
+
+  it('opens on the overview', () => {
+    const fixture = mounted();
+    expect(fixture.componentInstance.showing()).toBe('overview');
+    expect(fixture.nativeElement.querySelector('app-overview')).not.toBeNull();
+  });
+
+  it('offers every section', () => {
+    const nav = mounted().nativeElement.querySelectorAll('nav button');
+    expect(Array.from(nav).map((b) => (b as HTMLElement).textContent?.trim())).toEqual([
+      'overview',
+      'sources',
+      'stations',
+      'playlist',
+      'jocks',
+      'people',
+    ]);
+  });
+
+  it('mounts one section at a time', () => {
+    // Six sections polling the server at once for pages nobody is looking at
+    // is a load the operator did not ask for.
+    const fixture = mounted();
+    for (const [section, tag] of [
+      ['sources', 'app-sources'],
+      ['stations', 'app-stations'],
+      ['playlist', 'app-playlist'],
+      ['jocks', 'app-jocks'],
+      ['people', 'app-users'],
+    ] as const) {
+      fixture.nativeElement.querySelector(`[data-section="${section}"]`).click();
+      fixture.detectChanges();
+      settle(fixture);
+      // The playlist editor needs a station picked before it mounts at all.
+      settle(fixture);
+      expect(fixture.nativeElement.querySelector(tag)).not.toBeNull();
+      expect(fixture.nativeElement.querySelectorAll('app-overview').length).toBe(0);
+    }
+  });
+
+  it('picks a station for the playlist editor, and lets it be changed', () => {
+    // The editor edits ONE station, so the console has to say which.
+    const fixture = mounted();
+    fixture.nativeElement.querySelector('[data-section="playlist"]').click();
+    fixture.detectChanges();
+    ctrl.expectOne('/admin/stations').flush([
+      { id: 1, name: 'Rock', genre: 'rock', enabled: true, tracks: 90 },
+      { id: 7, name: 'Calm', genre: 'ambient', enabled: true, tracks: 60 },
+    ]);
+    fixture.detectChanges();
+    expect(fixture.componentInstance.picked()).toBe(1);
+    settle(fixture);
+
+    const select = fixture.nativeElement.querySelector('[data-pick-station]');
+    expect(Array.from(select.options).map((o) => (o as HTMLOptionElement).value)).toEqual([
+      '1',
+      '7',
+    ]);
+    select.value = '7';
+    select.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    expect(fixture.componentInstance.picked()).toBe(7);
+    settle(fixture);
+  });
+
+  it('says so rather than showing an empty editor', () => {
+    const fixture = mounted();
+    fixture.nativeElement.querySelector('[data-section="playlist"]').click();
+    fixture.detectChanges();
+    ctrl.expectOne('/admin/stations').flush([]);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-playlist')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-no-stations]').textContent).toContain(
+      'No stations yet',
+    );
+  });
+
+  it('shows nothing to edit when the stations cannot be read', () => {
+    const fixture = mounted();
+    fixture.nativeElement.querySelector('[data-section="playlist"]').click();
+    fixture.detectChanges();
+    ctrl.expectOne('/admin/stations').flush(null, { status: 500, statusText: 'Error' });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-playlist')).toBeNull();
+  });
+
+  it('marks the open section for a screen reader', () => {
+    const fixture = mounted();
+    expect(
+      fixture.nativeElement.querySelector('[data-section="overview"]').getAttribute('aria-current'),
+    ).toBe('page');
+    expect(
+      fixture.nativeElement.querySelector('[data-section="jocks"]').getAttribute('aria-current'),
+    ).toBeNull();
+  });
+
+  it('is guarded', () => {
+    // Without this the console renders for a listener for as long as it takes
+    // the redirect to happen, and every one of its calls 403s in the console.
+    expect(adminRoutes[0].path).toBe('');
+    expect(adminRoutes[0].component).toBe(Admin);
+    expect(adminRoutes[0].canActivate).toEqual([adminGuard]);
+  });
+});

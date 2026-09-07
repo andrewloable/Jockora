@@ -29,6 +29,26 @@ jobs:
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: web/app/package-lock.json
+
+      # The browser app is tested and built BEFORE the Go build, because the Go
+      # build embeds its output: web/dist is gitignored, so a job that skipped
+      # this would compile a binary that serves the "assets not built" notice.
+      - name: Install the browser app
+        run: cd web/app && npm ci
+
+      # 100% thresholds, the same rule the Go side is held to. The build fails
+      # here, not in review.
+      - name: Test the browser app
+        run: cd web/app && npx ng test --watch=false
+
+      - name: Build the browser app
+        run: cd web/app && npx ng build --configuration production
+
       - name: Build
         run: go build ./...
 
@@ -48,9 +68,26 @@ jobs:
           go-version: '1.25'
           check-latest: true
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: web/app/package-lock.json
+
+      # The node licence gate SKIPS when node_modules is absent, which would
+      # make it a gate that never runs. Installing is what makes it real.
+      - name: Install the browser app
+        run: cd web/app && npm ci
+
       # Each of these fails the build. None of them is a warning.
       - name: Licence gate
         run: bash scripts/check-licences.sh
+
+      # The Angular bundle is embedded in the binary and served to every
+      # listener, so npm dependencies are inside the dual-licensing constraint
+      # exactly as Go modules are.
+      - name: Node licence gate
+        run: bash scripts/check-licences-node.sh
 
       - name: SPDX header gate
         run: bash scripts/check-headers.sh
@@ -64,7 +101,10 @@ jobs:
       # and it fails in the first second. Compiling is cheap; running it here
       # is not, and is not the point.
       - name: Build-tagged tests still compile
-        run: go vet -tags soak ./test/soak/
+        run: |
+          go vet -tags soak ./test/soak/
+          go vet -tags gates ./test/
+          go vet -tags docker ./test/
 
   # ---------------------------------------------------------------------------
   # Release. Tag-only, and it runs AFTER the gates: a tag that fails the licence
@@ -88,6 +128,18 @@ jobs:
       # CGO_ENABLED=0 on every target. This is not a preference: the SQLite
       # driver is modernc.org/sqlite precisely so these binaries are static, and
       # the cross-compile gate above already proves the tree builds this way.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: web/app/package-lock.json
+
+      # BEFORE the binaries, which embed the result. A release built without
+      # this ships the "assets not built" notice to everyone who downloads it,
+      # and the tarball is the thing other people redistribute.
+      - name: Build the browser app
+        run: make web
+
       - name: Build static binaries
         run: |
           set -euo pipefail

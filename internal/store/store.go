@@ -26,6 +26,15 @@ const driverName = "sqlite"
 // ErrSchemaTooNew means the database was written by a newer Jockora.
 var ErrSchemaTooNew = errors.New("store: database schema is newer than this build")
 
+// ErrNotFound means the row asked for is not there.
+//
+// PACKAGE-WIDE on purpose. Every store added from here on -- users, sources,
+// jocks, stations -- reports a missing row the same way, so a caller writes one
+// errors.Is and not one per table. The task spec for the users store assumed
+// this already existed; it did not, and adding it here rather than privately in
+// users.go is what stops the next store inventing a second one.
+var ErrNotFound = errors.New("store: not found")
+
 // Store is an open database.
 type Store struct {
 	db *sql.DB

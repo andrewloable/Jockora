@@ -87,15 +87,22 @@ func Measure(ctx context.Context, path string) (Measurement, error) {
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-nostdin", "-hide_banner",
 		"-i", path,
-		"-af", "loudnorm=I=-16:print_format=json",
+		// loudnorm's true-peak detection resamples internally (to 192kHz here),
+		// and on ffmpeg 6.1.1 (Ubuntu 24.04, what CI installs) that throws off
+		// -progress's own out_time bookkeeping: it reported 7.1s for a genuine
+		// 10s file even though the actual decoded audio was intact. Splitting
+		// the decoded audio into a second, unfiltered branch gives -progress a
+		// timeline that never gets resampled, so out_time is accurate on every
+		// ffmpeg version tested. Both branches read the SAME decode, so this is
+		// still one decode pass, not two.
+		"-filter_complex", "[0:a]asplit=2[raw][forloud];[forloud]loudnorm=I=-16:print_format=json[loud]",
+		"-map", "[raw]", "-f", "null", "-",
+		"-map", "[loud]", "-f", "null", "-",
 		// Structured progress on STDOUT, which ends with an exact final block.
 		// The alternative -- scraping the periodic "time=" lines ffmpeg writes
 		// to stderr and taking the last one -- reads whatever the last update
-		// happened to say, and on CI's ffmpeg that was 7.1 seconds for a
-		// 10-second file. This is the number truncation detection depends on,
-		// so it must not be whatever a log line last mentioned.
+		// happened to say, which is not necessarily the end of the file either.
 		"-progress", "pipe:1",
-		"-f", "null", "-",
 	)
 
 	// loudnorm prints its summary to STDERR, not stdout. Reading stdout gets

@@ -266,14 +266,41 @@ func (p *Process) spawn(ctx context.Context) error {
 	return nil
 }
 
+// connectGrace is how long an EXTERNAL server has to accept a TCP connection
+// before Jockora stops waiting for it.
+//
+// StartTimeout is minutes, and rightly so: a cold GGUF load takes minutes and
+// giving up early would look like a broken server rather than a slow disk. But
+// that grace is for a server that is THERE AND LOADING. A server that is not
+// running at all refuses the connection instantly and will go on refusing it,
+// and waiting minutes for that costs the whole product: buildEnricher runs
+// before the HTTP listener, so an operator with no llama-server -- a supported
+// configuration, where the preflight check is deliberately soft -- got a dead
+// port and no page explaining why, for five minutes, every start.
+const connectGrace = 5 * time.Second
+
 func (p *Process) waitHealthy(ctx context.Context) error {
 	deadline := time.Now().Add(p.cfg.StartTimeout)
+	// Only meaningful for an external server. A managed one is a process we
+	// just spawned, and it is entirely normal for it not to have bound its
+	// port yet.
+	connectBy := time.Now().Add(connectGrace)
+	reached := false
+
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if p.poll() {
+		ok, answered := p.poll()
+		if ok {
 			return nil
+		}
+		// ANSWERED AT ALL, at any status, means something is listening: it is
+		// starting up, and it gets the full StartTimeout to finish.
+		reached = reached || answered
+		if p.external && !reached && time.Now().After(connectBy) {
+			return fmt.Errorf("supervise: nothing is listening on %s (%s); waited %s",
+				p.BaseURL(), p.cfg.Name, connectGrace)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -281,20 +308,23 @@ func (p *Process) waitHealthy(ctx context.Context) error {
 		p.cfg.Name, p.BaseURL(), p.cfg.HealthPath, p.cfg.StartTimeout)
 }
 
-func (p *Process) poll() bool {
+// poll reports whether the server is healthy, and separately whether it
+// answered at all. The second value is what tells "loading" apart from "not
+// running": both are unhealthy, and only one is worth waiting minutes for.
+func (p *Process) poll() (healthy, answered bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.BaseURL()+p.cfg.HealthPath, nil)
 	if err != nil {
-		return false
+		return false, false
 	}
 	resp, err := p.http.Do(req)
 	if err != nil {
-		return false
+		return false, false
 	}
 	defer resp.Body.Close() //nolint:errcheck // health probe
 	_, _ = io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode == http.StatusOK
+	return resp.StatusCode == http.StatusOK, true
 }
 
 func (p *Process) kill() {
@@ -328,7 +358,7 @@ func (p *Process) supervise() {
 		case <-tick.C:
 		}
 
-		if p.poll() {
+		if healthy, _ := p.poll(); healthy {
 			p.healthy.Store(true)
 			backoff = p.cfg.Backoff
 			continue

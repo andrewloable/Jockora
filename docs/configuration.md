@@ -12,6 +12,29 @@ is `JOCKORA_LIBRARY_PATH`, `-break-every-n-tracks` is
 `jockora <command> -h` prints the live list. This page explains what changing
 each one does *audibly*, which `-h` cannot.
 
+## Building from source needs Node. Running a release does not.
+
+**If you downloaded a release or pulled the image, skip this.** The browser app
+is already built and embedded in the binary; there is nothing to install and no
+Node on the machine that runs the station.
+
+If you are building from a checkout, the web app is a separate build:
+
+```
+make web          # npm ci, then ng build into web/dist
+go build ./cmd/jockora
+```
+
+`make web` is deliberately **not** a dependency of anything else, because the Go
+build has to work on a machine with no Node at all. When `web/dist` is empty the
+binary still compiles and still streams — it serves a short page saying the
+assets were not built, instead of the console. That is the tell if you ever see
+it in a browser.
+
+`make gates` includes the npm licence gate, which skips itself when
+`web/app/node_modules` is absent. CI installs Node, so there it always runs. See
+`LICENCES-MANUAL.md`.
+
 ## Library and storage
 
 | Flag | Default | What it changes |
@@ -161,34 +184,43 @@ discarded rather than stored, so a track may legitimately have no tempo. The
 selector widens its matching window until something fits, so those tracks are
 still played.
 
-## The operator page
+## The operator console
 
-`GET /admin` renders what the station knows about itself: library and dossier
+`GET /admin` is the operator console: a section for the overview, one for
+sources, one for stations, one for the playlist of a station, one for jocks and
+one for people. It is behind a guard — a listener who opens it is sent back to
+the dial, and somebody with no session goes to the sign-in form.
+
+The **overview** is what the station knows about itself: library and dossier
 progress, loudness and tempo coverage, measured enrichment cost with a
 projection of the time remaining, the advert pool, the break cadence, and the
-listener thumbs-down feed — which was written by `/feedback` and read by nothing
-until this page existed.
+listener thumbs-down feed. Two things are changeable there without a restart:
+the break cadence, and pausing enrichment to hand the machine back for an
+evening without stopping the station.
 
-**Reads are open; writes are not.** `/now.json` already exposes this class of
-information on a service with no authentication, so gating reads would break the
-player page and protect nothing. Writes change what a listener hears, so they
-require a shared secret:
+**Reads of `/now.json` are open; everything else needs a session.** `/now.json`
+already exposes its class of information to anyone who can reach the stream, so
+gating it would break the player and protect nothing. Everything under
+`/admin/` requires the admin role, and the listener endpoints require a signed-in
+listener.
 
-| Flag | Default | What it changes |
-|---|---|---|
-| `-admin-token` | *(empty)* | Shared secret for operator writes. Prefer `JOCKORA_ADMIN_TOKEN`. |
+Create the first operator account from the machine running the server:
 
-**An empty token refuses every write**, and that is deliberate: treating unset
-as "allow anyone" would make the default configuration — which the supplied
-compose file publishes on the LAN — the dangerous one. Send it as the
-`X-Jockora-Admin` header. It is compared in constant time.
+```
+jockora admin create -name andrew
+```
 
-Two things can be changed without a restart: `POST /admin/cadence` with
-`{"cadence":N}`, and `POST /admin/enriching` with `{"enriching":false}` to hand
-the machine back for an evening without stopping the station.
+The password is read from the terminal without echo — never from a flag or an
+environment variable, either of which would leave it in shell history or in a
+`ps` listing. It must be at least 8 characters; a long passphrase is better than
+a short one with a digit stapled on. **Accounts are admin-created and there is
+no self-registration**, which is why this command exists at all: a fresh install
+has nobody who can sign in to create anybody. Every account after the first is
+made in the console's **people** section, which is the only place in the product
+that can create one.
 
-Tuning a station and picking a jock are **listener** controls and are not behind
-the token — they change what is playing now, which is what the dial is for.
+Tuning a station is a **listener** control and is not in the console — it
+changes what is playing now, which is what the dial is for.
 
 ## The dial
 

@@ -4,6 +4,7 @@
 package mix
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/andrewloable/jockora/internal/clock"
@@ -19,9 +20,11 @@ import (
 // never a per-block ticker: a ticker's per-block rounding and the cost of the
 // work between ticks accumulate, and over an hour that is minutes of drift.
 type Pacer struct {
-	clk           clock.Clock
-	start         time.Time
-	framesWritten int64
+	clk   clock.Clock
+	start time.Time
+	// framesWritten is ATOMIC for the same reason as Mixer.samplePos: Drift is
+	// read from the HTTP goroutine while Wait advances it on the audio one.
+	framesWritten atomic.Int64
 }
 
 // NewPacer starts a pacer whose schedule begins now, by the given clock.
@@ -33,9 +36,9 @@ func NewPacer(clk clock.Clock) *Pacer {
 // finished playing. If the caller is already behind schedule it does not sleep
 // at all; it never sleeps a negative duration.
 func (p *Pacer) Wait(frames int) {
-	p.framesWritten += int64(frames)
+	written := p.framesWritten.Add(int64(frames))
 
-	target := p.start.Add(framesToDuration64(p.framesWritten))
+	target := p.start.Add(framesToDuration64(written))
 	if d := target.Sub(p.clk.Now()); d > 0 {
 		p.clk.Sleep(d)
 	}
@@ -44,11 +47,11 @@ func (p *Pacer) Wait(frames int) {
 // Drift reports how far behind schedule the mixer is: elapsed wall time minus
 // the audio produced. Positive means late, negative means running ahead.
 func (p *Pacer) Drift() time.Duration {
-	return p.clk.Now().Sub(p.start) - framesToDuration64(p.framesWritten)
+	return p.clk.Now().Sub(p.start) - framesToDuration64(p.framesWritten.Load())
 }
 
 // FramesWritten reports the total frames accounted for so far.
-func (p *Pacer) FramesWritten() int64 { return p.framesWritten }
+func (p *Pacer) FramesWritten() int64 { return p.framesWritten.Load() }
 
 // framesToDuration64 converts a frame count to wall-clock time without ever
 // forming the full nanosecond product, which would overflow int64 after about

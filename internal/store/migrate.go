@@ -15,7 +15,7 @@ import (
 // It exists from the very first migration, not from the first time the schema
 // changes. Retrofitting versioning after dossiers exist means either discarding
 // hours of enrichment or hand-writing a recovery script.
-const CurrentSchemaVersion = 5
+const CurrentSchemaVersion = 7
 
 // migrations are applied in order; index i brings the schema to version i+1.
 var migrations = []string{
@@ -132,6 +132,106 @@ var migrations = []string{
 		at       INTEGER NOT NULL
 	);
 	CREATE INDEX idx_feedback_verdict ON break_feedback(verdict, at);
+	`,
+
+	// 6: v0.2 -- accounts, sources, jocks, stations and playlists.
+	//
+	// ADDITIVE ONLY. Nothing existing is renamed or dropped: a dossier costs
+	// minutes of model time and there are thousands of them, said_lines
+	// reference tracks, and a lost column is a re-enrichment rather than an
+	// inconvenience. Every change here is a CREATE or an ADD COLUMN.
+	//
+	// NO SEED ROWS. Seeding jocks from personas/, stations from the proposed
+	// dial and sources from the existing flags is CONDITIONAL -- it happens
+	// only when a table is empty -- and a migration runs exactly once whether
+	// or not the condition holds. Seeding lives in the stores.
+	`
+	CREATE TABLE users (
+		id         INTEGER PRIMARY KEY,
+		name       TEXT UNIQUE NOT NULL,
+		pw_hash    TEXT NOT NULL,
+		-- Enforced by the DATABASE rather than by whatever code inserts. Two
+		-- roles is the whole vocabulary; a third would be a design change.
+		role       TEXT NOT NULL CHECK(role IN ('admin','listener')),
+		disabled   INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL
+	);
+
+	-- A source is somewhere music comes from. password is stored AS GIVEN:
+	-- there is no secret encryption here and pretending otherwise would be
+	-- worse than saying so. It is the same trust boundary as the config file
+	-- the credential arrives in.
+	CREATE TABLE sources (
+		id         INTEGER PRIMARY KEY,
+		kind       TEXT NOT NULL CHECK(kind IN ('folder','subsonic')),
+		locator    TEXT NOT NULL,
+		username   TEXT,
+		password   TEXT,
+		enabled    INTEGER NOT NULL DEFAULT 1,
+		created_at INTEGER NOT NULL
+	);
+
+	-- A jock is a persona card in the database rather than only on disk, so an
+	-- operator can edit one without shell access. good_for_genres,
+	-- good_for_moods and forbidden are JSON arrays.
+	CREATE TABLE jocks (
+		id              TEXT PRIMARY KEY,
+		name            TEXT NOT NULL,
+		voice_id        TEXT NOT NULL,
+		good_for_genres TEXT NOT NULL,
+		good_for_moods  TEXT NOT NULL,
+		speech_style    TEXT NOT NULL,
+		personality     TEXT NOT NULL,
+		forbidden       TEXT NOT NULL,
+		updated_at      INTEGER NOT NULL
+	);
+
+	-- ON DELETE SET NULL, not CASCADE: deleting a jock must not delete the
+	-- stations that happened to be using it. They carry on jockless until one
+	-- is assigned.
+	CREATE TABLE stations (
+		id         INTEGER PRIMARY KEY,
+		name       TEXT NOT NULL,
+		genre      TEXT NOT NULL,
+		mood       TEXT,
+		jock_id    TEXT REFERENCES jocks(id) ON DELETE SET NULL,
+		enabled    INTEGER NOT NULL DEFAULT 1,
+		sel_seed   INTEGER,
+		sel_cursor INTEGER,
+		created_at INTEGER NOT NULL
+	);
+
+	-- The materialized playlist. ON DELETE CASCADE from stations so a deleted
+	-- station takes its playlist with it -- and deliberately NOT from tracks,
+	-- because a cascade that reached the library would delete the music.
+	CREATE TABLE station_tracks (
+		station_id INTEGER NOT NULL REFERENCES stations(id) ON DELETE CASCADE,
+		track_id   INTEGER NOT NULL REFERENCES tracks(id),
+		pinned     INTEGER NOT NULL DEFAULT 0,
+		excluded   INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY(station_id, track_id)
+	);
+
+	ALTER TABLE tracks ADD COLUMN source_id INTEGER;
+	-- missing_at marks a track the last scan did not see. NOT a delete: the
+	-- dossier stays, so a source that comes back does not cost a re-enrichment.
+	ALTER TABLE tracks ADD COLUMN missing_at INTEGER;
+	ALTER TABLE ads ADD COLUMN station_id INTEGER;
+	ALTER TABLE break_feedback ADD COLUMN user_id INTEGER;
+
+	CREATE INDEX idx_station_tracks_track ON station_tracks(track_id);
+	`,
+
+	// 7: server settings that must outlive a restart.
+	//
+	// Small and deliberately generic: the first thing in it is the session
+	// signing key, and a key generated fresh on every start would log every
+	// listener out whenever the operator restarted the server.
+	`
+	CREATE TABLE settings (
+		key   TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	);
 	`,
 }
 

@@ -35,6 +35,11 @@ type Selector struct {
 	rnd  *rand.Rand
 	last int64
 
+	// seed is kept so State can hand it back. Without it a station could be
+	// stopped but never resumed: the sequence is reproducible from the seed
+	// and nothing else.
+	seed int64
+
 	// Energy, when set, smooths the tempo jump between consecutive tracks by
 	// REORDERING what is already queued. Optional, and nil on a library with no
 	// measured tempos, which is every library until the analyser has run.
@@ -49,6 +54,7 @@ func NewSelector(trackIDs []int64, seed int64) *Selector {
 	s := &Selector{
 		pool: append([]int64(nil), trackIDs...),
 		rnd:  rand.New(rand.NewSource(seed)),
+		seed: seed,
 	}
 	s.shuffle()
 	return s
@@ -77,10 +83,91 @@ func (s *Selector) Tune(trackIDs []int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// A FRESH SEED, derived so it stays deterministic. Reusing the old one
+	// while the generator has already been advanced by an unknown number of
+	// draws would make State report a seed that no longer reproduces the
+	// order -- a station that resumed into a different sequence than the one
+	// it was stopped in.
+	s.seed = nextSeed(s.seed)
+	s.rnd = rand.New(rand.NewSource(s.seed))
 	s.pool = append([]int64(nil), trackIDs...)
 	s.idx = 0
 	s.shuffleLocked()
 	return nil
+}
+
+// State is everything needed to resume this station's shuffle.
+//
+// Two numbers, because the order is a pure function of the seed and the pool:
+// storing the shuffled list itself would go stale the moment the library
+// changed, and storing nothing would restart every station from the top on
+// every restart.
+func (s *Selector) State() (seed int64, cursor int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.seed, s.idx
+}
+
+// NewSelectorAt rebuilds a selector part way through its cycle.
+//
+// recent is the handful of tracks played just before the stop. With the same
+// pool it is unnecessary -- the cursor already covers it -- but a pool that
+// CHANGED between stop and resume cannot be replayed exactly, and the honest
+// answer there is a fresh shuffle that still avoids what was just heard rather
+// than a panic or a silent repeat.
+func NewSelectorAt(ids []int64, seed int64, cursor int, recent []int64) *Selector {
+	s := &Selector{
+		pool: append([]int64(nil), ids...),
+		rnd:  rand.New(rand.NewSource(seed)),
+		seed: seed,
+	}
+	if len(recent) > 0 {
+		s.last = recent[len(recent)-1]
+	}
+	s.shuffleLocked()
+
+	// A cursor past the end is a cycle that finished, or a pool that shrank
+	// below where it had got to. Either way the old order is spent: start a
+	// new one rather than resuming into nothing.
+	if cursor < 0 || cursor >= len(s.pool) {
+		s.seed = nextSeed(seed)
+		s.rnd = rand.New(rand.NewSource(s.seed))
+		s.shuffleLocked()
+		cursor = 0
+	}
+	s.idx = cursor
+	s.deferRecentLocked(recent)
+	return s
+}
+
+// deferRecentLocked pushes anything just played to the end of what is left, so
+// the tracks a listener heard a minute ago are the last they hear again.
+func (s *Selector) deferRecentLocked(recent []int64) {
+	if len(recent) == 0 {
+		return
+	}
+	just := make(map[int64]bool, len(recent))
+	for _, id := range recent {
+		just[id] = true
+	}
+	rest := s.pool[s.idx:]
+	keep := make([]int64, 0, len(rest))
+	defer_ := make([]int64, 0, len(recent))
+	for _, id := range rest {
+		if just[id] {
+			defer_ = append(defer_, id)
+			continue
+		}
+		keep = append(keep, id)
+	}
+	copy(rest, append(keep, defer_...))
+}
+
+// nextSeed derives the following seed. An LCG step: deterministic, so a
+// resumed station is still reproducible, and far enough from its input that the
+// new shuffle bears no relation to the old.
+func nextSeed(seed int64) int64 {
+	return seed*6364136223846793005 + 1442695040888963407
 }
 
 // Next returns the next track to play.
@@ -140,24 +227,28 @@ func (s *Selector) shuffleLocked() {
 // different sequence on every run of the same library.
 func PlayablePool(ctx context.Context, s *store.Store) ([]int64, error) {
 	rows, err := s.DB().QueryContext(ctx,
-		`SELECT id FROM tracks WHERE playable = 1 ORDER BY id`)
+		`SELECT id FROM tracks WHERE playable = 1 AND missing_at IS NULL ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("station: reading the track pool: %w", err)
 	}
-	defer rows.Close()
+	return scanIDs(rows)
+}
 
-	var out []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("station: reading the track pool: %w", err)
-		}
-		out = append(out, id)
+// PoolForStation is what a station actually plays: its MATERIALISED playlist.
+//
+// Not its tag. What the operator sees in the console is what airs, including
+// every pin they added and minus every track they excluded -- and a station
+// whose playlist is empty cannot start, which is a clearer failure than a
+// mixer starving.
+func PoolForStation(ctx context.Context, s *store.Store, stationID int64) ([]int64, error) {
+	pool, err := s.StationTrackIDs(ctx, stationID)
+	if err != nil {
+		return nil, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("station: reading the track pool: %w", err)
+	if len(pool) == 0 {
+		return nil, fmt.Errorf("%w: station %d has an empty playlist", ErrEmptyPool, stationID)
 	}
-	return out, nil
+	return pool, nil
 }
 
 // PoolForTag returns the playable tracks belonging to one station.
@@ -177,7 +268,8 @@ func PoolForTag(ctx context.Context, s *store.Store, tag string) ([]int64, error
 	case UnsortedTag:
 		rows, err := s.DB().QueryContext(ctx, `
 			SELECT id FROM tracks
-			 WHERE playable = 1 AND id NOT IN (SELECT track_id FROM dossiers)
+			 WHERE playable = 1 AND missing_at IS NULL
+			   AND id NOT IN (SELECT track_id FROM dossiers)
 			 ORDER BY id`)
 		if err != nil {
 			return nil, fmt.Errorf("station: reading the unsorted pool: %w", err)
@@ -191,7 +283,7 @@ func PoolForTag(ctx context.Context, s *store.Store, tag string) ([]int64, error
 			SELECT t.id FROM tracks t
 			  JOIN dossiers d ON d.track_id = t.id
 			  JOIN json_each(json_extract(d.json, '$.station_tags')) tag
-			 WHERE t.playable = 1 AND lower(tag.value) = lower(?)
+			 WHERE t.playable = 1 AND t.missing_at IS NULL AND lower(tag.value) = lower(?)
 			 ORDER BY t.id`, tag)
 		if err != nil {
 			return nil, fmt.Errorf("station: reading the %s pool: %w", tag, err)
@@ -204,12 +296,15 @@ func scanIDs(rows *sql.Rows) ([]int64, error) {
 	defer rows.Close() //nolint:errcheck // read-only
 
 	var out []int64
+	// Joined rather than returned early: the only column is an integer primary
+	// key, so a driver failing here is unreachable from a working database, and
+	// a branch no test can enter is a guess about what the message will say.
+	// Every caller discards out when the error is non-nil.
+	var failures error
 	for rows.Next() {
 		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
+		failures = errors.Join(failures, rows.Scan(&id))
 		out = append(out, id)
 	}
-	return out, rows.Err()
+	return out, errors.Join(failures, rows.Err())
 }

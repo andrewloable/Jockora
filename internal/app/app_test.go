@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"fmt"
 	"go/parser"
 	"go/token"
 	"io"
@@ -23,11 +22,9 @@ import (
 	"time"
 
 	"github.com/andrewloable/jockora/internal/station"
-	"github.com/andrewloable/jockora/internal/store"
 
 	"github.com/andrewloable/jockora/internal/config"
 	"github.com/andrewloable/jockora/internal/mix"
-	"github.com/andrewloable/jockora/internal/sched"
 )
 
 // toneFile writes a real audio file the decoder can read, using ffmpeg so the
@@ -111,12 +108,12 @@ func TestAppStartsAndStops(t *testing.T) {
 	// Real time, real pacing: wait for the encoder to emit segments.
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		if m, _ := filepath.Glob(filepath.Join(cfg.SegmentDir, "*.ts")); len(m) >= 1 {
+		if m, _ := filepath.Glob(filepath.Join(cfg.SegmentDir, singleStationDir, "*.ts")); len(m) >= 1 {
 			break
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	if m, _ := filepath.Glob(filepath.Join(cfg.SegmentDir, "*.ts")); len(m) == 0 {
+	if m, _ := filepath.Glob(filepath.Join(cfg.SegmentDir, singleStationDir, "*.ts")); len(m) == 0 {
 		t.Fatalf("no segments after 30s; log:\n%s", logs.String())
 	}
 
@@ -160,14 +157,14 @@ func TestAppServesTheStream(t *testing.T) {
 
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		if m, _ := filepath.Glob(filepath.Join(cfg.SegmentDir, "*.ts")); len(m) >= 1 {
+		if m, _ := filepath.Glob(filepath.Join(cfg.SegmentDir, singleStationDir, "*.ts")); len(m) >= 1 {
 			break
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 
 	base := "http://" + a.Addr()
-	for _, path := range []string{"/", "/hls/stream.m3u8"} {
+	for _, path := range []string{"/", "/hls/1/stream.m3u8"} {
 		body, code := httpGet(t, base+path)
 		if code != 200 {
 			t.Errorf("GET %s returned %d", path, code)
@@ -232,17 +229,22 @@ func TestFeedRingStopsOnCancel(t *testing.T) {
 	}
 }
 
-// TestSoleWriterInvariant is structural: exactly one place in the app package
-// may write to the encoder, and it is the mixer's W field. A second writer would
-// interleave bytes into the middle of a frame and the stream would be noise.
+// TestSoleWriterInvariant is structural: nothing in the app package may write
+// to the encoder pipe. A second writer would interleave bytes into the middle
+// of a frame and the stream would be noise.
+//
+// It used to require EXACTLY ONE reference here, back when app.go built the
+// mixer. 12c moved the pipeline into station.Runtime, so the correct number
+// here is now zero and the "exactly one" half lives beside the code that does
+// the writing, in station's TestRuntimeIsTheSoleWriter.
 func TestSoleWriterInvariant(t *testing.T) {
 	src, err := os.ReadFile("app.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(string(src), "Writer()"); n != 1 {
-		t.Errorf("app.go references the encoder Writer() %d times, want exactly 1 "+
-			"(the mixer is the sole writer to the ffmpeg pipe)", n)
+	if n := strings.Count(string(src), "Writer()"); n != 0 {
+		t.Errorf("app.go references the encoder Writer() %d times, want none "+
+			"(the mixer inside the runtime is the sole writer to the ffmpeg pipe)", n)
 	}
 
 	// And nothing in the package imports the encoder for its own writing.
@@ -349,7 +351,7 @@ func TestStallFeederTriggersSilenceFill(t *testing.T) {
 		t.Errorf("the mixer wrote %d blocks before the stall and %d after: the stall stopped the stream",
 			before, after)
 	}
-	if a.ring.UnderrunCount() == 0 {
+	if a.rt.Status().Underruns == 0 {
 		t.Error("a 12-second decoder stall produced no underruns; silence-fill never fired")
 	}
 	if got := a.Metrics().MinOccupancy; got != 0 {
@@ -464,7 +466,7 @@ func TestStatusReportsADegradedEncoder(t *testing.T) {
 func TestTopUpBreaksKeepsTheScheduleFilled(t *testing.T) {
 	every := int64(240) * mix.SampleRate // -break-every 240
 	a := &App{
-		queue:     &sched.Queue{},
+		rt:        station.NewRuntime(station.Deps{}, 0, t.TempDir()),
 		opts:      Options{BreakPath: "/config/voice.wav", BreakEverySec: 240},
 		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nextBreak: 45 * mix.SampleRate,
@@ -495,7 +497,7 @@ func TestTopUpBreaksKeepsTheScheduleFilled(t *testing.T) {
 func TestTopUpBreaksIsIdempotent(t *testing.T) {
 	every := int64(240) * mix.SampleRate
 	a := &App{
-		queue:     &sched.Queue{},
+		rt:        station.NewRuntime(station.Deps{}, 0, t.TempDir()),
 		opts:      Options{BreakPath: "/config/voice.wav", BreakEverySec: 240},
 		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nextBreak: 45 * mix.SampleRate,
@@ -506,7 +508,7 @@ func TestTopUpBreaksIsIdempotent(t *testing.T) {
 	if extra := a.topUpOnce(horizon, every); extra != 0 {
 		t.Errorf("a second pass over the same horizon added %d more breaks", extra)
 	}
-	if got := a.queue.Pending(); got != n {
+	if got := a.rt.Queue().Pending(); got != n {
 		t.Errorf("queue holds %d entries after %d added", got, n)
 	}
 }
@@ -516,88 +518,5 @@ func TestTopUpBreaksIsIdempotent(t *testing.T) {
 // The dial is the PRIMARY UI, and on a fresh library every track starts in the
 // catch-all: stations only appear as enrichment classifies them, over days. A
 // dial computed once at startup would show "unsorted 7595" and nothing else
-// until somebody happened to restart the server.
-func TestCachedDialRefreshes(t *testing.T) {
-	s, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "d.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close() //nolint:errcheck // test teardown
-
-	for i := 1; i <= 30; i++ {
-		if _, err := s.DB().Exec(
-			`INSERT INTO tracks (id, path, playable) VALUES (?, ?, 1)`,
-			i, fmt.Sprintf("/m/%d.mp3", i)); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	c := &cachedDial{store: s, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	c.refresh(context.Background())
-
-	first, ok := c.Dial().(station.Dial)
-	if !ok {
-		t.Fatal("Dial() did not return a station.Dial")
-	}
-	if len(first.Stations) != 1 || first.Stations[0].Tag != station.UnsortedTag {
-		t.Fatalf("a wholly unenriched library proposed %+v, want one catch-all", first.Stations)
-	}
-
-	// Enrichment classifies them, exactly as the background worker would.
-	for i := 1; i <= 30; i++ {
-		if _, err := s.DB().Exec(
-			`INSERT INTO dossiers (track_id, json, confidence) VALUES (?, ?, 'high')`,
-			i, `{"station_tags":["rock"],"mood":["aggressive"],"confidence":"high"}`); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// Without a refresh the dial would still say the library is unsorted.
-	c.refresh(context.Background())
-	second := c.Dial().(station.Dial)
-
-	var rock *station.Station
-	for i := range second.Stations {
-		if second.Stations[i].Tag == "rock" {
-			rock = &second.Stations[i]
-		}
-	}
-	if rock == nil {
-		t.Fatalf("the dial never learned about the rock station: %+v", second.Stations)
-	}
-	if rock.Tracks != 30 {
-		t.Errorf("rock holds %d tracks, want 30", rock.Tracks)
-	}
-	if second.Enriched != 30 {
-		t.Errorf("enriched = %d, want 30", second.Enriched)
-	}
-}
 
 // TestCachedDialKeepsTheOldOneOnFailure: a stale dial is far better than an
-// empty one, and a dial is a nicety while the stream is not.
-func TestCachedDialKeepsTheOldOneOnFailure(t *testing.T) {
-	s, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "d.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.DB().Exec(`INSERT INTO tracks (id, path, playable) VALUES (1, '/m/a.mp3', 1)`); err != nil {
-		t.Fatal(err)
-	}
-
-	c := &cachedDial{store: s, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	c.refresh(context.Background())
-	before := c.Dial().(station.Dial)
-	if len(before.Stations) == 0 {
-		t.Fatal("no dial to lose")
-	}
-
-	// A closed store makes the next refresh fail.
-	s.Close() //nolint:errcheck // deliberately breaking it
-	c.refresh(context.Background())
-
-	after := c.Dial().(station.Dial)
-	if len(after.Stations) != len(before.Stations) {
-		t.Errorf("a failed refresh discarded the dial: %d stations became %d",
-			len(before.Stations), len(after.Stations))
-	}
-}

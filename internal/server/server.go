@@ -20,6 +20,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andrewloable/jockora/internal/auth"
+	"github.com/andrewloable/jockora/internal/clock"
 	"github.com/andrewloable/jockora/web"
 )
 
@@ -58,6 +60,10 @@ type Config struct {
 // Everything else is a 400 before any filesystem path is built.
 var segmentName = regexp.MustCompile(`^(seg\d+\.ts|stream\.m3u8)$`)
 
+// stationID allows exactly the shape a station id has. Digits only, so no
+// encoding trick can put a separator into the path built from it.
+var stationID = regexp.MustCompile(`^\d{1,18}$`)
+
 // segNumber extracts N from segN.ts.
 var segNumber = regexp.MustCompile(`^seg(\d+)\.ts$`)
 
@@ -67,16 +73,31 @@ type Server struct {
 	log    *slog.Logger
 	ln     net.Listener
 	status StatusSource
-	dial   DialSource
-	tuner  Tuner
 
+	// sessions identifies the listener; presence records that they are still
+	// there. Both nil on the spike path, which refuses HLS rather than
+	// streaming to an uncounted listener.
+	sessions SessionSource
+	presence Toucher
+
+	// signer and users are sign-in. Nil until SetAuth, which is the spike
+	// path: no database means no accounts to check against.
+	signer     *auth.Signer
+	users      Users
+	sources    Sources
+	rescan     Rescanner
+	stations   Stations
+	jocks      Jocks
+	voices     Voices
+	personas   Personas
+	playlists  Playlists
+	regenerate Regenerator
+	runtimes   Runtimes
+	clk        clock.Clock
+	failures   loginFailures
+	tuner      Tuner
 	admin      Admin
-	adminToken string
 }
-
-// SetDialSource wires the /stations.json data source. Without one the endpoint
-// reports 503 rather than 404: the route exists, the dial does not yet.
-func (s *Server) SetDialSource(d DialSource) { s.dial = d }
 
 // SetStatusSource wires the /now.json data source. Without one the endpoint
 // reports unavailable rather than lying about a healthy stream.
@@ -152,7 +173,11 @@ func (s *Server) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// Handler routes requests.
+// Handler routes requests from the registry in routes.go.
+//
+// A TABLE rather than a switch, so the 401/403 matrix cannot go stale: a route
+// added without an expectation fails the row 13 gate rather than quietly
+// shipping unguarded.
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// EscapedPath, not Path: Path is already percent-decoded, so ..%2f
@@ -161,77 +186,84 @@ func (s *Server) Handler() http.Handler {
 		// the allowlist.
 		p := r.URL.EscapedPath()
 
-		// The two POST routes are handled before the read-only guard below.
-		// Everything else on this server is a GET by design.
-		//
-		// Only these two paths are diverted: a POST to any OTHER route still
-		// falls through to the 405 below, because "you cannot POST to a
-		// segment" is the true answer and 404 would claim it does not exist.
-		if r.Method == http.MethodPost {
-			switch {
-			case p == "/tune":
-				s.serveTune(w, r)
-				return
-			case p == "/feedback":
-				s.serveFeedback(w, r)
-				return
-			case p == "/jock":
-				// NOT behind the admin token. Tuning a station and picking a
-				// jock are LISTENER controls -- they change what is playing
-				// right now, which is what the dial is for. The token guards
-				// operator CONFIGURATION, which outlives the session and is a
-				// different kind of change.
-				s.serveSetJock(w, r)
-				return
-			case isAdminWrite(p):
-				s.serveAdminWrite(w, r, p)
+		rt, ok, wrongMethod := s.match(r.Method, p)
+		if !ok {
+			if wrongMethod {
+				// "You cannot POST here" is the true answer; 404 would claim
+				// the route does not exist.
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
-			// Any other POST falls through to the 405 below, because "you
-			// cannot POST here" is the true answer and 404 would claim the
-			// route does not exist.
-		}
-
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			http.NotFound(w, r)
 			return
 		}
 
-		switch {
-		case p == "/now.json":
-			s.serveStatus(w, r)
-		case p == "/stations.json":
-			s.serveDial(w, r)
-		case p == "/jocks.json":
-			s.serveJocks(w, r)
-		case p == "/admin/overview.json":
-			s.serveAdminOverview(w, r)
-		case p == "/admin" || p == "/admin/":
-			s.serveAsset(w, r, "admin.html")
-		case p == "/" || p == "/index.html":
-			s.serveAsset(w, r, "index.html")
-		case strings.HasPrefix(p, "/vendor/"):
-			s.serveAsset(w, r, strings.TrimPrefix(p, "/"))
-		case strings.HasPrefix(p, "/hls/"):
-			// An empty name reaches the allowlist and is rejected there, so
-			// /hls/ is a 400 like any other name that is not servable.
-			s.serveHLS(w, r, strings.TrimPrefix(p, "/hls/"))
-		default:
-			http.NotFound(w, r)
+		h := rt.H
+		if rt.Role != "" {
+			h = s.require(rt.Role, h)
 		}
+		h(w, r)
 	})
 }
 
-func (s *Server) serveHLS(w http.ResponseWriter, r *http.Request, name string) {
-	// Validate the raw name BEFORE any path is built from it. filepath.Clean is
-	// not a security boundary and is not being relied on here.
-	if !segmentName.MatchString(name) {
-		s.log.Warn("rejected HLS request", "name", name, "remote", r.RemoteAddr)
-		http.Error(w, "bad segment name", http.StatusBadRequest)
+// SessionSource identifies the listener behind a request.
+//
+// Takes the ResponseWriter as well as the request because a source that cannot
+// set a cookie cannot CREATE a session, and a listener arriving for the first
+// time has none to present.
+type SessionSource func(w http.ResponseWriter, r *http.Request) (string, bool)
+
+// Toucher records that a session is still listening to a station.
+type Toucher interface {
+	Touch(station int64, session string)
+}
+
+// SetSessions installs the listener identity. Without one every HLS request is
+// refused: presence is what starts and stops stations, so a stream nobody can
+// be counted for is a station that would never stop.
+func (s *Server) SetSessions(src SessionSource) { s.sessions = src }
+
+// SetPresence wires the heartbeat sink.
+func (s *Server) SetPresence(t Toucher) { s.presence = t }
+
+func (s *Server) serveHLS(w http.ResponseWriter, r *http.Request, rest string) {
+	station, name, found := strings.Cut(rest, "/")
+	if !found {
+		// The v0.1 route, /hls/stream.m3u8. GONE rather than aliased: a
+		// listener served from it would play a station without ever counting
+		// as its listener, and the station would stop underneath them.
+		http.NotFound(w, r)
 		return
 	}
 
-	full := filepath.Join(s.cfg.SegmentDir, name)
+	// Validate the RAW names before any path is built from them. filepath.Clean
+	// is not a security boundary and is not being relied on here.
+	if !stationID.MatchString(station) || !segmentName.MatchString(name) {
+		s.log.Warn("rejected HLS request", "path", rest, "remote", r.RemoteAddr)
+		http.Error(w, "bad segment name", http.StatusBadRequest)
+		return
+	}
+	// No error to handle: stationID caps the id at 18 digits, which always
+	// fits an int64, so the allowlist above is the whole guard.
+	id, _ := strconv.ParseInt(station, 10, 64)
+
+	session, ok := "", false
+	if s.sessions != nil {
+		session, ok = s.sessions(w, r)
+	}
+	if !ok {
+		http.Error(w, "sign in to listen", http.StatusUnauthorized)
+		return
+	}
+
+	// ONLY THE PLAYLIST is a heartbeat. It is the one request a client repeats
+	// forever; segments are fetched once and then cached, so counting them
+	// would keep a station alive on a client that had stopped playing.
+	if name == "stream.m3u8" && s.presence != nil {
+		s.presence.Touch(id, session)
+	}
+
+	full := filepath.Join(s.cfg.SegmentDir, station, name)
 	f, err := os.Open(full)
 	if err != nil {
 		// no-store so no intermediary caches the negative result and keeps
@@ -276,6 +308,37 @@ func (s *Server) serveHLS(w http.ResponseWriter, r *http.Request, name string) {
 // not be exclusively ours.
 func (s *Server) Sweep() error {
 	entries, err := os.ReadDir(s.cfg.SegmentDir)
+	if os.IsNotExist(err) {
+		// Nothing has gone on air yet. A station creates its own directory
+		// when it starts, so an absent root is the normal state of a server
+		// with no listeners -- not a fault worth a warning every sweep.
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("server: reading segment dir: %w", err)
+	}
+
+	// PER STATION. Segments moved one level down when stations got their own
+	// directories, and a sweeper still looking only at the top level would
+	// find nothing to prune -- so every station would keep every segment it
+	// ever wrote and the disk would fill over days, with the stream healthy
+	// right up until it stopped.
+	var problems []error
+	for _, e := range entries {
+		if !e.IsDir() || !stationID.MatchString(e.Name()) {
+			continue
+		}
+		if err := s.sweepDir(filepath.Join(s.cfg.SegmentDir, e.Name())); err != nil {
+			problems = append(problems, err)
+		}
+	}
+	return errors.Join(problems...)
+}
+
+// sweepDir prunes one station's directory. Retention is per station because
+// segment numbering is.
+func (s *Server) sweepDir(dir string) error {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("server: reading segment dir: %w", err)
 	}
@@ -306,7 +369,7 @@ func (s *Server) Sweep() error {
 
 	sort.Slice(segs, func(i, j int) bool { return segs[i].num < segs[j].num })
 	for _, sg := range segs[:len(segs)-s.cfg.RetainSegments] {
-		if err := os.Remove(filepath.Join(s.cfg.SegmentDir, sg.name)); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(filepath.Join(dir, sg.name)); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("server: removing expired segment %s: %w", sg.name, err)
 		}
 	}

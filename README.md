@@ -56,9 +56,25 @@ sudo chown -R 10001 ./config
 docker compose up -d
 ```
 
-Open **http://localhost:8080**. `jockora doctor` runs at startup and refuses to
-serve on a failed check, so a broken setup names the failing check rather than
-going quiet. `docker compose logs -f jockora` to watch it.
+**5. Make yourself an account.** Nobody can sign in until you do, and there is
+no self-registration:
+
+```sh
+docker compose exec jockora jockora admin create -name you
+```
+
+The password is read from the terminal without echo — not from a flag or an
+environment variable, either of which would leave it in shell history and in a
+`ps` listing.
+
+Open **http://localhost:8080**, sign in, and pick a station: the dial is the
+whole listener UI. **http://localhost:8080/admin** is the operator console —
+sources, stations, playlists, jocks and accounts — and only an admin account can
+open it.
+
+`jockora doctor` runs at startup and refuses to serve on a failed check, so a
+broken setup names the failing check rather than going quiet. `docker compose
+logs -f jockora` to watch it.
 
 Compose starts `llama-server` alongside Jockora and waits for it to report
 healthy first. Already run your own model server? Delete the `llm` service and

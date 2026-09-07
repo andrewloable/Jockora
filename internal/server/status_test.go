@@ -39,9 +39,13 @@ func fullStatus() Status {
 	}
 }
 
+// getStatus asks about ONE STATION. Since 13g /now.json without a station
+// carries no now-playing at all: four running stations are four different
+// tracks, and naming one of them "now" would tell three quarters of the
+// listeners something false.
 func getStatus(t *testing.T, s *Server) map[string]any {
 	t.Helper()
-	rec := get(t, s, "/now.json")
+	rec := get(t, s, "/now.json?station=1")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /now.json returned %d", rec.Code)
 	}

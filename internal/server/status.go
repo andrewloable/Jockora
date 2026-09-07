@@ -5,6 +5,7 @@ package server
 
 import (
 	"encoding/json"
+	"github.com/andrewloable/jockora/internal/library"
 	"net/http"
 	"sync"
 )
@@ -18,15 +19,13 @@ type StatusSource interface {
 	Status() Status
 }
 
-// DialSource supplies the proposed dial.
+// StationStatusSource reports what ONE station is airing.
 //
-// Separate from StatusSource, and CACHED for the same reason: building the dial
-// reads every dossier in the library, which is fine once at startup and absurd
-// on every poll. A nil source means the endpoint reports that no dial has been
-// proposed rather than 404ing, because "no stations yet" is a real state on a
-// library that has not been enriched.
-type DialSource interface {
-	Dial() any
+// Separate from StatusSource because "now playing" stopped being a single
+// answer the moment stations became per-listener: with four running there is no
+// global now-playing, only four of them.
+type StationStatusSource interface {
+	StatusForStation(id int64) Status
 }
 
 // Track is what a listener may be told about a track.
@@ -93,6 +92,11 @@ type Status struct {
 	Health     Health      `json:"health"`
 	Metrics    Metrics     `json:"metrics"`
 	Enrichment *Enrichment `json:"enrichment,omitempty"`
+
+	// Rescan is the library scan the operator asked for, absent until one has
+	// been asked for -- so a station that has never rescanned does not show an
+	// empty progress bar claiming zero of zero.
+	Rescan *library.RescanProgress `json:"rescan,omitempty"`
 }
 
 // StaticStatus is a StatusSource backed by a value, for wiring and tests.
@@ -117,27 +121,11 @@ func (s *StaticStatus) Status() Status {
 //
 // It lives at /now.json, not under /hls/: it is not a media route, and putting
 // it there would drag it through the segment allowlist.
-// serveDial answers /stations.json, the dial a client renders as the primary UI.
+// serveStatus answers /now.json, optionally for one station.
 //
-// Unlike /now.json this one IS cacheable for a short while: the dial changes
-// only as enrichment progresses, which is minutes at best, and a client polling
-// it should not be re-reading every dossier in the library.
-func (s *Server) serveDial(w http.ResponseWriter, r *http.Request) {
-	if s.dial == nil {
-		http.Error(w, "no dial proposed", http.StatusServiceUnavailable)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "max-age=30")
-
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(s.dial.Dial()); err != nil {
-		s.log.Warn("writing dial", "err", err)
-	}
-}
-
+// WITHOUT ?station THERE IS NO NOW-PLAYING. Four stations are four different
+// tracks, and picking one of them to call "now" would tell three quarters of
+// the listeners something false.
 func (s *Server) serveStatus(w http.ResponseWriter, r *http.Request) {
 	if s.status == nil {
 		http.Error(w, "status unavailable", http.StatusServiceUnavailable)
@@ -148,9 +136,21 @@ func (s *Server) serveStatus(w http.ResponseWriter, r *http.Request) {
 	// The whole point is that it changes; a cached one is useless.
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 
+	st := s.status.Status()
+	if id, asked := stationParam(r); asked {
+		if per, ok := s.status.(StationStatusSource); ok {
+			st = per.StatusForStation(id)
+		}
+	} else {
+		// No station named, so no now-playing: with four stations running
+		// there is no single answer, and picking one would tell three quarters
+		// of the listeners something false.
+		st.Now, st.Next = nil, nil
+	}
+
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(s.status.Status()); err != nil {
+	if err := enc.Encode(st); err != nil {
 		s.log.Warn("writing status", "err", err)
 	}
 }

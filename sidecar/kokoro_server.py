@@ -78,8 +78,26 @@ class Handler(BaseHTTPRequestHandler):
             self._onset(urllib.parse.parse_qs(parsed.query))
         elif parsed.path == "/bpm":
             self._bpm(urllib.parse.parse_qs(parsed.query))
+        elif parsed.path == "/voices":
+            self._voices()
         else:
             self._send(404, b"not found")
+
+    def _voices(self):
+        """The voices this model file actually contains.
+
+        The console asks so an operator cannot save a jock nobody can voice.
+        Sorted, because a list that reorders between two loads of the same page
+        looks like the server changed its mind.
+        """
+        try:
+            # kokoro_onnx keeps the voice table on the loaded model; the names
+            # are its keys, which is the same set synth() will accept.
+            names = sorted(_kokoro.voices.keys())
+        except Exception as e:  # noqa: BLE001 - reported to the client, not raised
+            self._send(500, str(e).encode())
+            return
+        self._send(200, json.dumps({"voices": names}).encode(), "application/json")
 
     def _onset(self, q):
         """Vocal-onset analysis. Same process as synthesis, by design.

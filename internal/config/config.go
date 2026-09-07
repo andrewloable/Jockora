@@ -37,21 +37,20 @@ type Config struct {
 	AdIntervalMin    float64 // floor between adverts, minutes
 	FactConfidence   float64 // dossier confidence a fact must reach to be assertable
 
-	// AdminToken guards the operator WRITE endpoints. Empty refuses every
-	// write, deliberately: treating unset as "allow anyone" would make the
-	// default configuration -- published on the LAN by the supplied compose
-	// file, with no authentication anywhere -- the dangerous one.
-	AdminToken string
-
 	SubsonicURL      string
 	SubsonicUser     string
 	SubsonicPassword string
 	DBPath           string // SQLite file holding dossiers, stations and state
-	SegmentDir       string // where HLS segments and the playlist are written
-	ListenAddr       string // host:port for the HTTP server; loopback by default
-	LLMBaseURL       string // llama-server base URL, native /completion API
-	TTSAddr          string // Kokoro sidecar base URL
-	PersonaPath      string // persona TOML describing the jock
+
+	// SessionKey signs listener sessions. Empty means one is generated on
+	// first run and kept in the database, so a restart does not sign everyone
+	// out. Supply it only to share sessions across two servers.
+	SessionKey  string
+	SegmentDir  string // where HLS segments and the playlist are written
+	ListenAddr  string // host:port for the HTTP server; loopback by default
+	LLMBaseURL  string // llama-server base URL, native /completion API
+	TTSAddr     string // Kokoro sidecar base URL
+	PersonaPath string // persona TOML describing the jock
 	// TTSPython is the interpreter the speech sidecar runs under.
 	//
 	// PINNED, not inherited. onnxruntime has no wheels for the system python3
@@ -146,11 +145,11 @@ func LoadArgs(args []string, register func(*flag.FlagSet)) (*Config, error) {
 	fs.IntVar(&c.AdEveryNBreaks, "ad-every-n-breaks", 4, "one break slot in N becomes an advert (0 disables adverts)")
 	fs.Float64Var(&c.AdIntervalMin, "ad-interval-minutes", 90, "minimum minutes between adverts")
 	fs.Float64Var(&c.FactConfidence, "fact-confidence", 0.6, "dossier confidence a fact must reach before the DJ may assert it")
-	fs.StringVar(&c.AdminToken, "admin-token", "", "shared secret for operator WRITE endpoints (prefer JOCKORA_ADMIN_TOKEN); empty disables them")
 	fs.StringVar(&c.SubsonicURL, "subsonic-url", "", "OpenSubsonic server to read the library from instead of a folder (Navidrome, Airsonic, Gonic)")
 	fs.StringVar(&c.SubsonicUser, "subsonic-user", "", "OpenSubsonic username")
 	fs.StringVar(&c.SubsonicPassword, "subsonic-password", "", "OpenSubsonic password (prefer JOCKORA_SUBSONIC_PASSWORD)")
 	fs.StringVar(&c.DBPath, "db-path", "jockora.db", "SQLite database file")
+	fs.StringVar(&c.SessionKey, "session-key", "", "secret signing listener sessions, at least 32 bytes (prefer JOCKORA_SESSION_KEY); empty generates one and keeps it in the database")
 	fs.StringVar(&c.SegmentDir, "segment-dir", "segments", "directory for HLS segments")
 	// Loopback, never 0.0.0.0: v0.1 ships no authentication at all, and
 	// self-hosters port-forward services without realising.
