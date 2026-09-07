@@ -11,6 +11,15 @@ import { AdminApi, User } from '../api/api';
   template: `
     <h2>People</h2>
     <table data-users>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Role</th>
+          <th>Status</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
       @for (user of users(); track user.id) {
         <tr [attr.data-row]="user.id">
           <td>{{ user.name }}</td>
@@ -25,6 +34,7 @@ import { AdminApi, User } from '../api/api';
           </td>
         </tr>
       }
+      </tbody>
     </table>
 
     <fieldset>

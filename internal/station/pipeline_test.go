@@ -5,6 +5,7 @@ package station
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -225,4 +226,125 @@ func TestPipelineGaplessBoundaryNeverGetsASlot(t *testing.T) {
 	if !p.Announce(Boundary{Index: 5, Cur: lrcTrack(4, 4), Next: lrcTrack(12, 4), InsertionAt: 300}) {
 		t.Error("the slot refused at the gapless boundary never reappeared")
 	}
+}
+
+// EVERY STATION OWNS ITS OWN QUEUE, so the pipeline cannot be wired to one when
+// it is built. Wiring it only where the single legacy runtime was created left
+// it nil on every station-based deployment: each break was generated and then
+// dropped with "break pipeline has no scheduler queue", the DJ never spoke, and
+// nothing else reported a fault. Heard on the live station as music with no
+// talking, at a cadence of one.
+
+func TestPipelineQueueCanBeSetAfterConstruction(t *testing.T) {
+	p := &Pipeline{Cadence: NewCadence(1), Lookahead: NewLookahead(0)}
+	if p.Queue != nil {
+		t.Fatal("a fresh pipeline should have no queue")
+	}
+
+	q := &sched.Queue{}
+	var recorded string
+	p.SetQueue(q, func(text string, _ mix.Placement) { recorded = text })
+
+	if p.Queue != q {
+		t.Error("SetQueue did not take")
+	}
+	if p.OnScheduled == nil {
+		t.Error("SetQueue did not record the callback")
+	}
+	p.OnScheduled("hello", mix.Placement(0))
+	if recorded != "hello" {
+		t.Errorf("callback = %q, want hello", recorded)
+	}
+}
+
+func TestPipelineQueueSurvivesANilCallback(t *testing.T) {
+	// A caller that only wants to move the queue must not clear the recorder.
+	q := &sched.Queue{}
+	called := false
+	p := &Pipeline{Cadence: NewCadence(1), Lookahead: NewLookahead(0)}
+	p.SetQueue(q, func(string, mix.Placement) { called = true })
+	p.SetQueue(&sched.Queue{}, nil)
+
+	if p.OnScheduled == nil {
+		t.Fatal("a nil callback wiped the existing one")
+	}
+	p.OnScheduled("x", mix.Placement(0))
+	if !called {
+		t.Error("the original callback was replaced")
+	}
+}
+
+// A FORWARD REFERENCE HAS TO BE TRUE. This product has no skip precisely so a
+// break can safely say what is coming, and the DJ announced Everlong while the
+// station played Green Day.
+//
+// Generation is asynchronous and slow -- 75 seconds, measured live -- while
+// boundaries keep arriving. The writer's track context was set at ANNOUNCE time
+// and read at GENERATION time, so a later boundary overwrote it first and the
+// break described the wrong pair of records.
+
+func TestPipelineWritesAboutItsOwnBoundary(t *testing.T) {
+	w := &BreakWriter{}
+	// A writer that refuses. Generation therefore drops the break, which is a
+	// normal outcome -- and the context must already be correct by the time it
+	// is asked, which is what this test is about.
+	p := &Pipeline{
+		Cadence: NewCadence(1), Lookahead: NewLookahead(0), Writer: w,
+		Length: LengthCheck{Writer: refusingWriter{}},
+	}
+
+	first := Boundary{
+		Index: 1, InsertionAt: 200,
+		Cur: &Track{DurationS: 200}, Next: &Track{DurationS: 200},
+		PrevID: 9, CurID: 1, NextID: 2,
+		CurArtist: "Foo Fighters", CurTitle: "Everlong",
+		NextArtist: "Green Day", NextTitle: "Basket Case",
+	}
+	later := Boundary{
+		Index: 2, InsertionAt: 400,
+		Cur: &Track{DurationS: 200}, Next: &Track{DurationS: 200},
+		PrevID: 1, CurID: 3, NextID: 4,
+		CurArtist: "Oasis", CurTitle: "Live Forever",
+		NextArtist: "Blur", NextTitle: "Song 2",
+	}
+
+	// Both announced before either generates, which is what a slow model does.
+	p.Announce(first)
+	p.Announce(later)
+
+	// The FIRST one generates -- through Tick, so this exercises the real path.
+	// Generation itself fails (there is no model here) and that is fine: the
+	// context must already be right by the time writing is attempted.
+	_, _ = p.Tick(context.Background(), first.InsertionAt-1)
+	if w.curID != 1 || w.nextID != 2 {
+		t.Errorf("boundary 1 wrote about cur=%d next=%d, want 1 and 2: a later "+
+			"boundary overwrote the context and the DJ announced the wrong record",
+			w.curID, w.nextID)
+	}
+
+	// Then the second, which must move the context on.
+	_, _ = p.Tick(context.Background(), later.InsertionAt-1)
+	if w.curID != 3 || w.nextID != 4 {
+		t.Errorf("boundary 2 wrote about cur=%d next=%d, want 3 and 4", w.curID, w.nextID)
+	}
+}
+
+func TestPipelineContextWithoutAWriterIsHarmless(t *testing.T) {
+	// The spike path has no writer at all.
+	p := &Pipeline{
+		Cadence: NewCadence(1), Lookahead: NewLookahead(0),
+		Length: LengthCheck{Writer: refusingWriter{}},
+	}
+	p.Announce(Boundary{
+		Index: 1, InsertionAt: 10, CurID: 1,
+		Cur: &Track{DurationS: 10}, Next: &Track{DurationS: 10},
+	})
+	_, _ = p.Tick(context.Background(), 9)
+}
+
+// refusingWriter stands in for the DJ when the test is about something else.
+type refusingWriter struct{}
+
+func (refusingWriter) Write(context.Context, int, mix.Placement) (string, error) {
+	return "", errors.New("no model in this test")
 }

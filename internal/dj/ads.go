@@ -149,7 +149,7 @@ func (a Ad) Validate() error {
 	// advert, and the brand denylist cannot tell the difference -- with the
 	// persona block in the prompt, ten adverts came back carrying the persona's
 	// speech style as their script and every one of them validated.
-	if phrase, echoed := echoesInstructions(brand + " " + script); echoed {
+	if phrase, echoed := echoesInstructions(brand+" "+script, []string{brand}); echoed {
 		return fmt.Errorf("dj: advert recites its prompt: %q", phrase)
 	}
 

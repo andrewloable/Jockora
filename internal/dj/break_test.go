@@ -330,11 +330,11 @@ func TestBreakRejectsSnakeCaseTokens(t *testing.T) {
 		"3am_listening Next up, we have 'I See Red' by Frida. radio_intro_music",
 		"Here is something from the night_drive playlist.",
 	} {
-		if _, echoed := echoesInstructions(text); !echoed {
+		if _, echoed := echoesInstructions(text, nil); !echoed {
 			t.Errorf("echoesInstructions(%q) = false; this aired", text)
 		}
 	}
-	if phrase, echoed := echoesInstructions("Next up, Counting Crows with a wistful tune."); echoed {
+	if phrase, echoed := echoesInstructions("Next up, Counting Crows with a wistful tune.", nil); echoed {
 		t.Errorf("matched %q on a real break", phrase)
 	}
 }
@@ -369,7 +369,7 @@ func TestBreakRejectsStageDirections(t *testing.T) {
 		"Excitedly. Here comes the next one.",
 		"[shouting] ROCK ON",
 	} {
-		if _, echoed := echoesInstructions(text); !echoed {
+		if _, echoed := echoesInstructions(text, nil); !echoed {
 			t.Errorf("echoesInstructions(%q) = false; this aired", text)
 		}
 	}

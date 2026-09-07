@@ -202,3 +202,36 @@ func TestStartCreatesSegmentDir(t *testing.T) {
 		t.Errorf("segment directory was not created: %v", err)
 	}
 }
+
+// TestEncodeLivePlaylistNeverEnds: a live playlist must not claim to be
+// complete, even after the encoder stops.
+//
+// Every station stops routinely -- the last listener leaves, the grace expires,
+// ffmpeg exits. Without omit_endlist ffmpeg appends EXT-X-ENDLIST on the way
+// out, and the playlist left on disk then tells the next client this is a
+// finished recording: hls.js loads it as VOD, plays the segments still listed,
+// and never polls for more. Observed on the live station while it sat between
+// listeners, and heard as a stream that would not start.
+func TestEncodeLivePlaylistNeverEnds(t *testing.T) {
+	dir := t.TempDir()
+
+	e, err := Start(context.Background(), Config{SegmentDir: dir}, true)
+	if err != nil {
+		t.Fatalf("Start: %v (is ffmpeg on PATH?)", err)
+	}
+	if _, err := e.Writer().Write(silence(12)); err != nil {
+		t.Fatalf("writing to the encoder: %v", err)
+	}
+	// STOPPED, which is exactly when ffmpeg would write the marker.
+	if err := e.Stop(); err != nil {
+		t.Fatalf("Stop: %v\nffmpeg said: %s", err, e.Stderr())
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, "stream.m3u8"))
+	if err != nil {
+		t.Fatalf("no playlist: %v", err)
+	}
+	if strings.Contains(string(raw), "EXT-X-ENDLIST") {
+		t.Errorf("the playlist says the stream is over:\n%s", raw)
+	}
+}

@@ -43,6 +43,23 @@ func NewCadence(everyN int) *Cadence {
 // EveryN is the configured cadence.
 func (c *Cadence) EveryN() int { return c.everyN }
 
+// Reset starts the boundary sequence over.
+//
+// A STATION'S BOUNDARY COUNTER RESTARTS AT ZERO EVERY TIME IT GOES ON AIR, and
+// a station goes on air whenever its first listener arrives -- it stops when
+// the last one leaves, which is the design. Without this the lastAsked guard,
+// which exists to stop one boundary being counted twice within a run, silently
+// rejected EVERY boundary of every run after the first: the indices started
+// again at 1 while lastAsked was still at whatever the previous run reached.
+//
+// The DJ then went permanently quiet for the life of the process, with no
+// error, no dropped-break metric and health still green. Heard on the live
+// station as music with no talking between tracks at a cadence of one.
+func (c *Cadence) Reset() {
+	c.lastAsked = 0
+	c.sinceLast = 0
+}
+
 // SlotAt reports whether the boundary ending track boundaryIndex gets a break.
 //
 // Boundaries are numbered from 1. Zero is "before anything has played" and

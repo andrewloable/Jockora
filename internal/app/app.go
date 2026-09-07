@@ -404,6 +404,12 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 
 		// Presence is what starts and stops stations, so the server must be
 		// able to record a heartbeat before any of them can come up.
+		// The stored cadence outranks the configured one. The config value is
+		// the DEFAULT for a station nobody has tuned yet; once an operator has
+		// chosen, that choice is the setting, and a restart must not quietly
+		// undo it.
+		a.applyStoredCadence(context.Background(), opts.Breaks)
+
 		a.tracker = presence.New(clock.Real{}, ListenerGrace)
 		// THE MANAGER IS BUILT BEFORE SetStations, and the order is not
 		// cosmetic. SetStations takes it as a Runtimes INTERFACE, so passing
@@ -452,6 +458,38 @@ const (
 
 // sessionKeySetting is where the generated signing key lives.
 const sessionKeySetting = "session_key"
+
+// applyStoredCadence restores the operator's chosen cadence at startup.
+//
+// Silent about everything except a value it cannot use: a fresh database has no
+// setting, which is the normal case and not worth a line.
+func (a *App) applyStoredCadence(ctx context.Context, breaks *station.Pipeline) {
+	if breaks == nil || a.opts.Library == nil || a.opts.Library.Store == nil {
+		return
+	}
+	raw, ok, err := a.opts.Library.Store.Setting(ctx, cadenceSetting)
+	if err != nil || !ok {
+		return
+	}
+	n, convErr := strconv.Atoi(raw)
+	if convErr != nil || n < 1 || n > 100 {
+		a.log.Warn("stored break cadence is not usable; keeping the configured one",
+			"stored", raw, "using", a.cfg.BreakEveryNTracks)
+		return
+	}
+	breaks.SetCadence(station.NewCadence(n))
+	a.cfg.BreakEveryNTracks = n
+	a.log.Info("break cadence restored", "every_n_tracks", n)
+}
+
+// cadenceSetting is where the operator's break cadence lives.
+//
+// IT HAS TO OUTLIVE A RESTART. It is a decision an operator makes about how
+// their station sounds, and it was being kept only in memory and in a config
+// field -- so every restart silently reverted it to whatever the compose file
+// said, and the operator's setting was gone with nothing to say so. Reported
+// after it went back to 4 twice.
+const cadenceSetting = "break_cadence"
 
 // sessionKey resolves the secret that signs listener sessions.
 //
@@ -1047,6 +1085,25 @@ func (a *App) feedFromLibrary(ctx context.Context, rt *station.Runtime) {
 	var boundary int
 	var prev, cur track
 
+	if a.opts.Breaks != nil {
+		// THE QUEUE OF THE STATION ACTUALLY ON AIR. Every station owns its own
+		// ring and queue, so the pipeline cannot be wired to one when it is
+		// built -- and wiring it only where the single legacy runtime was built
+		// left it nil on every station-based deployment. Every break generated
+		// was then dropped with "break pipeline has no scheduler queue", the DJ
+		// never spoke, and nothing else reported a fault.
+		a.opts.Breaks.SetQueue(rt.Queue(), a.recordBreak)
+		a.opts.Breaks.Writer = a.opts.Writer
+
+		// The boundary counter below starts at zero, so the cadence has to
+		// start there too. A station restarts whenever a listener comes back,
+		// and a cadence carrying the previous run's high-water mark rejects
+		// every boundary of this one -- silently, forever.
+		if a.opts.Breaks.Cadence != nil {
+			a.opts.Breaks.Cadence.Reset()
+		}
+	}
+
 	// One track is chosen AHEAD of the one playing. Without it the boundary is
 	// only known at the instant it arrives, which leaves the lookahead no time
 	// at all -- ShouldTrigger requires now < insertionAt, so a break announced
@@ -1128,22 +1185,6 @@ func (a *App) announceBoundary(ctx context.Context, rt *station.Runtime, boundar
 	if a.opts.Breaks == nil {
 		return
 	}
-	if a.opts.Writer != nil {
-		a.opts.Writer.SetContext(prev.id, cur.id, next.id, prev.artist, prev.title)
-		// Every name in play at this boundary. Repeating these is not
-		// repetition, it is announcing the record.
-		// The ALBUM is in here too. Dossier.Release names it, so every track
-		// from one album ends up saying the same words -- measured, that
-		// doubled the collision count from 9 to 17 and cost ten breaks that
-		// would otherwise have aired. Naming the record you are playing is the
-		// job; the collision index is for reused PHRASING.
-		a.opts.Writer.SetTrackNames(
-			prev.artist, prev.title, prev.album,
-			cur.artist, cur.title, cur.album,
-			next.artist, next.title, next.album,
-		)
-	}
-
 	curTrack := a.trackFor(ctx, cur)
 	nextTrack := a.trackFor(ctx, next)
 
@@ -1151,13 +1192,34 @@ func (a *App) announceBoundary(ctx context.Context, rt *station.Runtime, boundar
 	// from the mixer's position rather than the wall clock, because that is the
 	// clock the break will be spliced against.
 	at := a.secondsPlayed() + curTrack.DurationS
-	a.opts.Breaks.Announce(station.Boundary{
+	took := a.opts.Breaks.Announce(station.Boundary{
 		Index:           boundary,
 		Cur:             curTrack,
 		Next:            nextTrack,
 		InsertionAt:     at,
 		InsertionSample: a.samplePos() + int64(curTrack.DurationS*mix.SampleRate),
+
+		// CARRIED, not stashed in the writer. Generation happens up to a
+		// minute later, by which time later boundaries have arrived; the
+		// writer's shared context made the DJ announce one record and the
+		// station play another.
+		PrevID: prev.id, CurID: cur.id, NextID: next.id,
+		PrevArtist: prev.artist, PrevTitle: prev.title, PrevAlbum: prev.album,
+		CurArtist: cur.artist, CurTitle: cur.title, CurAlbum: cur.album,
+		NextArtist: next.artist, NextTitle: next.title, NextAlbum: next.album,
 	})
+	// EVERY boundary, taken or not. A break that never airs is the failure this
+	// product is least able to notice: nothing errors, no metric moves, health
+	// stays green and the station simply plays music. The only way to tell
+	// "the cadence said no" from "generation ran late" from "the slot was never
+	// offered" is to say which one happened, at the moment it happens.
+	a.log.Info("break slot offered",
+		"boundary", boundary, "taken", took,
+		"cadence", a.opts.Breaks.EveryN(),
+		"now_s", math.Round(a.secondsPlayed()),
+		"insertion_at_s", math.Round(at),
+		"track_s", math.Round(curTrack.DurationS),
+		"pending", a.opts.Breaks.Pending())
 }
 
 // trackFor reads the placement numbers a break needs about one track.
@@ -1644,9 +1706,24 @@ func (a *App) Overview() any {
 	out["said_lines"] = countOf(ctx, db, `SELECT count(*) FROM said_lines`)
 	out["adverts"] = countOf(ctx, db, `SELECT count(*) FROM ads`)
 	out["feedback"] = recentFeedback(ctx, db)
-	out["cadence"] = a.cfg.BreakEveryNTracks
+	out["cadence"] = a.liveCadence()
 	out["enriching"] = a.enriching.Load()
 	return out
+}
+
+// liveCadence is the cadence the station is running, for the console.
+//
+// The PIPELINE, not the config: an operator who sets 1 and reloads the page
+// must see 1. Reported twice -- the first time the server really had forgotten
+// it, the second time the server remembered and the console drew its own
+// hardcoded default over the answer.
+func (a *App) liveCadence() int {
+	if a.opts.Breaks != nil {
+		if n := a.opts.Breaks.EveryN(); n > 0 {
+			return n
+		}
+	}
+	return a.cfg.BreakEveryNTracks
 }
 
 func countOf(ctx context.Context, db *sql.DB, q string) int {
@@ -1696,7 +1773,22 @@ func (a *App) SetCadence(n int) error {
 		return fmt.Errorf("no DJ is running")
 	}
 	a.opts.Breaks.SetCadence(station.NewCadence(n))
-	a.cfg.BreakEveryNTracks = n
+
+	// THE CONFIG FIELD IS NOT UPDATED HERE. It is the startup default, and
+	// writing it from an HTTP handler raced with the overview handler reading
+	// it. The pipeline is the one place the live cadence lives.
+
+	// WRITTEN DOWN, not just applied. Everything else about a station survives
+	// a restart; a cadence that does not is a setting the operator has to
+	// remember to redo, and will not.
+	if a.opts.Library != nil && a.opts.Library.Store != nil {
+		if err := a.opts.Library.Store.SetSetting(
+			context.Background(), cadenceSetting, strconv.Itoa(n)); err != nil {
+			// Applied but not remembered. Worth saying, not worth refusing:
+			// the operator asked for this cadence now.
+			a.log.Warn("break cadence changed but could not be saved", "err", err)
+		}
+	}
 	a.log.Info("break cadence changed", "every_n_tracks", n)
 	return nil
 }

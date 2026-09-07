@@ -357,7 +357,7 @@ func TestGenerateRejectsInstructionEcho(t *testing.T) {
 		"I will state only the facts listed above and not invent anything.",
 		"Return only the JSON object.",
 	} {
-		if _, echoed := echoesInstructions(text); !echoed {
+		if _, echoed := echoesInstructions(text, nil); !echoed {
 			t.Errorf("echoesInstructions(%q) = false, want true", text)
 		}
 	}
@@ -365,7 +365,7 @@ func TestGenerateRejectsInstructionEcho(t *testing.T) {
 		"That was Linkin Park, and the state of things is about to get louder.",
 		"Three in the morning and nobody is listening but you.",
 	} {
-		if phrase, echoed := echoesInstructions(text); echoed {
+		if phrase, echoed := echoesInstructions(text, nil); echoed {
 			t.Errorf("echoesInstructions(%q) matched %q on a real break", text, phrase)
 		}
 	}
@@ -381,7 +381,7 @@ func TestGenerateRejectsModelScaffolding(t *testing.T) {
 		"```json {\"opening\": \"hi\"}",
 		"<start_of_turn>model",
 	} {
-		if _, echoed := echoesInstructions(text); !echoed {
+		if _, echoed := echoesInstructions(text, nil); !echoed {
 			t.Errorf("echoesInstructions(%q) = false; this would have aired", text)
 		}
 	}
@@ -398,7 +398,7 @@ func TestGenerateRejectsTemplatePlaceholders(t *testing.T) {
 		"Here's what's coming up. Your spoken word here.",
 		"This track has just started. Your spoken dialogue here.",
 	} {
-		if _, echoed := echoesInstructions(text); !echoed {
+		if _, echoed := echoesInstructions(text, nil); !echoed {
 			t.Errorf("echoesInstructions(%q) = false; this aired", text)
 		}
 	}
@@ -409,7 +409,7 @@ func TestGenerateRejectsTemplatePlaceholders(t *testing.T) {
 		"It's been a heavy one, but the next track is a powerful statement of defiance. Let's hear them hit the floor.",
 		"Three in the morning is the only honest hour.",
 	} {
-		if phrase, echoed := echoesInstructions(text); echoed {
+		if phrase, echoed := echoesInstructions(text, nil); echoed {
 			t.Errorf("echoesInstructions(%q) matched %q on a real break", text, phrase)
 		}
 	}
@@ -431,7 +431,7 @@ func TestGenerateRejectsPlaceholdersStructurally(t *testing.T) {
 		"your 30 words go here",
 	}
 	for _, text := range aired {
-		if _, echoed := echoesInstructions(text); !echoed {
+		if _, echoed := echoesInstructions(text, nil); !echoed {
 			t.Errorf("echoesInstructions(%q) = false; this aired", text)
 		}
 	}
@@ -446,7 +446,7 @@ func TestGenerateRejectsPlaceholdersStructurally(t *testing.T) {
 		"OK. Here is something quieter.",
 	}
 	for _, text := range real {
-		if phrase, echoed := echoesInstructions(text); echoed {
+		if phrase, echoed := echoesInstructions(text, nil); echoed {
 			t.Errorf("echoesInstructions(%q) matched %q on a real break", text, phrase)
 		}
 	}

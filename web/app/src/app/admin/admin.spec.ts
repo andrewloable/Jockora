@@ -131,6 +131,33 @@ describe('Admin', () => {
     expect(fixture.nativeElement.querySelector('app-playlist')).toBeNull();
   });
 
+  it('opens the playlist ON the station whose row was clicked', () => {
+    // The Playlist button on a station row emits an output the shell never
+    // bound, so it did nothing at all. And when it does something, it has to
+    // land on THAT station -- not on whichever happens to be first.
+    const fixture = mounted();
+    fixture.nativeElement.querySelector('[data-section="stations"]').click();
+    fixture.detectChanges();
+    settle(fixture);
+
+    // Clicked for real, so the output BINDING is exercised too -- it was the
+    // binding that was missing, not the handler.
+    const row = fixture.nativeElement.querySelector('[data-edit]');
+    expect(row).not.toBeNull();
+    row.click();
+    fixture.detectChanges();
+    ctrl.expectOne('/admin/stations').flush([
+      { id: 1, name: 'Rock', genre: 'rock', enabled: true, tracks: 90 },
+      { id: 7, name: 'Calm', genre: 'ambient', enabled: true, tracks: 60 },
+    ]);
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.showing()).toBe('playlist');
+    // The station whose row was clicked, not whichever is first.
+    expect(fixture.componentInstance.picked()).toBe(1);
+    settle(fixture);
+  });
+
   it('marks the open section for a screen reader', () => {
     const fixture = mounted();
     expect(

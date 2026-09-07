@@ -288,8 +288,23 @@ func (s *Server) serveHLS(w http.ResponseWriter, r *http.Request, rest string) {
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	} else {
 		w.Header().Set("Content-Type", "video/mp2t")
-		// A segment's contents never change once written.
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		// SHORT, NOT IMMUTABLE. "A segment's contents never change once
+		// written" is true of a file and false of a URL: the encoder restarts
+		// whenever a station goes on air, and its segment numbering restarts
+		// with it -- the directory is a tmpfs, so a container restart empties
+		// it and the next run begins at seg0 again. seg16.ts is then a
+		// different four seconds of music than the seg16.ts a browser cached
+		// under `immutable` for a year.
+		//
+		// Heard on the live station: a listener tuned in and got an Arctic
+		// Monkeys segment spliced into the middle of Counting Crows, then back
+		// again -- their browser replaying year-old-cached audio at the same
+		// URLs the new run had just reused.
+		//
+		// A live stream fetches each segment ONCE per client, so a long cache
+		// bought nothing to begin with. Thirty seconds covers a client that
+		// briefly stalls and re-requests, and nothing beyond that.
+		w.Header().Set("Cache-Control", "public, max-age=30")
 	}
 
 	http.ServeContent(w, r, name, fi.ModTime(), f)

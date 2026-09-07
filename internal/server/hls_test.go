@@ -192,10 +192,25 @@ func TestHLSCacheHeadersUnchanged(t *testing.T) {
 		t.Errorf("playlist Content-Type = %q", got)
 	}
 
-	// A segment's contents never change once written.
+	// A SEGMENT URL IS REUSED, so it must not be cached as though it were
+	// content-addressed.
+	//
+	// The encoder restarts whenever a station goes on air and its numbering
+	// restarts with it -- the segment directory is a tmpfs, so a container
+	// restart empties it and the next run begins at seg0 again. Under the
+	// year-long `immutable` this test used to require, a browser replayed the
+	// audio it had cached for that URL: heard on the live station as an Arctic
+	// Monkeys segment spliced into the middle of Counting Crows.
+	//
+	// A live stream fetches each segment once per client, so the long cache
+	// bought nothing.
 	seg := get(t, s, "/hls/1/seg0.ts")
-	if got := seg.Header().Get("Cache-Control"); !strings.Contains(got, "immutable") {
-		t.Errorf("segment Cache-Control = %q, want immutable", got)
+	cc := seg.Header().Get("Cache-Control")
+	if strings.Contains(cc, "immutable") {
+		t.Errorf("segment Cache-Control = %q; a reused URL must never be immutable", cc)
+	}
+	if !strings.Contains(cc, "max-age=30") {
+		t.Errorf("segment Cache-Control = %q, want a short max-age", cc)
 	}
 	if got := seg.Header().Get("Content-Type"); got != "video/mp2t" {
 		t.Errorf("segment Content-Type = %q", got)

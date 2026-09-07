@@ -48,12 +48,16 @@ type Section = (typeof sections)[number];
         <app-sources />
       }
       @case ('stations') {
-        <app-stations />
+        <!-- The Playlist button on a station row emits this. It was never
+             bound, so the button did nothing at all. -->
+        <app-stations (edit)="openPlaylistFor($event)" />
       }
       @case ('playlist') {
-        <select data-pick-station [value]="picked() ?? ''" (change)="pick($event)">
+        <select data-pick-station (change)="pick($event)">
           @for (station of stations(); track station.id) {
-            <option [value]="station.id">{{ station.name }}</option>
+            <option [value]="station.id" [selected]="station.id === picked()">
+              {{ station.name }}
+            </option>
           }
         </select>
         @if (picked(); as id) {
@@ -82,7 +86,12 @@ export class Admin {
   readonly stations = signal<Station[]>([]);
   readonly picked = signal<number | null>(null);
 
-  open(section: Section): void {
+  /** Open the playlist editor on one particular station. */
+  openPlaylistFor(station: Station): void {
+    this.open('playlist', station.id);
+  }
+
+  open(section: Section, prefer?: number): void {
     this.showing.set(section);
     // The playlist editor edits ONE station, so the console has to say which.
     // Read fresh each time: a station created a minute ago in the section next
@@ -91,7 +100,10 @@ export class Admin {
       this.api.stations().subscribe({
         next: (list) => {
           this.stations.set(list);
-          this.picked.set(list[0]?.id ?? null);
+          // The station the operator asked for, when they came from a row's
+          // Playlist button. Otherwise the first, which is the right default
+          // for someone who clicked the section itself.
+          this.picked.set(prefer ?? list[0]?.id ?? null);
         },
         error: () => this.picked.set(null),
       });

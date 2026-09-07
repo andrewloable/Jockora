@@ -46,8 +46,10 @@ const (
 	// writing a break.
 	DropInstructionEcho DropReason = "instruction_echo"
 	DropUngrounded      DropReason = "ungrounded"
-	DropBadJSON         DropReason = "bad_json"
-	DropLLMError        DropReason = "llm_error"
+	// DropSelfRepetitive means the break repeated a phrase inside itself.
+	DropSelfRepetitive DropReason = "self_repetitive"
+	DropBadJSON        DropReason = "bad_json"
+	DropLLMError       DropReason = "llm_error"
 )
 
 // Writer produces one break from an assembled prompt and schema.
@@ -187,9 +189,19 @@ func (v *Validator) Generate(ctx context.Context, prompt string, prev, cur, next
 		// repetition, which means the first one airs -- a listener hearing
 		// "state only facts listed above" in a DJ voice. Measured live, this
 		// was the single largest source of drops.
-		if phrase, echoed := echoesInstructions(b.Text()); echoed {
+		if phrase, echoed := echoesInstructions(b.Text(), v.names()); echoed {
 			lastReason = DropInstructionEcho
 			lastErr = fmt.Errorf("%w: the break recites the prompt: %q", ErrBreakDropped, phrase)
+			continue
+		}
+
+		// Before the said-lines index, because the index cannot see this: it
+		// compares against breaks that ALREADY AIRED, so a break that repeats
+		// itself collides with nothing and goes out. Checked here it is caught
+		// on the attempt that produced it.
+		if phrase, looped := repeatsItself(b.Text(), v.names()); looped {
+			lastReason = DropSelfRepetitive
+			lastErr = fmt.Errorf("%w: the break says %q more than once", ErrBreakDropped, phrase)
 			continue
 		}
 
@@ -326,11 +338,16 @@ var (
 // Two layers, and the order matters only for the message: the structural rules
 // catch the shape of a placeholder, and the phrase list catches the specific
 // wordings that have actually been observed on air.
-func echoesInstructions(text string) (string, bool) {
+func echoesInstructions(text string, names []string) (string, bool) {
 	if m := placeholderYourHere.FindString(text); m != "" {
 		return m, true
 	}
-	if m := placeholderShouting.FindString(text); m != "" {
+	// A SHOUTED TRACK NAME IS NOT A TEMPLATE MARKER. The live probe rejected
+	// "WHOA! Bayside! HAVE FUN STORMING THE CASTLE! What a title!" -- a good
+	// break, shouting the title of the record it is about, which is the one
+	// thing every break is supposed to do. The shouting rule stays as the
+	// backstop for "YOUR SPEECH HERE"; it just no longer fires on the record.
+	if m := placeholderShouting.FindString(text); m != "" && !allNameWords(strings.ToLower(m), nameWordSet(names)) {
 		return m, true
 	}
 	if m := placeholderFieldRef.FindString(text); m != "" {
@@ -386,4 +403,65 @@ func (v *Validator) names() []string {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return append([]string(nil), v.trackNames...)
+}
+
+// repeatsItself reports a phrase the break says more than once, inside itself.
+//
+// THE SAID-LINES INDEX CANNOT SEE THIS. It compares a break against breaks that
+// already aired, so the FIRST occurrence of a phrase is what it records -- and
+// a break built entirely out of one repeated phrase collides with nothing and
+// goes to air. Every one of the first eight breaks the deployed station
+// produced was this shape: "nobody nobody, nobody, nobody, nobody, nobody,
+// nobody nobody", "cure. mood cure. mood cure. mood".
+//
+// Same 4-gram run length as the collision index, but over EVERY word rather
+// than content words only. Stopwords are noise when comparing two breaks and
+// they are not noise inside one: "Boom. Now we ride. ... Boom. Now we ride."
+// keeps just "boom ride" once the stopwords go, which is two words and below
+// any sane threshold -- while a listener hears the whole sentence twice.
+//
+// TRACK NAMES ARE EXEMPT, for the same reason the collision index exempts them:
+// naming the record is the job. Four consecutive words was supposed to be long
+// enough that a backsell naming a record twice could not trip it, and the live
+// probe showed that reasoning was simply wrong -- "Have Fun Storming the
+// Castle" is a five-word title, so saying it twice is a repeated 4-gram. A
+// break was rejected for doing its job.
+//
+// Matched over spoken words on BOTH sides, so the stopword inside a title
+// counts: names reduced with ContentWords would drop the "the" and leave the
+// gram "have fun storming the" unexempted, which is the gram that fired.
+func repeatsItself(text string, names []string) (string, bool) {
+	nameWords := nameWordSet(names)
+
+	seen := map[string]bool{}
+	for _, g := range NGrams(spokenWords(text), GramSize) {
+		if len(nameWords) > 0 && allNameWords(g, nameWords) {
+			continue
+		}
+		if seen[g] {
+			return g, true
+		}
+		seen[g] = true
+	}
+	return "", false
+}
+
+// spokenWords is every word as it will be heard: lowercased, punctuation gone,
+// nothing dropped.
+func spokenWords(text string) []string {
+	return strings.Fields(nonWordRE.ReplaceAllString(strings.ToLower(text), " "))
+}
+
+// nameWordSet is every word of every name this break is allowed to say, as the
+// listener hears them: lowercased, punctuation gone, stopwords KEPT. Dropping
+// the stopwords would leave "the" out of "Have Fun Storming the Castle" and
+// unexempt the one gram that matters.
+func nameWordSet(names []string) map[string]bool {
+	out := map[string]bool{}
+	for _, n := range names {
+		for _, w := range spokenWords(n) {
+			out[w] = true
+		}
+	}
+	return out
 }

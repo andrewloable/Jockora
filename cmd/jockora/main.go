@@ -230,9 +230,15 @@ func runSubcommand(ctx context.Context, name string, args []string, out io.Write
 		SegmentDir:  cfg.SegmentDir,
 		DBPath:      cfg.DBPath,
 		LLMBaseURL:  cfg.LLMBaseURL,
-		TTSAddr:     cfg.TTSAddr,
-		TTSPython:   cfg.TTSPython,
-		TTSScript:   cfg.TTSScript,
+		// The dialect too, or the doctor probes llama.cpp's native /completion
+		// against whatever is configured and calls a working hosted endpoint
+		// a 404. LLMModelPath doubles as the model NAME for a hosted host.
+		LLMAPI:    cfg.LLMAPI,
+		LLMModel:  cfg.LLMModelPath,
+		LLMKey:    cfg.LLMAPIKey,
+		TTSAddr:   cfg.TTSAddr,
+		TTSPython: cfg.TTSPython,
+		TTSScript: cfg.TTSScript,
 		// Required only when a DJ is actually asked for. The spike path calls
 		// no model and speaks no TTS, and demanding them there would refuse to
 		// start the one mode that needs nothing -- which is the mode GATE 2 and

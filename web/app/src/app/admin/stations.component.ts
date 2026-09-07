@@ -10,6 +10,17 @@ import { AdminApi, Jock, Station } from '../api/api';
   template: `
     <h2>Stations</h2>
     <table data-stations>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Genre &middot; mood</th>
+          <th>Tracks</th>
+          <th>Warning</th>
+          <th>Jock</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
       @for (station of stations(); track station.id) {
         <tr>
           <td>{{ station.name }}</td>
@@ -21,14 +32,12 @@ import { AdminApi, Jock, Station } from '../api/api';
             }
           </td>
           <td>
-            <select
-              data-jock
-              [value]="station.jock_id ?? ''"
-              (change)="assign(station, $any($event.target).value)"
-            >
-              <option value="">— no jock —</option>
+            <select data-jock (change)="assign(station, $any($event.target).value)">
+              <option value="" [selected]="!station.jock_id">— no jock —</option>
               @for (jock of jocks(); track jock.id) {
-                <option [value]="jock.id">{{ jock.name }}</option>
+                <option [value]="jock.id" [selected]="jock.id === station.jock_id">
+                  {{ jock.name }}
+                </option>
               }
             </select>
           </td>
@@ -41,6 +50,7 @@ import { AdminApi, Jock, Station } from '../api/api';
           </td>
         </tr>
       }
+      </tbody>
     </table>
 
     <fieldset>
@@ -51,15 +61,19 @@ import { AdminApi, Jock, Station } from '../api/api';
         [value]="name()"
         (input)="name.set($any($event.target).value)"
       />
-      <select data-genre [value]="genre()" (change)="genre.set($any($event.target).value)">
+      <!-- [selected] per option, never [value] on the select: these options
+           come from the vocabulary, which arrives over HTTP, and a select whose
+           value is bound before its options exist silently falls back to the
+           first one. -->
+      <select data-genre (change)="genre.set($any($event.target).value)">
         @for (g of vocab().genres; track g) {
-          <option [value]="g">{{ g }}</option>
+          <option [value]="g" [selected]="g === genre()">{{ g }}</option>
         }
       </select>
-      <select data-mood [value]="mood()" (change)="mood.set($any($event.target).value)">
-        <option value="">any mood</option>
+      <select data-mood (change)="mood.set($any($event.target).value)">
+        <option value="" [selected]="!mood()">any mood</option>
         @for (m of vocab().moods; track m) {
-          <option [value]="m">{{ m }}</option>
+          <option [value]="m" [selected]="m === mood()">{{ m }}</option>
         }
       </select>
       <button type="button" data-add (click)="add()">Add</button>
@@ -174,8 +188,21 @@ export class Stations {
   }
 
   assign(station: Station, jockId: string): void {
+    this.said.set('');
     this.api.assignJock(station.id, jockId === '' ? null : jockId).subscribe({
-      next: () => this.load(),
+      next: () => {
+        // SAID OUT LOUD. It saves on change and there is no Save button, which
+        // is right -- but silence made it look like nothing happened, and it
+        // was reported as "there is no way to save a selected jockey". Every
+        // other action in this console says what it did.
+        const jock = this.jocks().find((j) => j.id === jockId);
+        this.said.set(
+          jock
+            ? `${station.name} is ${jock.name}'s now. A station already on air changes at its next break.`
+            : `${station.name} has no jock and will play music only.`,
+        );
+        this.load();
+      },
       error: () => this.said.set('Could not put that jock on air.'),
     });
   }

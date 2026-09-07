@@ -114,6 +114,59 @@ else.
 | `-llm-context` | `8192` | Context size. Below ~4096 the enrichment prompt stops fitting. |
 | `-llm-gpu-layers` | `99` | `0` forces CPU. See [hardware.md](hardware.md) — the GPU buys about 2.6×, not an order of magnitude. |
 
+### Hosted endpoints
+
+`-llm-api openai` posts to `{-llm-url}/chat/completions` with an
+`Authorization: Bearer` header and asks for structured output as
+`response_format: {"type": "json_schema", "json_schema": {"name", "strict",
+"schema"}}`. Any host that accepts that shape works with no code change; set
+three environment variables and nothing else.
+
+| Host | `JOCKORA_LLM_URL` | `JOCKORA_LLM_MODEL` |
+|---|---|---|
+| OpenRouter | `https://openrouter.ai/api/v1` | `nvidia/nemotron-nano-9b-v2:free` |
+| Cloudflare AI Gateway → OpenRouter | `https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/openrouter/v1` | as above |
+| Cloudflare Workers AI | `https://api.cloudflare.com/client/v4/accounts/<account>/ai/v1` | `@cf/meta/llama-3.1-8b-instruct` |
+
+**Cloudflare AI Gateway is the one to reach for**, because its
+provider-specific route is a transparent proxy: the URL above is the OpenRouter
+URL with a prefix, the key stays *your OpenRouter key* in the ordinary
+`Authorization` header, and the body is forwarded untouched — so schema
+enforcement is whatever OpenRouter gives you, not something the gateway
+weakens. What it adds is per-request logging, caching, rate limiting and
+fallback across a library-sized enrichment run of several thousand calls, which
+is otherwise invisible.
+
+Use that route rather than the gateway's own `/compat/chat/completions`
+endpoint. That one authenticates with a `cf-aig-authorization` header, which
+Jockora does not send.
+
+**Workers AI works, and costs the schema.** Its free daily allocation is real
+and it needs no third-party account, but two things bite:
+
+- Its JSON mode is **best-effort**, not enforced at the sampler. It returns an
+  error when the model will not comply. Jockora's anti-hallucination design
+  leans on the schema enum making an ungrounded fact *unrepresentable*;
+  best-effort demotes that to post-validation, which rejects rather than
+  prevents.
+- It expects `json_schema` to be the schema itself. Jockora sends OpenAI's
+  wrapper — `{"name", "strict", "schema"}` — so the schema is likely ignored
+  rather than applied.
+
+Both failures are silent from the outside: the model still answers every
+request. Run `jockora doctor` after changing any of this. It does a live
+`json_schema` round trip rather than a reachability ping, precisely because a
+host that ignores the schema looks healthy right up until a break asserts a
+fact no dossier supports.
+
+**Free tiers are rate limited**, and enrichment is one request per track. A
+7,000-track library will exceed a daily allowance; the queue is serial and
+resumable, so this costs days rather than correctness.
+
+**Track metadata and lyrics leave the machine** on any hosted endpoint. The
+read-then-discard guarantee still holds locally — nothing is stored — but the
+text is sent to a third party on the way.
+
 ## Speech
 
 | Flag | Default | What it changes |

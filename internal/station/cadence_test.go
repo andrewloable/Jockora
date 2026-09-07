@@ -137,3 +137,63 @@ func TestCadenceRewindsNothingOnRepeatedCalls(t *testing.T) {
 		t.Error("asking about boundary 4 twice produced two slots")
 	}
 }
+
+// A STATION RESTARTS EVERY TIME ITS LISTENERS COME BACK, and its boundary
+// counter starts again at 1. The lastAsked guard exists to stop one boundary
+// being counted twice inside a run; without a reset between runs it rejected
+// every boundary of every run after the first, and the DJ went permanently
+// quiet with nothing in the logs, no dropped-break metric, and health green.
+// Heard on the live station as music with no talking, at a cadence of one.
+
+func TestCadenceSurvivesAStationRestart(t *testing.T) {
+	c := NewCadence(1)
+
+	// First run: three tracks, three breaks.
+	for i := 1; i <= 3; i++ {
+		if !c.SlotAt(i, false) {
+			t.Fatalf("first run, boundary %d got no slot", i)
+		}
+	}
+
+	// The last listener leaves; the station stops. Somebody tunes back in and
+	// the feed loop starts over at boundary 1.
+	c.Reset()
+
+	for i := 1; i <= 3; i++ {
+		if !c.SlotAt(i, false) {
+			t.Errorf("after a restart, boundary %d got no slot: the DJ has gone silent", i)
+		}
+	}
+}
+
+func TestCadenceWithoutResetIsTheBugItself(t *testing.T) {
+	// The behaviour that shipped, pinned so the guard is not quietly removed:
+	// replaying the same indices without a reset gets nothing.
+	c := NewCadence(1)
+	for i := 1; i <= 3; i++ {
+		c.SlotAt(i, false)
+	}
+	for i := 1; i <= 3; i++ {
+		if c.SlotAt(i, false) {
+			t.Errorf("boundary %d was counted twice within one run", i)
+		}
+	}
+}
+
+func TestCadenceResetRearmsTheCountdown(t *testing.T) {
+	// A cadence of four, interrupted after two tracks. The restart begins a
+	// fresh count rather than firing early off a half-finished one.
+	c := NewCadence(4)
+	c.SlotAt(1, false)
+	c.SlotAt(2, false)
+	c.Reset()
+
+	for i := 1; i <= 3; i++ {
+		if c.SlotAt(i, false) {
+			t.Errorf("boundary %d fired before the fourth", i)
+		}
+	}
+	if !c.SlotAt(4, false) {
+		t.Error("the fourth boundary after a reset got no slot")
+	}
+}

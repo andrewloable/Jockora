@@ -49,8 +49,8 @@ reach.
 | admin.html | 108 | `fetch('/admin/overview.json')` | admin/overview.component.spec.ts | renders the overview as rows |
 | admin.html | 118 | `fetch(path)` — the write helper, POSTing cadence | admin/overview.component.spec.ts | repeats the server’s reason for refusing a cadence |
 | admin.html | 118 | `fetch(path)` — the write helper, POSTing enriching | admin/overview.component.spec.ts | pauses and resumes enrichment |
-| index.html | web_test | native HLS is checked before hls.js, or iOS Safari takes the path it cannot run | listener/player.component.spec.ts | uses native HLS where the browser has it |
-| index.html | web_test | hls.js is the fallback, not the first choice | listener/player.component.spec.ts | falls back to hls.js where it does not |
+| index.html | web_test | native HLS is used where hls.js cannot run, so iOS Safari still plays | listener/player.component.spec.ts | uses native HLS only where hls.js cannot run |
+| index.html | web_test | hls.js is the FIRST choice, because canPlayType lies — the old page checked native first and every non-Safari browser got silence | listener/player.component.spec.ts | uses hls.js on a browser that only CLAIMS it can play HLS |
 | index.html | web_test | no autoplay attribute and no `.play()`; browsers block it and the block looks like a broken stream | listener/player.component.spec.ts | never starts playing by itself |
 | index.html | web_test | no CDN; this has to work on a machine with no route to the internet | listener/player.component.spec.ts | loads nothing from a CDN |
 | index.html | web_test | hls.js is vendored rather than fetched | DROPPED | The hand-vendored `web/vendor/hls.light.min.js` is gone with the pages that loaded it. The Angular app takes hls.js from npm and Angular bundles it into the app, so it is still served from this server and never from a CDN — which is the guarantee that mattered — and `scripts/check-licences-node.sh` now covers its licence, which the vendored copy needed `LICENCES-MANUAL.md` to record by hand. |

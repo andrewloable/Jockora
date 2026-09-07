@@ -160,6 +160,80 @@ describe('Stations', () => {
     ctrl.expectOne('/admin/stations').flush(stations);
   });
 
+  it('shows the jock already on air, even when the jocks arrive last', () => {
+    // THE RACE. The select's [value] binding was applied before @for had
+    // rendered any options, so the browser fell back to the first one and the
+    // binding never re-ran -- the station's jock simply vanished from the
+    // picker on every reload, while the server had it all along. Reported as
+    // "i set the station jock then went to playlists then went back to
+    // stations and the dj i selected is gone".
+    const fixture = TestBed.createComponent(Stations);
+    // Stations first, jocks LAST, which is the order that broke it.
+    ctrl.expectOne('/admin/stations').flush([
+      { id: 1, name: 'Night Rock', genre: 'rock', jock_id: 'dutch', enabled: true, tracks: 134 },
+    ]);
+    ctrl.expectOne('/admin/vocab').flush(vocab);
+    fixture.detectChanges();
+    ctrl.expectOne('/admin/jocks').flush(jocks);
+    fixture.detectChanges();
+
+    const select: HTMLSelectElement = fixture.nativeElement.querySelector('[data-jock]');
+    expect(select.value).toBe('dutch');
+    expect(select.selectedOptions[0].textContent?.trim()).toBe('Dutch');
+  });
+
+  it('keeps the chosen genre and mood selected', () => {
+    // Same race as the jock picker: these options come from the vocabulary
+    // over HTTP. Pinned so a later edit cannot reintroduce [value] on a select
+    // whose options are async.
+    const fixture = mounted();
+    type(fixture, '[data-genre]', 'ambient');
+    type(fixture, '[data-mood]', 'raw');
+
+    const genre: HTMLSelectElement = fixture.nativeElement.querySelector('[data-genre]');
+    const mood: HTMLSelectElement = fixture.nativeElement.querySelector('[data-mood]');
+    expect(genre.value).toBe('ambient');
+    expect(mood.value).toBe('raw');
+    expect(genre.selectedOptions[0].textContent?.trim()).toBe('ambient');
+  });
+
+  it('shows no jock when a station has none', () => {
+    const fixture = mounted([
+      { id: 1, name: 'Rock', genre: 'rock', enabled: true, tracks: 90 },
+    ]);
+    const select: HTMLSelectElement = fixture.nativeElement.querySelector('[data-jock]');
+    expect(select.value).toBe('');
+  });
+
+  it('says so when a jock is put on air, because there is no Save button', () => {
+    // Reported as "there is no way to save a selected jockey": it saves on
+    // change, correctly, but said nothing, so it looked like nothing happened.
+    const fixture = mounted();
+    const select = fixture.nativeElement.querySelector('[data-jock]');
+    select.value = 'dutch';
+    select.dispatchEvent(new Event('change'));
+    ctrl.expectOne('/admin/stations/1/jock').flush(null);
+    ctrl.expectOne('/admin/stations').flush(stations);
+    fixture.detectChanges();
+
+    const said = fixture.nativeElement.querySelector('[data-said]').textContent;
+    expect(said).toContain('Dutch');
+    expect(said).toContain('next break');
+  });
+
+  it('says so when a jock is taken off a station', () => {
+    const fixture = mounted();
+    const select = fixture.nativeElement.querySelector('[data-jock]');
+    select.value = '';
+    select.dispatchEvent(new Event('change'));
+    ctrl.expectOne('/admin/stations/1/jock').flush(null);
+    ctrl.expectOne('/admin/stations').flush(stations);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain(
+      'music only',
+    );
+  });
+
   it('asks before deleting, and does not delete when told no', () => {
     const fixture = mounted();
     const confirmSpy = vi.spyOn(globalThis, 'confirm').mockReturnValue(false);
@@ -283,5 +357,17 @@ describe('Stations', () => {
     const said = fixture.nativeElement.querySelector('[data-said]').textContent;
     expect(said).toContain('4 of 10 needed');
     expect(said).not.toContain('Clearing the mood');
+  });
+
+  it('labels its columns', () => {
+    // A grid of bare values makes the reader infer what each column is from
+    // whatever the first row happens to contain -- and "rock" in a column of
+    // its own could be a genre, a tag or a mood.
+    const head = mounted().nativeElement.querySelector('[data-stations] thead').textContent;
+    expect(head).toContain('Name');
+    expect(head).toContain('Genre');
+    expect(head).toContain('Tracks');
+    expect(head).toContain('Jock');
+    expect(head).toContain('Actions');
   });
 });

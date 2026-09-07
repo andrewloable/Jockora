@@ -21,6 +21,8 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+
+	"github.com/andrewloable/jockora/internal/enrich"
 	"syscall"
 	"time"
 )
@@ -47,7 +49,18 @@ type Config struct {
 	SegmentDir  string
 	DBPath      string
 	LLMBaseURL  string
-	TTSAddr     string
+	// LLMAPI, LLMModel and LLMKey describe a HOSTED endpoint.
+	//
+	// The doctor has to know the dialect because the check is a live round
+	// trip, and llama.cpp's native /completion and an OpenAI-shaped
+	// /chat/completions are not the same URL, the same body, or the same
+	// reply. Probing one against the other reported a working OpenRouter
+	// configuration as a 404 and told the operator their server was
+	// OpenAI-only.
+	LLMAPI   string
+	LLMModel string
+	LLMKey   string
+	TTSAddr  string
 	// TTSPython and TTSScript describe the sidecar Jockora starts ITSELF.
 	//
 	// When these are set the address check does not apply: the sidecar is
@@ -186,6 +199,20 @@ func checkLLM(ctx context.Context, cfg Config) Check {
 		return c
 	}
 
+	// A HOSTED ENDPOINT IS CHECKED BY THE CLIENT THAT WILL TALK TO IT, not by
+	// a second probe written here. Both clients already own a Health that does
+	// the same live json_schema round trip, so reusing them is how the doctor
+	// and the server stay unable to disagree about whether a configuration
+	// works.
+	switch {
+	case strings.EqualFold(cfg.LLMAPI, enrich.OpenAIAPI):
+		return hostedLLM(ctx, c, "hosted LLM", cfg.LLMBaseURL, cfg.LLMModel,
+			enrich.NewOpenAICompatible(cfg.LLMBaseURL, cfg.LLMModel, cfg.LLMKey, cfg.HTTPClient))
+	case strings.EqualFold(cfg.LLMAPI, enrich.OllamaAPI):
+		return hostedLLM(ctx, c, "ollama", cfg.LLMBaseURL, cfg.LLMModel,
+			enrich.NewOllama(cfg.LLMBaseURL, cfg.LLMModel, cfg.HTTPClient))
+	}
+
 	body, _ := json.Marshal(map[string]any{
 		"prompt": "ok",
 		"json_schema": map[string]any{
@@ -259,6 +286,30 @@ func checkLLM(ctx context.Context, cfg Config) Check {
 	}
 
 	c.OK, c.Detail = true, url+" honoured a json_schema round-trip"
+	return c
+}
+
+// hostedLLM runs a client's own Health and renders it as a check.
+//
+// The client reports one error for "unreachable", "rejected the key", "rate
+// limited" and "ignored the schema", and every one of those has a different
+// fix. Passing the message through verbatim is the point: it is more specific
+// than anything this package could say about a host it knows nothing about.
+func hostedLLM(ctx context.Context, c Check, name, url, model string, h interface {
+	Health(context.Context) error
+}) Check {
+	c.Name = name
+	if model == "" {
+		c.Detail = "no model configured"
+		c.Fix = "set --llm-model to the hosted model name, for example minimax/minimax-m3:free"
+		return c
+	}
+	if err := h.Health(ctx); err != nil {
+		c.Detail = err.Error()
+		c.Fix = "check the URL, the key and that the model honours structured output"
+		return c
+	}
+	c.OK, c.Detail = true, url+" honoured a json_schema round-trip as "+model
 	return c
 }
 

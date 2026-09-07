@@ -177,4 +177,15 @@ describe('Users', () => {
       'delete that account',
     );
   });
+
+  it('labels its columns', () => {
+    // A grid of bare values makes the reader infer what each column is from
+    // whatever the first row happens to contain -- and "rock" in a column of
+    // its own could be a genre, a tag or a mood.
+    const head = mounted().nativeElement.querySelector('[data-users] thead').textContent;
+    expect(head).toContain('Name');
+    expect(head).toContain('Role');
+    expect(head).toContain('Status');
+    expect(head).toContain('Actions');
+  });
 });

@@ -83,13 +83,31 @@ func (a *Analyser) Run(ctx context.Context) error {
 	}
 }
 
-// next picks the lowest-numbered playable track with no loudness yet.
+// next picks the next playable track with no loudness yet, PLAYLIST FIRST.
+//
+// Loudness is what stops one record landing 12 dB louder than the last, and an
+// unmeasured track plays at its own level by design -- so until a track is
+// measured, it is the level jump. Measuring in id order spends that on records
+// nobody is going to hear: on the deployed box, 6301 unmeasured tracks at 2.2 a
+// minute is 48 hours, while only 55 of them were in any station's playlist.
+// Everything audible could be levelled in half an hour.
+//
+// Prioritising, not filtering: the second ORDER BY term is the old id order, so
+// once the playlists are done the analyser walks the rest of the library
+// exactly as before. Excluded tracks do not count -- they are in the table but
+// will never play.
 func (a *Analyser) next(ctx context.Context) (string, error) {
 	var path string
 	err := a.Store.DB().QueryRowContext(ctx, `
-		SELECT path FROM tracks
-		 WHERE playable = 1 AND loudness_lufs IS NULL
-		 ORDER BY id LIMIT 1`).Scan(&path)
+		SELECT t.path FROM tracks t
+		 WHERE t.playable = 1 AND t.loudness_lufs IS NULL
+		 ORDER BY
+		   CASE WHEN EXISTS (
+		     SELECT 1 FROM station_tracks st
+		      WHERE st.track_id = t.id AND st.excluded = 0
+		   ) THEN 0 ELSE 1 END,
+		   t.id
+		 LIMIT 1`).Scan(&path)
 	switch {
 	case err == nil:
 		return path, nil

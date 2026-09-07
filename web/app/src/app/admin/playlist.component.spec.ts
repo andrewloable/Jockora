@@ -15,7 +15,16 @@ class Host {
 }
 
 const tracks = [
-  { track_id: 1, artist: 'A', title: 'One', pinned: false, excluded: false, missing: false },
+  {
+    track_id: 1,
+    artist: 'A',
+    title: 'One',
+    album: 'Nevermind',
+    year: 1991,
+    pinned: false,
+    excluded: false,
+    missing: false,
+  },
   { track_id: 2, artist: 'B', title: 'Two', pinned: true, excluded: false, missing: false },
   { track_id: 3, artist: 'C', title: 'Three', pinned: false, excluded: true, missing: false },
   { track_id: 4, artist: 'D', title: 'Four', pinned: false, excluded: false, missing: true },
@@ -44,7 +53,7 @@ describe('Playlist', () => {
     // "Showing 50 of 1,200" rather than guessing when to stop.
     const fixture = mounted(1200);
     expect(fixture.nativeElement.querySelector('[data-count]').textContent).toContain('1200');
-    expect(fixture.nativeElement.querySelectorAll('[data-playlist] tr').length).toBe(4);
+    expect(fixture.nativeElement.querySelectorAll('[data-playlist] tbody tr').length).toBe(4);
     expect(fixture.nativeElement.querySelector('[data-playlist]').textContent).toContain('One');
   });
 
@@ -154,5 +163,29 @@ describe('Playlist', () => {
       .flush(null, { status: 500, statusText: 'Error' });
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('Could not');
+  });
+
+  it('names its columns', () => {
+    // A curator needs to know which column is which, and Album is what says
+    // whether a run of tracks is one record.
+    const fixture = mounted(3);
+    const headers = Array.from(
+      fixture.nativeElement.querySelectorAll('[data-playlist] thead th'),
+    ).map((h) => (h as HTMLElement).textContent?.trim());
+    expect(headers).toEqual(['Artist', 'Title', 'Album', 'Year', 'Status', 'Actions']);
+  });
+
+  it('shows the album and year it was given', () => {
+    const fixture = mounted(1);
+    const row = fixture.nativeElement.querySelector('[data-playlist] tbody tr');
+    expect(row.textContent).toContain('Nevermind');
+    expect(row.textContent).toContain('1991');
+  });
+
+  it('says pinned and excluded in words, not only on the buttons', () => {
+    const fixture = mounted(3);
+    const text = fixture.nativeElement.querySelector('[data-playlist]').textContent;
+    expect(text).toContain('pinned');
+    expect(text).toContain('excluded');
   });
 });

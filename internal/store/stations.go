@@ -285,9 +285,13 @@ func nullable(s string) any {
 // StationTrackDetail is one playlist row with enough about the track for an
 // operator to recognise it.
 type StationTrackDetail struct {
-	TrackID  int64  `json:"track_id"`
-	Artist   string `json:"artist"`
-	Title    string `json:"title"`
+	TrackID int64  `json:"track_id"`
+	Artist  string `json:"artist"`
+	Title   string `json:"title"`
+	// Album and Year are what an operator curates by: a playlist of artists
+	// and titles alone does not say whether a run of tracks is one record.
+	Album    string `json:"album"`
+	Year     int    `json:"year"`
 	Pinned   bool   `json:"pinned"`
 	Excluded bool   `json:"excluded"`
 	Missing  bool   `json:"missing"`
@@ -305,6 +309,7 @@ func (s *Store) StationTrackPage(ctx context.Context, id int64, limit, offset in
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT st.track_id, coalesce(t.artist, ''), coalesce(t.title, ''),
+		       coalesce(t.album, ''), coalesce(t.year, 0),
 		       st.pinned, st.excluded, t.missing_at IS NOT NULL
 		  FROM station_tracks st
 		  JOIN tracks t ON t.id = st.track_id
@@ -319,7 +324,8 @@ func (s *Store) StationTrackPage(ctx context.Context, id int64, limit, offset in
 	for rows.Next() {
 		var d StationTrackDetail
 		failures = errors.Join(failures,
-			rows.Scan(&d.TrackID, &d.Artist, &d.Title, &d.Pinned, &d.Excluded, &d.Missing))
+			rows.Scan(&d.TrackID, &d.Artist, &d.Title, &d.Album, &d.Year,
+				&d.Pinned, &d.Excluded, &d.Missing))
 		out = append(out, d)
 	}
 	return out, total, wrapErr(errors.Join(failures, rows.Err()), "reading a station playlist")

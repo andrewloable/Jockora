@@ -299,7 +299,26 @@ func assemble(in PromptInput, next *enrich.Dossier, prohib Prohibitions) string 
 		}
 	}
 
-	b.WriteString("\nReturn ONLY the JSON object described by the schema.\n")
+	// Spelled out, not just left to the schema parameter: measured against a
+	// hosted free model (OpenRouter, minimax-m3) that does not reliably honour
+	// response_format for a creative request. Two failures, fixed in two
+	// steps:
+	//
+	//  1. Left as "return the JSON object described by the schema", it
+	//     answered in prose, with a trailing "Fact ids used: f1, f2" line,
+	//     0 of 6 trials valid. Naming the specific shapes that leaked (a
+	//     sentence before the JSON, a fence around it) fixed that part.
+	//  2. Even then, against the real four-field schema, it invented its own
+	//     keys instead -- "text", "script", "spoken_break" -- 0 of 3 trials,
+	//     because the schema parameter communicates a shape to some hosted
+	//     backends but not the field NAMES. Only spelling the keys out in the
+	//     prompt text fixed it: 2 of 2 clean trials once naming was added.
+	//
+	// Grammar-constrained backends (llama.cpp) already cannot emit a wrong
+	// key or extra prose, so this costs them nothing.
+	b.WriteString("\nReturn ONLY the JSON object, with exactly these keys: \"opening\",\n")
+	b.WriteString("\"body\", \"handoff\", \"asserted_facts\". No prose, no commentary,\n")
+	b.WriteString("no markdown fences, before or after it.\n")
 	return b.String()
 }
 

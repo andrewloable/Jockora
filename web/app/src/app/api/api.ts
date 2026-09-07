@@ -64,6 +64,8 @@ export interface PlaylistTrack {
   track_id: number;
   artist: string;
   title: string;
+  album?: string;
+  year?: number;
   pinned: boolean;
   excluded: boolean;
   missing: boolean;

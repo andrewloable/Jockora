@@ -148,6 +148,86 @@ describe('Overview', () => {
     }
   });
 
+  describe('cadence', () => {
+    // REPORTED TWICE. The first report was the SERVER forgetting the setting
+    // across a restart, which the settings table fixed. This is the second
+    // half of the same bug and it looked identical from the outside: the
+    // server had the operator's 1, applied it, and logged it -- and the
+    // console still drew a box with 4 in it, because the number in that box
+    // was a hardcoded default that never once looked at the server's answer.
+    it('shows the cadence the station is actually using', () => {
+      const fixture = mounted({ library: { tracks: 10, enriched: 10 }, cadence: 1 });
+      expect(fixture.nativeElement.querySelector('[data-cadence]').value).toBe('1');
+    });
+
+    it('keeps its default when the server does not report one', () => {
+      const fixture = mounted({ library: { tracks: 10, enriched: 10 } });
+      expect(fixture.nativeElement.querySelector('[data-cadence]').value).toBe('4');
+    });
+
+    it('does not overwrite a number the operator is still typing', () => {
+      // The page re-reads itself every ten seconds. A poll that clobbered a
+      // half-typed value would make the field impossible to use.
+      vi.useFakeTimers();
+      try {
+        const fixture = mounted({ library: { tracks: 10, enriched: 10 }, cadence: 4 });
+        const input = fixture.nativeElement.querySelector('[data-cadence]');
+        input.value = '9';
+        input.dispatchEvent(new Event('input'));
+
+        vi.advanceTimersByTime(10_000);
+        ctrl.expectOne('/admin/overview.json').flush({ library: { tracks: 10 }, cadence: 4 });
+        fixture.detectChanges();
+        expect(fixture.nativeElement.querySelector('[data-cadence]').value).toBe('9');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('follows the server again once the change is saved', () => {
+      vi.useFakeTimers();
+      try {
+        const fixture = mounted({ library: { tracks: 10, enriched: 10 }, cadence: 4 });
+        const input = fixture.nativeElement.querySelector('[data-cadence]');
+        input.value = '1';
+        input.dispatchEvent(new Event('input'));
+        fixture.nativeElement.querySelector('[data-set-cadence]').click();
+        ctrl.expectOne('/admin/cadence').flush(null);
+
+        vi.advanceTimersByTime(10_000);
+        ctrl.expectOne('/admin/overview.json').flush({ library: { tracks: 10 }, cadence: 2 });
+        fixture.detectChanges();
+        expect(fixture.nativeElement.querySelector('[data-cadence]').value).toBe('2');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('holds the operator’s number when the server refuses it', () => {
+      // A refusal must not silently swap their value for the old one: they
+      // need to see what they asked for next to the reason it was refused.
+      vi.useFakeTimers();
+      try {
+        const fixture = mounted({ library: { tracks: 10, enriched: 10 }, cadence: 4 });
+        const input = fixture.nativeElement.querySelector('[data-cadence]');
+        input.value = '900';
+        input.dispatchEvent(new Event('input'));
+        fixture.nativeElement.querySelector('[data-set-cadence]').click();
+        ctrl.expectOne('/admin/cadence').flush('cadence must be between 1 and 100 tracks', {
+          status: 400,
+          statusText: 'Bad Request',
+        });
+
+        vi.advanceTimersByTime(10_000);
+        ctrl.expectOne('/admin/overview.json').flush({ library: { tracks: 10 }, cadence: 4 });
+        fixture.detectChanges();
+        expect(fixture.nativeElement.querySelector('[data-cadence]').value).toBe('900');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe('enrichment progress', () => {
     // Reported as "enrichment does not show any progress" while it WAS
     // progressing: the numbers were two rows in a flat table, and a job that

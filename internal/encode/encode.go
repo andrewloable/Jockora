@@ -112,7 +112,16 @@ func Start(ctx context.Context, cfg Config, cold bool) (*Encoder, error) {
 	// advertises so a briefly-suspended client still finds what it last saw.
 	// ffmpeg pruning at the window edge would make that impossible, and it is
 	// also why old segments used to survive an encoder restart uncollected.
-	flags := "independent_segments+temp_file"
+	// omit_endlist: A LIVE PLAYLIST MUST NEVER SAY IT IS FINISHED.
+	//
+	// Without it ffmpeg appends EXT-X-ENDLIST when it exits, which every
+	// station does routinely -- the last listener leaves, the grace expires and
+	// the encoder stops. The playlist left on disk then tells the next client
+	// this is a complete recording, so hls.js loads it as VOD, plays the eight
+	// segments still listed, and stops without ever polling for more. Observed
+	// on the live station: a playlist ending in EXT-X-ENDLIST while the station
+	// was between listeners.
+	flags := "independent_segments+temp_file+omit_endlist"
 	if cfg.DiscontStart {
 		flags += "+discont_start"
 	}

@@ -39,7 +39,7 @@ const REFRESH_MS = 10_000;
         min="1"
         max="100"
         [value]="cadence()"
-        (input)="cadence.set(+$any($event.target).value)"
+        (input)="editCadence(+$any($event.target).value)"
       />
       <button type="button" data-set-cadence (click)="saveCadence()">Set</button>
     </fieldset>
@@ -74,6 +74,14 @@ export class Overview implements OnDestroy {
   readonly overview = signal<Record<string, unknown>>({});
   readonly cadence = signal(4);
   readonly said = signal('');
+
+  // True between the operator typing a cadence and the server accepting it.
+  //
+  // The poll below re-reads the overview every ten seconds, so without this it
+  // would wipe a half-typed number back to the stored one mid-keystroke. Not a
+  // signal: nothing renders it, and a signal written inside load() would be one
+  // more thing to reason about in a change-detection cycle.
+  private editingCadence = false;
 
   private timer: ReturnType<typeof setInterval> | null = null;
 
@@ -139,14 +147,37 @@ export class Overview implements OnDestroy {
       next: (o) => {
         this.overview.set(o as Record<string, unknown>);
         this.rows.set(flatten(o));
+
+        // THE SERVER OWNS THIS NUMBER. It was a hardcoded 4 that never once
+        // read the answer, so an operator who set 1 -- and whose 1 the server
+        // stored, applied and logged -- reloaded the page and saw 4, which is
+        // indistinguishable from the setting having been lost. It was reported
+        // as exactly that, twice, the second time after the storage half was
+        // already fixed.
+        const n = (o as Record<string, unknown>)['cadence'];
+        if (typeof n === 'number' && !this.editingCadence) {
+          this.cadence.set(n);
+        }
       },
       error: () => this.said.set('Could not read the overview.'),
     });
   }
 
+  /** The operator's number wins over the poll until the server has taken it. */
+  editCadence(n: number): void {
+    this.editingCadence = true;
+    this.cadence.set(n);
+  }
+
   saveCadence(): void {
     this.api.setCadence(this.cadence()).subscribe({
-      next: () => this.said.set('Cadence set. It takes effect from the next break.'),
+      next: () => {
+        // Accepted, so the server's answer is now theirs: let the poll drive
+        // the field again. A REFUSAL deliberately does not do this -- they
+        // need to see the number they asked for beside the reason it failed.
+        this.editingCadence = false;
+        this.said.set('Cadence set. It takes effect from the next break.');
+      },
       // The SERVER'S OWN WORDS: it refuses a cadence outside its range and
       // says why, and repeating that is more use than "failed".
       error: (e: { error?: string }) => this.said.set(String(e.error ?? 'Could not set that.')),

@@ -388,6 +388,56 @@ td {
   vertical-align: middle;
 }
 
+/* Column headings. Quieter than the data underneath -- a header row that
+   shouts competes with the thing it is labelling. */
+thead th {
+  padding: 0 var(--s3) var(--s2);
+  border-bottom: 2px solid var(--line);
+  text-align: left;
+  font-size: var(--t-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+
+/* The overview's key column is a row header, not a column heading. */
+tbody th,
+tr > th[scope="row"] {
+  padding: var(--s3);
+  border-bottom: var(--line-w) solid var(--line);
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  font-weight: 400;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+
+/* Visible to a screen reader, not on screen. */
+[data-sr-only] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Pinned and excluded, said in words rather than left to a button's label. */
+[data-flag] {
+  display: inline-block;
+  margin-right: var(--s1);
+  padding: 0.1em 0.5em;
+  border-radius: var(--r-pill);
+  background: var(--ember-soft);
+  color: var(--ink-dim);
+  font-size: var(--t-xs);
+  letter-spacing: 0.02em;
+}
+
 tr:last-child td {
   border-bottom: none;
 }

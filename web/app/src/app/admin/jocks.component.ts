@@ -22,6 +22,15 @@ const blank = (): Jock => ({
   template: `
     <h2>Jocks</h2>
     <table data-jocks>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Voice</th>
+          <th>Good for</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
       @for (jock of jocks(); track jock.id) {
         <tr>
           <td>{{ jock.name }}</td>
@@ -41,16 +50,17 @@ const blank = (): Jock => ({
           </td>
         </tr>
       }
+      </tbody>
     </table>
 
     <fieldset>
       <legend>{{ editing() ? 'Edit ' + draft().id : 'New jock' }}</legend>
       <input data-id placeholder="id" [value]="draft().id" (input)="set('id', $event)" />
       <input data-name placeholder="name" [value]="draft().name" (input)="set('name', $event)" />
-      <select data-voice [value]="draft().voice_id" (change)="set('voice_id', $event)">
-        <option value="">— voice —</option>
+      <select data-voice (change)="set('voice_id', $event)">
+        <option value="" [selected]="!draft().voice_id">— voice —</option>
         @for (voice of voices(); track voice) {
-          <option [value]="voice">{{ voice }}</option>
+          <option [value]="voice" [selected]="voice === draft().voice_id">{{ voice }}</option>
         }
       </select>
       <button

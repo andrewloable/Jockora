@@ -321,3 +321,85 @@ func TestTuneAllowsEverythingOnceEnrichmentIsDone(t *testing.T) {
 		t.Errorf("the gate stayed shut after enrichment finished: %v", err)
 	}
 }
+
+// THE CADENCE IS A DECISION, AND DECISIONS SURVIVE RESTARTS. It was kept only
+// in memory and in a config field, so every restart silently reverted it to
+// whatever the compose file said. Reported after it went back to 4 twice.
+
+func TestCadenceIsRememberedAcrossARestart(t *testing.T) {
+	s := openUpgraded(t, v01Fixture(t))
+	ctx := context.Background()
+
+	pipe := &station.Pipeline{Cadence: station.NewCadence(4)}
+	a := &App{
+		opts: Options{Library: &Library{Store: s}, Breaks: pipe},
+		cfg:  testConfig(t),
+		log:  quietLogger(),
+	}
+	a.cfg.BreakEveryNTracks = 4
+
+	if err := a.SetCadence(1); err != nil {
+		t.Fatalf("SetCadence: %v", err)
+	}
+	if got := pipe.Cadence.EveryN(); got != 1 {
+		t.Fatalf("live cadence = %d, want 1", got)
+	}
+
+	// The restart: a brand new pipeline built from the CONFIG default, exactly
+	// as main.go does before app.New runs.
+	restarted := &station.Pipeline{Cadence: station.NewCadence(4)}
+	b := &App{
+		opts: Options{Library: &Library{Store: s}, Breaks: restarted},
+		cfg:  testConfig(t),
+		log:  quietLogger(),
+	}
+	b.cfg.BreakEveryNTracks = 4
+	b.applyStoredCadence(ctx, restarted)
+
+	if got := restarted.Cadence.EveryN(); got != 1 {
+		t.Errorf("after a restart the cadence is %d, want the operator's 1", got)
+	}
+	if b.cfg.BreakEveryNTracks != 1 {
+		t.Errorf("config still says %d", b.cfg.BreakEveryNTracks)
+	}
+}
+
+func TestCadenceStoredNonsenseKeepsTheConfiguredOne(t *testing.T) {
+	s := openUpgraded(t, v01Fixture(t))
+	ctx := context.Background()
+	if err := s.SetSetting(ctx, cadenceSetting, "banana"); err != nil {
+		t.Fatal(err)
+	}
+	pipe := &station.Pipeline{Cadence: station.NewCadence(4)}
+	a := &App{opts: Options{Library: &Library{Store: s}, Breaks: pipe}, cfg: testConfig(t), log: quietLogger()}
+	a.cfg.BreakEveryNTracks = 4
+
+	a.applyStoredCadence(ctx, pipe)
+	if got := pipe.Cadence.EveryN(); got != 4 {
+		t.Errorf("cadence = %d, want the configured 4", got)
+	}
+
+	// And a number outside the allowed range is refused the same way.
+	if err := s.SetSetting(ctx, cadenceSetting, "9999"); err != nil {
+		t.Fatal(err)
+	}
+	a.applyStoredCadence(ctx, pipe)
+	if got := pipe.Cadence.EveryN(); got != 4 {
+		t.Errorf("cadence = %d, want the configured 4", got)
+	}
+}
+
+func TestCadenceWithNothingStoredIsQuiet(t *testing.T) {
+	// A fresh database is the normal case, not a fault.
+	s := openUpgraded(t, v01Fixture(t))
+	pipe := &station.Pipeline{Cadence: station.NewCadence(4)}
+	a := &App{opts: Options{Library: &Library{Store: s}, Breaks: pipe}, cfg: testConfig(t), log: quietLogger()}
+	a.applyStoredCadence(context.Background(), pipe)
+	if got := pipe.Cadence.EveryN(); got != 4 {
+		t.Errorf("cadence = %d, want 4", got)
+	}
+
+	// And with no pipeline or no store at all it must not panic.
+	(&App{opts: Options{Library: &Library{Store: s}}, log: quietLogger()}).applyStoredCadence(context.Background(), nil)
+	(&App{opts: Options{}, log: quietLogger()}).applyStoredCadence(context.Background(), pipe)
+}

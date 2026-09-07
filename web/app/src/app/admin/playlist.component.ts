@@ -15,11 +15,30 @@ export const PAGE = 50;
     <h2>Playlist</h2>
     <p data-count>{{ total() }} tracks</p>
     <table data-playlist>
+      <thead>
+        <tr>
+          <th scope="col">Artist</th>
+          <th scope="col">Title</th>
+          <th scope="col">Album</th>
+          <th scope="col">Year</th>
+          <th scope="col">Status</th>
+          <th scope="col"><span data-sr-only>Actions</span></th>
+        </tr>
+      </thead>
+      <tbody>
       @for (track of tracks(); track track.track_id) {
         <tr [attr.data-missing]="track.missing ? '' : null">
           <td>{{ track.artist }}</td>
           <td>{{ track.title }}</td>
+          <td>{{ track.album }}</td>
+          <td>{{ track.year || '' }}</td>
           <td>
+            @if (track.pinned) {
+              <span data-flag>pinned</span>
+            }
+            @if (track.excluded) {
+              <span data-flag>excluded</span>
+            }
             @if (track.missing) {
               <span data-gone>missing</span>
             }
@@ -43,6 +62,7 @@ export const PAGE = 50;
           </td>
         </tr>
       }
+      </tbody>
     </table>
 
     <button type="button" data-prev [disabled]="offset() === 0" (click)="page(-1)">Previous</button>
