@@ -3,6 +3,7 @@ import { Router } from '@angular/router';
 import { Api, DialStation } from '../api/api';
 import { Dial } from './dial.component';
 import { Feedback } from './feedback.component';
+import { ThemeToggle } from '../theme';
 import { NowPlayingView } from './now-playing.component';
 import { Player } from './player.component';
 
@@ -13,9 +14,12 @@ import { Player } from './player.component';
 @Component({
   selector: 'app-listener',
   standalone: true,
-  imports: [Dial, Player, NowPlayingView, Feedback],
+  imports: [Dial, Player, NowPlayingView, Feedback, ThemeToggle],
   template: `
-    <h1>Jockora</h1>
+    <header data-masthead>
+      <h1>Jockora</h1>
+      <app-theme-toggle />
+    </header>
     <app-player [src]="hls()" />
     <app-now-playing [station]="stationId()" />
     <app-feedback [station]="stationId()" [transcript]="transcript()" />

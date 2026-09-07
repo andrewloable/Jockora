@@ -95,6 +95,13 @@ troubleshooting guide organised around the failure you will actually see —
 usually "the music plays and the DJ never says anything", which has four
 different causes and four different fixes.
 
+Handing the install to a coding agent instead?
+[docs/deploying-with-an-agent.md](docs/deploying-with-an-agent.md) is written to
+be executed rather than read: how to size the language model against the GPU you
+actually have (and when a GPU is worth nothing at all), what to verify before
+believing a deployment worked, and the ten failures that look like something
+else.
+
 ## What to expect on a first run, honestly
 
 - **Scanning is fast.** ~8 minutes for 7,700 tracks over a network mount, and it

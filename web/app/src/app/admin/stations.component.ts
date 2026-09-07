@@ -113,13 +113,33 @@ export class Stations {
           // The TRACK COUNT, immediately: the operator sees a number rather
           // than a promise, and finds out at once if the filter selects
           // nothing.
-          this.said.set(`Added with ${made.tracks} tracks.`);
+          this.said.set(`Added with ${made.tracks} tracks.` + this.moodHint(made.tracks));
           this.name.set('');
           this.load();
         },
         error: (e: { error?: { error?: string } }) =>
           this.said.set(String(e.error?.error ?? 'Could not add that station.')),
       });
+  }
+
+  // A MOOD IS THE USUAL REASON A STATION IS EMPTY, and nothing on screen used
+  // to say so. Moods come from dossiers, the dossier prompt is told to leave
+  // mood empty when nothing fits, and a library the model was unsure about
+  // therefore yields a genre+mood station with no tracks -- while the same
+  // genre on its own is full. An operator watching "0 of 10 needed" has no way
+  // to know the mood did that, and the next thing they try is usually a
+  // different genre, which does not help either.
+  private moodReason(mood: string): string {
+    return (
+      ` This station also filters on the mood "${mood}", which only tracks whose` +
+      ` dossier carries that mood can match. Clearing the mood widens it to the genre alone.`
+    );
+  }
+
+  // Said at CREATION too, while the operator is still looking at the form,
+  // rather than only when they later fail to switch it on.
+  private moodHint(tracks: number): string {
+    return tracks === 0 && this.mood() ? this.moodReason(this.mood()) : '';
   }
 
   toggle(station: Station): void {
@@ -132,7 +152,10 @@ export class Stations {
         // The NUMBERS, because "too few tracks" leaves an operator guessing
         // how many more they need.
         if (e.status === 409 && e.error?.tracks !== undefined) {
-          this.said.set(`Too few tracks: ${e.error.tracks} of ${e.error.minimum} needed.`);
+          this.said.set(
+            `Too few tracks: ${e.error.tracks} of ${e.error.minimum} needed.` +
+              (station.mood ? this.moodReason(station.mood) : ''),
+          );
           return;
         }
         this.said.set('Could not change that station.');

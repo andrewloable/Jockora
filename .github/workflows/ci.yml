@@ -47,7 +47,12 @@ jobs:
         run: cd web/app && npx ng test --watch=false
 
       - name: Build the browser app
-        run: cd web/app && npx ng build --configuration production
+        # ng build CLEANS its output directory, taking web/dist/.gitkeep with
+        # it -- the file that makes `//go:embed all:dist` legal. `make web`
+        # restores it locally; this step is that same restore for CI.
+        run: |
+          cd web/app && npx ng build --configuration production
+          touch ../dist/.gitkeep
 
       - name: Build
         run: go build ./...

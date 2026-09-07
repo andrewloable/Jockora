@@ -17,10 +17,11 @@ import { Api, DialStation } from '../api/api';
           [attr.aria-pressed]="station.id === current()"
           (click)="tune(station)"
         >
-          {{ station.name }} {{ station.tracks }}
+          <span data-station-name>{{ station.name }}</span>
           <small>
+            {{ station.tracks }} tracks
             @if (station.jock_name) {
-              {{ station.jock_name }}
+              · {{ station.jock_name }}
             }
             @if (station.mood) {
               · {{ station.mood }}

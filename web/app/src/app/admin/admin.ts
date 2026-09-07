@@ -6,8 +6,9 @@ import { Stations } from './stations.component';
 import { Playlist } from './playlist.component';
 import { Jocks } from './jocks.component';
 import { Users } from './users.component';
+import { ThemeToggle } from '../theme';
 
-const sections = ['overview', 'sources', 'stations', 'playlist', 'jocks', 'people'] as const;
+const sections = ['overview', 'sources', 'stations', 'playlist', 'jocks', 'accounts'] as const;
 type Section = (typeof sections)[number];
 
 /**
@@ -20,9 +21,12 @@ type Section = (typeof sections)[number];
 @Component({
   selector: 'app-admin',
   standalone: true,
-  imports: [Overview, Sources, Stations, Playlist, Jocks, Users],
+  imports: [Overview, Sources, Stations, Playlist, Jocks, Users, ThemeToggle],
   template: `
-    <h1>Jockora — operator</h1>
+    <header data-masthead>
+      <h1>Jockora — operator</h1>
+      <app-theme-toggle />
+    </header>
     <nav>
       @for (section of sections; track section) {
         <button
@@ -62,7 +66,7 @@ type Section = (typeof sections)[number];
         <app-jocks />
       }
       @default {
-        <!-- 'people'. @default rather than @case so the switch is exhaustive:
+        <!-- 'accounts'. @default rather than @case so the switch is exhaustive:
              Section is a closed union, and a case for every member leaves a
              fall-through nothing can ever reach. -->
         <app-users />

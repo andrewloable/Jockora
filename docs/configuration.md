@@ -12,6 +12,15 @@ is `JOCKORA_LIBRARY_PATH`, `-break-every-n-tracks` is
 `jockora <command> -h` prints the live list. This page explains what changing
 each one does *audibly*, which `-h` cannot.
 
+## Deploying this on a server
+
+[deploying-with-an-agent.md](deploying-with-an-agent.md) is the step-by-step
+install, written for a coding agent with shell access to the host but usable by
+hand. It covers the decisions this page does not: sizing the language model
+against the GPU that is actually present, what to measure before keeping a
+tuning change, and how to tell a deployment that works from one that merely
+starts.
+
 ## Building from source needs Node. Running a release does not.
 
 **If you downloaded a release or pulled the image, skip this.** The browser app

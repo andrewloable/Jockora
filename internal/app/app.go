@@ -395,6 +395,18 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 		// anonymous cookie above stops being used the moment accounts exist.
 		srv.SetAuth(signer, opts.Library.Store)
 
+		// Presence is what starts and stops stations, so the server must be
+		// able to record a heartbeat before any of them can come up.
+		a.tracker = presence.New(clock.Real{}, ListenerGrace)
+		// THE MANAGER IS BUILT BEFORE SetStations, and the order is not
+		// cosmetic. SetStations takes it as a Runtimes INTERFACE, so passing
+		// a.mgr while it is still a nil *station.Manager hands the server a
+		// non-nil interface wrapping a nil pointer: the handler's nil check
+		// passes and the call panics on its first line. Deleting or disabling
+		// a station killed the request that way in every library deployment.
+		a.mgr = station.NewManager(a.tracker, opts.Library.Store, a.newStationRuntime,
+			clock.Real{}, ListenerGrace, MaxStations)
+
 		a.rescan = library.NewRescan(opts.Library.Store, clock.Real{})
 		srv.SetSources(opts.Library.Store, a.rescan)
 		srv.SetStations(opts.Library.Store, func(ctx context.Context, id int64) (station.Diff, error) {
@@ -406,11 +418,6 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 		}
 		srv.SetJocks(opts.Library.Store, voices, a)
 		srv.SetPlaylists(opts.Library.Store)
-		// Presence is what starts and stops stations, so the server must be
-		// able to record a heartbeat before any of them can come up.
-		a.tracker = presence.New(clock.Real{}, ListenerGrace)
-		a.mgr = station.NewManager(a.tracker, opts.Library.Store, a.newStationRuntime,
-			clock.Real{}, ListenerGrace, MaxStations)
 		srv.SetPresence(a.tracker)
 	}
 

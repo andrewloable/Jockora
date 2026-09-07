@@ -183,3 +183,77 @@ func TestAttachMalformedHealthPathFailsLikeAnythingElse(t *testing.T) {
 		t.Fatal("a health path that cannot be a URL was accepted")
 	}
 }
+
+// A MANAGED child that dies is not going to answer. These cover the other half
+// of the same failure the attach tests cover: a server that cannot start should
+// cost seconds, not the whole StartTimeout, because buildBreaks and
+// buildEnricher both run before the HTTP listener does.
+
+func TestAttachManagedChildThatDiesFailsAtOnce(t *testing.T) {
+	start := time.Now()
+	_, err := Start(context.Background(), Config{
+		Name: "sidecar", Command: []string{"sh", "-c", "echo 'cannot load model: bad magic' >&2; exit 3"},
+		HealthPath: "/health", StartTimeout: 2 * time.Minute,
+	})
+	took := time.Since(start)
+
+	if err == nil {
+		t.Fatal("a child that exited immediately was accepted")
+	}
+	if took > 30*time.Second {
+		t.Errorf("waited %s for a child that was already dead", took)
+	}
+	if !strings.Contains(err.Error(), "exited during startup") {
+		t.Errorf("the error must say the child died; got: %v", err)
+	}
+	// ITS LAST WORDS. Without them the operator gets a timeout and no reason,
+	// which is what a missing kokoro model looked like: three minutes, then
+	// "did not answer", and the actual explanation discarded at Debug.
+	if !strings.Contains(err.Error(), "bad magic") {
+		t.Errorf("the error must carry the child's stderr; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "exit status 3") {
+		t.Errorf("the error must carry the exit status; got: %v", err)
+	}
+}
+
+func TestAttachManagedChildThatLivesStillGetsItsGrace(t *testing.T) {
+	// The guard above must not fire for a child that is merely SLOW. This one
+	// stays up and never binds, so it reaches StartTimeout the old way.
+	start := time.Now()
+	_, err := Start(context.Background(), Config{
+		Name: "slow", Command: []string{"sleep", "30"},
+		HealthPath: "/health", StartTimeout: 6 * time.Second,
+	})
+	took := time.Since(start)
+
+	if err == nil {
+		t.Fatal("a child that never listened was accepted")
+	}
+	if strings.Contains(err.Error(), "exited during startup") {
+		t.Errorf("a live child was reported as dead: %v", err)
+	}
+	if took < 5*time.Second {
+		t.Errorf("gave up after %s; a live child gets the full StartTimeout", took)
+	}
+}
+
+func TestAttachManagedChildReportsWhatItPrinted(t *testing.T) {
+	// Only the LAST few lines: a child that fails after a thousand lines of
+	// banner should still put the reason in the error rather than the banner.
+	_, err := Start(context.Background(), Config{
+		Name: "noisy",
+		Command: []string{"sh", "-c",
+			"i=0; while [ $i -lt 40 ]; do echo \"banner line $i\" >&2; i=$((i+1)); done; echo 'the real reason' >&2; exit 1"},
+		HealthPath: "/health", StartTimeout: 30 * time.Second,
+	})
+	if err == nil {
+		t.Fatal("a child that exited was accepted")
+	}
+	if !strings.Contains(err.Error(), "the real reason") {
+		t.Errorf("the last line must survive; got: %v", err)
+	}
+	if strings.Contains(err.Error(), "banner line 0") {
+		t.Errorf("the whole log was included, not the tail; got: %v", err)
+	}
+}

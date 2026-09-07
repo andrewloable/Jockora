@@ -20,7 +20,6 @@
 package supervise
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -119,6 +118,10 @@ type Process struct {
 
 	mu  sync.Mutex
 	cmd *exec.Cmd
+	// exit is how the ONE goroutine that reaps this child publishes the fact.
+	// Single owner on purpose: os/exec forbids concurrent Wait, so kill waits
+	// on this rather than calling Wait itself.
+	exit *Child
 
 	stop    chan struct{}
 	stopped chan struct{}
@@ -243,18 +246,13 @@ func (p *Process) spawn(ctx context.Context) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("supervise: starting %s (%v): %w", p.cfg.Name, argv, err)
 	}
-	go func() {
-		sc := bufio.NewScanner(stderr)
-		// Model servers emit very long lines; the default 64 KiB token limit
-		// would end the drain early and stall the child.
-		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-		for sc.Scan() {
-			p.cfg.Log.Debug("server output", "name", p.cfg.Name, "line", sc.Text())
-		}
-	}()
+	watch := Watch(cmd, stderr, func(line string) {
+		p.cfg.Log.Debug("server output", "name", p.cfg.Name, "line", line)
+	})
 
 	p.mu.Lock()
 	p.cmd = cmd
+	p.exit = watch
 	p.mu.Unlock()
 
 	if err := p.waitHealthy(ctx); err != nil {
@@ -287,6 +285,12 @@ func (p *Process) waitHealthy(ctx context.Context) error {
 	connectBy := time.Now().Add(connectGrace)
 	reached := false
 
+	// The child this call is waiting for, if it manages one. Read once: a
+	// respawn replaces it, and this loop belongs to the spawn that started it.
+	p.mu.Lock()
+	watch := p.exit
+	p.mu.Unlock()
+
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -294,6 +298,16 @@ func (p *Process) waitHealthy(ctx context.Context) error {
 		ok, answered := p.poll()
 		if ok {
 			return nil
+		}
+		// A CHILD THAT HAS ALREADY DIED IS NOT GOING TO ANSWER. Waiting out
+		// StartTimeout for it costs minutes of a dead port for a failure that
+		// is already decided -- and buildBreaks runs before the HTTP listener,
+		// so those minutes are the whole product being unreachable. The child's
+		// last words come with it, because "did not answer within 3m0s" says
+		// nothing an operator can act on.
+		if watch != nil && watch.Exited() {
+			return fmt.Errorf("supervise: %s exited during startup (%v)%s",
+				p.cfg.Name, watch.Err(), watch.LastWords())
 		}
 		// ANSWERED AT ALL, at any status, means something is listening: it is
 		// starting up, and it gets the full StartTimeout to finish.
@@ -329,16 +343,21 @@ func (p *Process) poll() (healthy, answered bool) {
 
 func (p *Process) kill() {
 	p.mu.Lock()
-	cmd := p.cmd
-	p.cmd = nil
+	cmd, watch := p.cmd, p.exit
+	p.cmd, p.exit = nil, nil
 	p.mu.Unlock()
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
 	_ = cmd.Process.Kill()
 	// Reaping matters: an unreaped child is a zombie, and a server that leaks
-	// one per respawn eventually cannot fork at all.
-	_ = cmd.Wait()
+	// one per respawn eventually cannot fork at all. The reaping is done by the
+	// goroutine spawn started; waiting for it here is what makes that a reap
+	// rather than a hope, and it avoids a second concurrent Wait, which os/exec
+	// does not allow.
+	if watch != nil {
+		watch.Reap()
+	}
 }
 
 // supervise polls health and rebuilds the child when it stops answering.

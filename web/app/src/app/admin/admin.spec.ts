@@ -60,7 +60,7 @@ describe('Admin', () => {
       'stations',
       'playlist',
       'jocks',
-      'people',
+      'accounts',
     ]);
   });
 
@@ -73,7 +73,7 @@ describe('Admin', () => {
       ['stations', 'app-stations'],
       ['playlist', 'app-playlist'],
       ['jocks', 'app-jocks'],
-      ['people', 'app-users'],
+      ['accounts', 'app-users'],
     ] as const) {
       fixture.nativeElement.querySelector(`[data-section="${section}"]`).click();
       fixture.detectChanges();

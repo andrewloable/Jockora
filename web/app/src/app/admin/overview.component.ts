@@ -1,10 +1,18 @@
-import { Component, inject, signal } from '@angular/core';
+import { Component, OnDestroy, inject, signal } from '@angular/core';
 import { AdminApi } from '../api/api';
 
 /**
  * What the station knows about itself, and the two things worth changing
  * without a restart.
  */
+// How often the overview re-reads itself.
+//
+// ENRICHMENT MOVES AT ABOUT A TRACK A MINUTE on a CPU-bound model, so a page
+// that loads once and never refreshes shows a number that does not visibly
+// change -- which reads as "enrichment is stuck" when it is working fine. That
+// is exactly how it was first reported.
+const REFRESH_MS = 10_000;
+
 @Component({
   selector: 'app-overview',
   standalone: true,
@@ -43,15 +51,18 @@ import { AdminApi } from '../api/api';
     <p data-said>{{ said() }}</p>
   `,
 })
-export class Overview {
+export class Overview implements OnDestroy {
   private readonly api = inject(AdminApi);
 
   readonly rows = signal<{ key: string; value: string }[]>([]);
   readonly cadence = signal(4);
   readonly said = signal('');
 
+  private timer: ReturnType<typeof setInterval> | null = null;
+
   constructor() {
     this.load();
+    this.timer = setInterval(() => this.load(), REFRESH_MS);
   }
 
   load(): void {
@@ -76,6 +87,15 @@ export class Overview {
         this.said.set(on ? 'Enrichment running.' : 'Enrichment paused. The stream is unaffected.'),
       error: () => this.said.set('Could not change that.'),
     });
+  }
+
+  // The console mounts one section at a time, so a timer left running would
+  // poll for a page nobody is looking at.
+  ngOnDestroy(): void {
+    if (this.timer !== null) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
   }
 }
 

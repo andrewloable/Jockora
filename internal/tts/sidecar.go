@@ -17,7 +17,6 @@
 package tts
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -33,6 +32,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/andrewloable/jockora/internal/supervise"
 )
 
 // ErrTTSUnavailable means no speech is available right now. Callers drop the
@@ -100,8 +101,11 @@ type Sidecar struct {
 	healthy  atomic.Bool
 	respawns atomic.Uint64
 
-	mu  sync.Mutex // guards cmd
+	mu  sync.Mutex // guards cmd and child
 	cmd *exec.Cmd
+	// child is the ONE reaper for cmd, and how waitHealthy learns that the
+	// sidecar died rather than merely being slow.
+	child *supervise.Child
 
 	// external means the operator runs the sidecar; Jockora only watches it.
 	external bool
@@ -200,15 +204,12 @@ func (s *Sidecar) spawn(ctx context.Context) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("tts: starting %v: %w", s.cfg.Command, err)
 	}
-	go func() {
-		sc := bufio.NewScanner(stderr)
-		for sc.Scan() {
-			s.cfg.Log.Debug("tts sidecar", "line", sc.Text())
-		}
-	}()
+	child := supervise.Watch(cmd, stderr, func(line string) {
+		s.cfg.Log.Debug("tts sidecar", "line", line)
+	})
 
 	s.mu.Lock()
-	s.cmd = cmd
+	s.cmd, s.child = cmd, child
 	s.mu.Unlock()
 
 	if err := s.waitHealthy(ctx); err != nil {
@@ -222,12 +223,31 @@ func (s *Sidecar) spawn(ctx context.Context) error {
 
 func (s *Sidecar) waitHealthy(ctx context.Context) error {
 	deadline := time.Now().Add(s.cfg.StartTimeout)
+
+	// The child this call is waiting for, if this sidecar manages one. Read
+	// once: a respawn replaces it, and this loop belongs to the spawn that
+	// started it.
+	s.mu.Lock()
+	child := s.child
+	s.mu.Unlock()
+
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if s.poll() {
 			return nil
+		}
+		// A SIDECAR THAT HAS ALREADY DIED IS NOT GOING TO ANSWER. Waiting out
+		// the full StartTimeout for it is three minutes of a dead HTTP port,
+		// because the DJ is built before the listener -- measured, with a
+		// kokoro model file that could not be loaded. Its last words come with
+		// it: they used to go to Debug and vanish, leaving a bare timeout as
+		// the entire account of a sidecar that had printed exactly what was
+		// wrong.
+		if child != nil && child.Exited() {
+			return fmt.Errorf("tts: sidecar exited during startup (%v)%s",
+				child.Err(), child.LastWords())
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
@@ -252,16 +272,21 @@ func (s *Sidecar) poll() bool {
 
 func (s *Sidecar) kill() {
 	s.mu.Lock()
-	cmd := s.cmd
-	s.cmd = nil
+	cmd, child := s.cmd, s.child
+	s.cmd, s.child = nil, nil
 	s.mu.Unlock()
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
 	_ = cmd.Process.Kill()
 	// Reaping matters: an unreaped child is a zombie, and a server that leaks
-	// one per respawn eventually cannot fork at all.
-	_ = cmd.Wait()
+	// one per respawn eventually cannot fork at all. The reaping is done by the
+	// watcher spawn started; waiting for it here is what makes that a reap
+	// rather than a hope, and it avoids a second concurrent Wait, which os/exec
+	// does not allow.
+	if child != nil {
+		child.Reap()
+	}
 }
 
 // supervise polls health and rebuilds the child when it stops answering.

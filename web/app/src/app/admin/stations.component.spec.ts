@@ -30,9 +30,16 @@ describe('Stations', () => {
     ctrl = TestBed.inject(HttpTestingController);
   });
 
-  function mounted() {
+  function type(fixture: { nativeElement: HTMLElement }, selector: string, value: string) {
+    const el = fixture.nativeElement.querySelector(selector) as HTMLInputElement;
+    el.value = value;
+    el.dispatchEvent(new Event(el.tagName === 'SELECT' ? 'change' : 'input'));
+    (fixture as unknown as { detectChanges(): void }).detectChanges();
+  }
+
+  function mounted(list: unknown[] = stations) {
     const fixture = TestBed.createComponent(Stations);
-    ctrl.expectOne('/admin/stations').flush(stations);
+    ctrl.expectOne('/admin/stations').flush(list);
     ctrl.expectOne('/admin/vocab').flush(vocab);
     ctrl.expectOne('/admin/jocks').flush(jocks);
     fixture.detectChanges();
@@ -216,5 +223,65 @@ describe('Stations', () => {
     ctrl.expectOne('/admin/stations/1/jock').flush(null, { status: 400, statusText: 'Bad' });
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('on air');
+  });
+
+  it('blames the mood when a genre+mood station comes back empty', () => {
+    // Measured against a real library: the model is TOLD to leave mood empty
+    // when nothing fits, so a genre+mood station can be empty while the same
+    // genre alone is full. "0 of 10 needed" sent the operator looking at the
+    // genre, which was never the problem.
+    const fixture = mounted();
+    type(fixture, '[data-name]', 'Night Rock');
+    type(fixture, '[data-mood]', 'calm');
+    fixture.nativeElement.querySelector('[data-add]').click();
+    ctrl.expectOne('/admin/stations').flush({ id: 9, tracks: 0 });
+    ctrl.expectOne('/admin/stations').flush([]);
+    fixture.detectChanges();
+
+    const said = fixture.nativeElement.querySelector('[data-said]').textContent;
+    expect(said).toContain('Added with 0 tracks');
+    expect(said).toContain('calm');
+    expect(said).toContain('Clearing the mood');
+  });
+
+  it('says nothing about mood when the station filled', () => {
+    const fixture = mounted();
+    type(fixture, '[data-name]', 'Rock');
+    type(fixture, '[data-mood]', 'calm');
+    fixture.nativeElement.querySelector('[data-add]').click();
+    ctrl.expectOne('/admin/stations').flush({ id: 9, tracks: 40 });
+    ctrl.expectOne('/admin/stations').flush([]);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-said]').textContent).not.toContain(
+      'Clearing the mood',
+    );
+  });
+
+  it('blames the mood when enabling is refused for too few tracks', () => {
+    const fixture = mounted([
+      { id: 3, name: 'Night Rock', genre: 'rock', mood: 'nocturnal', enabled: false, tracks: 4 },
+    ]);
+    fixture.nativeElement.querySelector('[data-toggle]').click();
+    ctrl
+      .expectOne('/admin/stations/3/enable')
+      .flush({ tracks: 4, minimum: 10 }, { status: 409, statusText: 'Conflict' });
+    fixture.detectChanges();
+    const said = fixture.nativeElement.querySelector('[data-said]').textContent;
+    expect(said).toContain('4 of 10 needed');
+    expect(said).toContain('nocturnal');
+  });
+
+  it('does not blame a mood a station does not have', () => {
+    const fixture = mounted([
+      { id: 4, name: 'Rock', genre: 'rock', enabled: false, tracks: 4 },
+    ]);
+    fixture.nativeElement.querySelector('[data-toggle]').click();
+    ctrl
+      .expectOne('/admin/stations/4/enable')
+      .flush({ tracks: 4, minimum: 10 }, { status: 409, statusText: 'Conflict' });
+    fixture.detectChanges();
+    const said = fixture.nativeElement.querySelector('[data-said]').textContent;
+    expect(said).toContain('4 of 10 needed');
+    expect(said).not.toContain('Clearing the mood');
   });
 });

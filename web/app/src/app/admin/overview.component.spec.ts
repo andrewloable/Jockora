@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
@@ -102,5 +102,49 @@ describe('Overview', () => {
       { key: 'c', value: '1,2' },
       { key: 'd', value: 'null' },
     ]);
+  });
+
+  it('keeps re-reading itself while it is open', () => {
+    // Enrichment moves at about a track a minute, so a page that loads once
+    // shows a number that never visibly changes -- which is what "enrichment
+    // seems stuck" turned out to be.
+    vi.useFakeTimers();
+    try {
+      const fixture = mounted();
+      vi.advanceTimersByTime(10_000);
+      ctrl.expectOne('/admin/overview.json').flush({ library: { tracks: 7696, enriched: 91 } });
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-overview]').textContent).toContain('91');
+
+      vi.advanceTimersByTime(10_000);
+      ctrl.expectOne('/admin/overview.json').flush({ library: { tracks: 7696, enriched: 92 } });
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('[data-overview]').textContent).toContain('92');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('can be closed twice without complaining', () => {
+    // Angular calls ngOnDestroy once, but a component that only tolerates one
+    // call is a trap for whoever wires it into something else later.
+    const fixture = mounted();
+    fixture.componentInstance.ngOnDestroy();
+    fixture.componentInstance.ngOnDestroy();
+    ctrl.verify();
+  });
+
+  it('stops polling once the section is closed', () => {
+    // The console mounts one section at a time; a timer left running would
+    // poll for a page nobody is looking at.
+    vi.useFakeTimers();
+    try {
+      const fixture = mounted();
+      fixture.destroy();
+      vi.advanceTimersByTime(60_000);
+      ctrl.verify();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
