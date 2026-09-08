@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, vi, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
@@ -8,6 +8,19 @@ import { adminGuard } from './admin.guard';
 
 describe('Admin', () => {
   let ctrl: HttpTestingController;
+
+  // The Logs section opens a live connection on mount, and the real
+  // EventSource would reach for a socket.
+  beforeEach(() => {
+    vi.stubGlobal(
+      'EventSource',
+      class {
+        close() {}
+        readyState = 0;
+      },
+    );
+  });
+  afterEach(() => vi.unstubAllGlobals());
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
@@ -35,7 +48,11 @@ describe('Admin', () => {
                   ? {}
                   : url === '/admin/stations'
                     ? [{ id: 1, name: 'Rock', genre: 'rock', enabled: true, tracks: 90 }]
-                    : [],
+                    : url === '/admin/logs'
+                      ? { records: [], dropped: 0, level: 'INFO' }
+                      : url === '/admin/llm'
+                        ? { providers: [], current: { has_key: false }, health: 'ok' }
+                        : [],
       );
     }
     fixture.detectChanges();
@@ -62,21 +79,28 @@ describe('Admin', () => {
       'stations',
       'playlist',
       'jocks',
+      'ads',
       'accounts',
       'model',
+      'logs',
     ]);
   });
 
   it('mounts one section at a time', () => {
-    // Six sections polling the server at once for pages nobody is looking at
-    // is a load the operator did not ask for.
+    // NINE sections polling the server at once for pages nobody is looking at
+    // is a load the operator did not ask for -- and Logs holds an open
+    // EventSource, so one per section would be nine live connections against
+    // a server that caps them at eight.
     const fixture = mounted();
     for (const [section, tag] of [
       ['sources', 'app-sources'],
       ['stations', 'app-stations'],
       ['playlist', 'app-playlist'],
       ['jocks', 'app-jocks'],
+      ['ads', 'app-ads'],
       ['accounts', 'app-users'],
+      ['model', 'app-llm'],
+      ['logs', 'app-logs'],
     ] as const) {
       fixture.nativeElement.querySelector(`[data-section="${section}"]`).click();
       fixture.detectChanges();

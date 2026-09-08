@@ -1,0 +1,387 @@
+import { describe, expect, it, beforeEach, vi } from 'vitest';
+import { TestBed } from '@angular/core/testing';
+import { provideHttpClient } from '@angular/common/http';
+import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
+import { Ads } from './ads.component';
+
+// Jockora-iyw.6. THE OPERATOR SELLS AIRTIME: they describe a product, read the
+// blurb the model wrote, edit it, and save it. Every spec here turns on the
+// difference between WRITING and SAVING.
+
+const script = 'Stillwater Ceramics. Hand-thrown mugs, one at a time, still here tomorrow.';
+
+const rows = [
+  {
+    id: 1,
+    brand: 'Stillwater Ceramics',
+    brief: 'hand-thrown mugs',
+    delivery: 'deadpan',
+    script,
+    last_aired_at: '2026-09-08T14:30:00Z',
+  },
+  { id: 2, brand: 'Harrow & Fen', brief: '', delivery: '', script: 'Harrow and Fen. Books.' },
+];
+
+describe('ads', () => {
+  let ctrl: HttpTestingController;
+
+  beforeEach(async () => {
+    vi.stubGlobal('confirm', () => true);
+    await TestBed.configureTestingModule({
+      imports: [Ads],
+      providers: [provideHttpClient(), provideHttpClientTesting()],
+    }).compileComponents();
+    ctrl = TestBed.inject(HttpTestingController);
+  });
+
+  function mounted(list = rows) {
+    const fixture = TestBed.createComponent(Ads);
+    ctrl.expectOne('/admin/ads').flush(list);
+    fixture.detectChanges();
+    return fixture;
+  }
+
+  type Fixture = { nativeElement: HTMLElement; detectChanges(): void };
+
+  function type(fixture: Fixture, selector: string, value: string) {
+    const el = fixture.nativeElement.querySelector(selector) as HTMLInputElement;
+    el.value = value;
+    el.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+  }
+
+  function click(fixture: Fixture, selector: string) {
+    (fixture.nativeElement.querySelector(selector) as HTMLButtonElement).click();
+    fixture.detectChanges();
+  }
+
+  function text(fixture: Fixture) {
+    return fixture.nativeElement.textContent ?? '';
+  }
+
+  it('lists ads with brand, script and when each last aired', () => {
+    const fixture = mounted();
+    const cells = fixture.nativeElement.querySelectorAll('[data-ads] tbody tr');
+    expect(cells.length).toBe(2);
+    expect(text(fixture)).toContain('Stillwater Ceramics');
+    expect(text(fixture)).toContain('Hand-thrown mugs');
+    // NEVER, not the epoch and not blank. An advert that has not aired yet is
+    // a fact the operator wants; "1 January 1970" is a bug report.
+    expect(text(fixture)).toContain('never');
+  });
+
+  it('writes a blurb from a brief and puts it in an editable textarea', () => {
+    const fixture = mounted([]);
+    type(fixture, '[data-brand]', 'Stillwater Ceramics');
+    type(fixture, '[data-about]', 'hand-thrown mugs');
+    type(fixture, '[data-delivery]', 'deadpan');
+    click(fixture, '[data-write]');
+
+    const req = ctrl.expectOne('/admin/ads/write');
+    expect(req.request.body).toEqual({
+      brand: 'Stillwater Ceramics',
+      about: 'hand-thrown mugs',
+      delivery: 'deadpan',
+    });
+    req.flush({ brand: 'Stillwater Ceramics', script });
+    fixture.detectChanges();
+
+    // ONE TEXTAREA, editable. Not a read-only preview with an edit button:
+    // typing over it is the same gesture as accepting it.
+    const box = fixture.nativeElement.querySelector('[data-script]') as HTMLTextAreaElement;
+    expect(box.tagName).toBe('TEXTAREA');
+    expect(box.readOnly).toBe(false);
+    expect(box.value).toBe(script);
+  });
+
+  it('saves the blurb as edited, not as written', () => {
+    const fixture = mounted([]);
+    type(fixture, '[data-brand]', 'Stillwater Ceramics');
+    type(fixture, '[data-about]', 'hand-thrown mugs');
+    click(fixture, '[data-write]');
+    ctrl.expectOne('/admin/ads/write').flush({ brand: 'Stillwater Ceramics', script });
+    fixture.detectChanges();
+
+    const mine = 'Stillwater Ceramics. Two mugs now, and we are as surprised as you are.';
+    type(fixture, '[data-script]', mine);
+    click(fixture, '[data-save]');
+
+    const req = ctrl.expectOne('/admin/ads');
+    expect(req.request.method).toBe('POST');
+    // WHAT IS ON SCREEN. An advert re-written on save would air words the
+    // operator never read, which is the whole reason writing and saving are
+    // two calls.
+    expect(req.request.body.script).toBe(mine);
+    expect(req.request.body.brand).toBe('Stillwater Ceramics');
+    expect(req.request.body.brief).toBe('hand-thrown mugs');
+    req.flush({ id: 3 });
+    ctrl.expectOne('/admin/ads').flush([]);
+  });
+
+  it('saves a hand-written script with no write call at all', () => {
+    const fixture = mounted([]);
+    type(fixture, '[data-brand]', 'Stillwater Ceramics');
+    type(fixture, '[data-script]', script);
+    click(fixture, '[data-save]');
+
+    // WRITING IS OPTIONAL, and this path must work with no model configured.
+    const req = ctrl.expectOne('/admin/ads');
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body.script).toBe(script);
+    req.flush({ id: 4 });
+    ctrl.expectOne('/admin/ads').flush([]);
+    ctrl.verify();
+  });
+
+  it('renders the real-brand warning, names the match, and keeps save enabled', () => {
+    const fixture = mounted([]);
+    type(fixture, '[data-brand]', 'Coca-Cola');
+    type(fixture, '[data-about]', 'the drink');
+    click(fixture, '[data-write]');
+    ctrl.expectOne('/admin/ads/write').flush({
+      brand: 'Coca-Cola',
+      script: 'Coca-Cola. The one you already know, cold, at the shop on the corner.',
+      matched: 'coca-cola',
+      warning: 'this advert names coca-cola, which somebody else owns. You can use it anyway.',
+    });
+    fixture.detectChanges();
+
+    const warn = fixture.nativeElement.querySelector('[data-brand-warning]');
+    expect(warn).not.toBeNull();
+    expect(warn?.textContent).toContain('coca-cola');
+    // AN ADVISORY, NOT A BLOCKER. An operator advertising a real company sees
+    // this every time; a red box that means nothing trains them to ignore red
+    // boxes, and disabling Save would make the feature useless to them.
+    expect(warn?.getAttribute('role')).not.toBe('alert');
+    const save = fixture.nativeElement.querySelector('[data-save]') as HTMLButtonElement;
+    expect(save.disabled).toBe(false);
+  });
+
+  it('shows the server words on a 503 and leaves save enabled', () => {
+    const fixture = mounted([]);
+    type(fixture, '[data-brand]', 'Stillwater');
+    type(fixture, '[data-about]', 'mugs');
+    click(fixture, '[data-write]');
+    ctrl.expectOne('/admin/ads/write').flush(
+      {
+        error:
+          'no language model is configured, so a blurb cannot be drafted. ' +
+          'Choose one on the Model page, or write the advert yourself.',
+      },
+      { status: 503, statusText: 'Service Unavailable' },
+    );
+    fixture.detectChanges();
+
+    // THE SERVER'S OWN SENTENCE, not a generic fallback. It names both ways
+    // out, and one of them is the form the operator is already looking at.
+    expect(text(fixture)).toContain('Choose one on the Model page');
+    const save = fixture.nativeElement.querySelector('[data-save]') as HTMLButtonElement;
+    expect(save.disabled).toBe(false);
+  });
+
+  it('shows a 502 and a 504 and leaves the form as it was', () => {
+    const fixture = mounted([]);
+    type(fixture, '[data-brand]', 'Stillwater');
+    type(fixture, '[data-about]', 'mugs');
+    type(fixture, '[data-script]', script);
+
+    click(fixture, '[data-write]');
+    ctrl
+      .expectOne('/admin/ads/write')
+      .flush(
+        { error: 'the language model could not write it: 402 payment required' },
+        { status: 502, statusText: 'Bad Gateway' },
+      );
+    fixture.detectChanges();
+    expect(text(fixture)).toContain('402 payment required');
+    // NOT CLEARED. The operator was not wrong and their words are still theirs.
+    expect(
+      (fixture.nativeElement.querySelector('[data-script]') as HTMLTextAreaElement).value,
+    ).toBe(script);
+
+    click(fixture, '[data-write]');
+    ctrl.expectOne('/admin/ads/write').flush(
+      {
+        error:
+          'the language model did not answer in time. Enrichment may be running and using it; ' +
+          'you can pause that on the Overview. You can also write the advert yourself.',
+      },
+      { status: 504, statusText: 'Gateway Timeout' },
+    );
+    fixture.detectChanges();
+    // THE SAME WORDS THE STATION BRIEF USES. Two screens explaining the same
+    // delay differently is worse than either explanation.
+    expect(text(fixture)).toContain('Enrichment may be running');
+
+    // And a failure that carries no sentence at all still says something. A
+    // blank line where the reason should be reads as the console breaking.
+    click(fixture, '[data-write]');
+    ctrl.expectOne('/admin/ads/write').flush(null, { status: 500, statusText: 'nope' });
+    fixture.detectChanges();
+    expect(text(fixture)).toContain('Could not write that advert');
+  });
+
+  it('counts code points against the slot and flags going over', () => {
+    const fixture = mounted([]);
+    type(fixture, '[data-script]', 'a'.repeat(10));
+    expect(fixture.nativeElement.querySelector('[data-count]')?.textContent).toContain('10');
+    expect(
+      fixture.nativeElement.querySelector('[data-count]')?.getAttribute('data-over'),
+    ).toBeNull();
+
+    // CODE POINTS, NOT UTF-16 UNITS. An emoji is one character to the server
+    // and two to JavaScript's .length -- the console would say 340 of 360
+    // while the server refused. Jockora-9jo, one field over.
+    type(fixture, '[data-script]', '🎧'.repeat(5));
+    expect(fixture.nativeElement.querySelector('[data-count]')?.textContent).toContain('5');
+
+    type(fixture, '[data-script]', 'a'.repeat(400));
+    expect(fixture.nativeElement.querySelector('[data-count]')?.getAttribute('data-over')).toBe(
+      'true',
+    );
+  });
+
+  it('edits an existing ad, blurb included', () => {
+    const fixture = mounted();
+    click(fixture, '[data-ads] tbody tr [data-edit]');
+
+    // THE ROW, IN THE FORM. All four fields: an operator who clicks Edit and
+    // finds the brief they wrote is blank has lost it, and would retype it.
+    const value = (sel: string) =>
+      (fixture.nativeElement.querySelector(sel) as HTMLInputElement).value;
+    expect(value('[data-brand]')).toBe('Stillwater Ceramics');
+    expect(value('[data-about]')).toBe('hand-thrown mugs');
+    expect(value('[data-delivery]')).toBe('deadpan');
+    expect(value('[data-script]')).toBe(script);
+
+    type(fixture, '[data-about]', 'mugs, more of them');
+    click(fixture, '[data-write]');
+    ctrl
+      .expectOne('/admin/ads/write')
+      .flush({ brand: 'Stillwater Ceramics', script: 'Stillwater Ceramics. Two mugs now.' });
+    fixture.detectChanges();
+
+    click(fixture, '[data-save]');
+    const req = ctrl.expectOne('/admin/ads/1');
+    expect(req.request.method).toBe('PUT');
+    expect(req.request.body.script).toBe('Stillwater Ceramics. Two mugs now.');
+    expect(req.request.body.brief).toBe('mugs, more of them');
+    req.flush(null);
+    ctrl.expectOne('/admin/ads').flush(rows);
+  });
+
+  it('asks before deleting, and does nothing if the operator declines', () => {
+    vi.stubGlobal('confirm', () => false);
+    const fixture = mounted();
+    click(fixture, '[data-ads] tbody tr [data-remove]');
+    // DO NOT COPY THE ONE-CLICK DELETE from the other sections; it is already
+    // a filed bug (Jockora-e9a.48). Declining does nothing at all.
+    ctrl.verify();
+
+    vi.stubGlobal('confirm', () => true);
+    click(fixture, '[data-ads] tbody tr [data-remove]');
+    ctrl.expectOne('/admin/ads/1').flush(null);
+    ctrl.expectOne('/admin/ads').flush([]);
+  });
+
+  it('disables write while blank and while in flight, and says which', () => {
+    const fixture = mounted([]);
+    const write = () => fixture.nativeElement.querySelector('[data-write]') as HTMLButtonElement;
+    expect(write().disabled).toBe(true);
+
+    type(fixture, '[data-brand]', 'Stillwater');
+    expect(write().disabled).toBe(true); // about is required too
+    type(fixture, '[data-about]', 'mugs');
+    expect(write().disabled).toBe(false);
+
+    click(fixture, '[data-write]');
+    expect(write().disabled).toBe(true);
+    expect(write().textContent).toContain('Writing');
+    // WHY IT IS SLOW, in the same words the station brief uses.
+    expect(text(fixture)).toContain('enrichment may be running');
+    ctrl.expectOne('/admin/ads/write').flush({ brand: 'Stillwater', script });
+    fixture.detectChanges();
+    expect(write().disabled).toBe(false);
+  });
+
+  it('shows the server words when a save is refused, and its own when there are none', () => {
+    const fixture = mounted([]);
+    type(fixture, '[data-brand]', 'Stillwater');
+    type(fixture, '[data-script]', 'Stillwater. Mugs.');
+    click(fixture, '[data-save]');
+    // THE VALIDATOR'S OWN SENTENCE, which already says which rule and by how
+    // much. A generic "could not save" would send the operator hunting.
+    ctrl
+      .expectOne('/admin/ads')
+      .flush(
+        { field: 'script', error: 'advert is 3 words, too short to be one' },
+        { status: 400, statusText: 'Bad Request' },
+      );
+    fixture.detectChanges();
+    expect(text(fixture)).toContain('too short to be one');
+
+    click(fixture, '[data-save]');
+    ctrl.expectOne('/admin/ads').flush(null, { status: 500, statusText: 'nope' });
+    fixture.detectChanges();
+    expect(text(fixture)).toContain('Could not save that advert');
+  });
+
+  it('says so when a delete fails, and cancel leaves the form empty', () => {
+    const fixture = mounted();
+    click(fixture, '[data-ads] tbody tr [data-remove]');
+    ctrl.expectOne('/admin/ads/1').flush(null, { status: 500, statusText: 'nope' });
+    fixture.detectChanges();
+    expect(text(fixture)).toContain('Could not delete');
+
+    // CANCEL IS NOT SAVE. An operator who opened the wrong row leaves the
+    // form as they found it, with nothing sent.
+    click(fixture, '[data-ads] tbody tr [data-edit]');
+    expect((fixture.nativeElement.querySelector('[data-brand]') as HTMLInputElement).value).toBe(
+      'Stillwater Ceramics',
+    );
+    click(fixture, '[data-cancel]');
+    expect((fixture.nativeElement.querySelector('[data-brand]') as HTMLInputElement).value).toBe(
+      '',
+    );
+    expect(fixture.nativeElement.querySelector('[data-cancel]')).toBeNull();
+    ctrl.verify();
+  });
+
+  it('reads a rubbish timestamp as never rather than as Invalid Date', () => {
+    const fixture = mounted([{ ...rows[0], last_aired_at: 'the other day' }]);
+    // A row the server should never send, and a cell that must not read
+    // "Invalid Date" if it ever does.
+    expect(text(fixture)).toContain('never');
+    expect(text(fixture)).not.toContain('Invalid Date');
+  });
+
+  it('carries the server field caps so the browser stops a paste first', () => {
+    // The 4KB body cap fails with a flat 400 that names no box. These stop the
+    // round trip happening at all.
+    const fixture = mounted([]);
+    expect(fixture.nativeElement.querySelector('[data-about]')?.getAttribute('maxlength')).toBe(
+      '1500',
+    );
+    expect(fixture.nativeElement.querySelector('[data-delivery]')?.getAttribute('maxlength')).toBe(
+      '200',
+    );
+  });
+
+  it('tells loading, empty and failed apart', () => {
+    const fixture = TestBed.createComponent(Ads);
+    fixture.detectChanges();
+    expect(text(fixture)).toContain('Loading');
+
+    ctrl.expectOne('/admin/ads').flush([]);
+    fixture.detectChanges();
+    expect(text(fixture)).toContain('No adverts yet');
+
+    const second = TestBed.createComponent(Ads);
+    second.detectChanges();
+    ctrl.expectOne('/admin/ads').flush(null, { status: 500, statusText: 'nope' });
+    second.detectChanges();
+    // A FAILED READ IS NOT AN EMPTY LIBRARY. Jockora-e9a.50.
+    expect(second.nativeElement.textContent).not.toContain('No adverts yet');
+    expect(second.nativeElement.textContent).toContain('Could not read');
+  });
+});

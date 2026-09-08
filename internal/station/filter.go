@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/andrewloable/jockora/internal/enrich"
 	"github.com/andrewloable/jockora/internal/store"
@@ -36,7 +37,40 @@ type Filter struct {
 
 	// Moods narrows by feeling. Empty means any.
 	Moods []string `json:"moods,omitempty"`
+
+	// THE NUMERIC BOUNDS, all with ZERO MEANING UNBOUNDED on that side.
+	//
+	// These are what a brief becomes: "mostly 80s", "calm but driving",
+	// "nothing over four minutes". They are the complete set of what the
+	// database can actually select on -- year from the scanner, bpm from the
+	// analyser, duration from the scanner -- and nothing else is selectable
+	// because nothing else is a column with a closed meaning.
+	YearMin int `json:"year_min,omitempty"`
+	YearMax int `json:"year_max,omitempty"`
+
+	// TempoMin and TempoMax REPLACE the range a mood implies, they do not
+	// intersect with it. See tempoBounds.
+	TempoMin float64 `json:"tempo_min,omitempty"`
+	TempoMax float64 `json:"tempo_max,omitempty"`
+
+	DurationMinS float64 `json:"duration_min_s,omitempty"`
+	DurationMaxS float64 `json:"duration_max_s,omitempty"`
 }
+
+// The bounds a value is refused outside. REFUSED HERE, REPAIRED IN enrich:
+// DeriveStationParams already fixes what a model returns, and this is the
+// boundary that catches a hand-edited database or a direct API call.
+const (
+	earliestYear = 1900
+	// The sidecar refuses a tempo outside this, so a station asking for one
+	// would be asking for tracks that cannot exist.
+	slowestBPM, fastestBPM = 30.0, 250.0
+	// Half a minute is shorter than some breaks; an hour is an album side.
+	shortestTrackS, longestTrackS = 30.0, 3600.0
+)
+
+// ErrBadRange refuses a bound nothing could satisfy.
+var ErrBadRange = errors.New("station: impossible range")
 
 // SplitList reads the comma-joined form these are stored in.
 //
@@ -92,7 +126,56 @@ func (f Filter) Validate() error {
 			return fmt.Errorf("%w: mood %q", ErrBadVocabulary, m)
 		}
 	}
+
+	for _, r := range []struct {
+		what     string
+		min, max float64
+		lo, hi   float64
+	}{
+		{"year", float64(f.YearMin), float64(f.YearMax), earliestYear, float64(time.Now().Year() + 1)},
+		{"tempo", f.TempoMin, f.TempoMax, slowestBPM, fastestBPM},
+		{"length", f.DurationMinS, f.DurationMaxS, shortestTrackS, longestTrackS},
+	} {
+		if err := checkRange(r.what, r.min, r.max, r.lo, r.hi); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// checkRange refuses a nonzero bound outside what could exist, and a pair the
+// wrong way round. Zero is unbounded on that side and is always fine.
+func checkRange(what string, min, max, lo, hi float64) error {
+	for _, v := range []float64{min, max} {
+		if v != 0 && (v < lo || v > hi) {
+			return fmt.Errorf("%w: %s %g is outside %g to %g", ErrBadRange, what, v, lo, hi)
+		}
+	}
+	if min != 0 && max != 0 && min > max {
+		return fmt.Errorf("%w: %s %g to %g selects nothing", ErrBadRange, what, min, max)
+	}
+	return nil
+}
+
+// bounds widens an unset side to a sentinel, so the SQL is one shape rather
+// than four -- the same trick the tempo clause has always used.
+func bounds(min, max, lo, hi float64) (float64, float64) {
+	if min == 0 {
+		min = lo
+	}
+	if max == 0 {
+		max = hi
+	}
+	return min, max
+}
+
+// yearBounds and lengthBounds are the two new clauses' arguments.
+func (f Filter) yearBounds() (float64, float64) {
+	return bounds(float64(f.YearMin), float64(f.YearMax), 0, 99999)
+}
+
+func (f Filter) lengthBounds() (float64, float64) {
+	return bounds(f.DurationMinS, f.DurationMaxS, 0, 1e9)
 }
 
 // TrackIDs is the music this filter selects, in a stable order.
@@ -118,10 +201,19 @@ func (f Filter) TrackIDs(ctx context.Context, s *store.Store) ([]int64, error) {
 	// as a join through dossiers: that would silently drop every track
 	// enrichment has not reached yet, which on a fresh library is most of them.
 	if len(f.Genres) == 0 && len(f.Moods) == 0 {
+		// THE NUMERIC BOUNDS APPLY HERE TOO. A years-only station -- no
+		// genres, no moods, 1980 to 1989 -- is a real station, and forgetting
+		// this path is how it silently becomes the whole library.
+		lo, hi := tempoBounds(f)
+		yLo, yHi := f.yearBounds()
+		dLo, dHi := f.lengthBounds()
 		rows, err := s.DB().QueryContext(ctx, `
 			SELECT t.id FROM tracks t
 			 WHERE t.playable = 1 AND t.missing_at IS NULL
-			 ORDER BY t.id`)
+			   AND (t.bpm IS NULL OR t.bpm BETWEEN ? AND ?)
+			   AND (t.year IS NULL OR t.year BETWEEN ? AND ?)
+			   AND (t.duration_s IS NULL OR t.duration_s BETWEEN ? AND ?)
+			 ORDER BY t.id`, lo, hi, yLo, yHi, dLo, dHi)
 		if err != nil {
 			return nil, fmt.Errorf("station: selecting every track: %w", err)
 		}
@@ -146,20 +238,24 @@ func (f Filter) TrackIDs(ctx context.Context, s *store.Store) ([]int64, error) {
 	// A MOOD IMPLIES A TEMPO, for the five where tempo means anything. A NULL
 	// bpm never excludes: analysis is a slow background pass, and on a fresh
 	// library dropping the unmeasured would make every mood station empty.
-	lo, hi := tempoBounds(f.Moods)
+	lo, hi := tempoBounds(f)
+	yLo, yHi := f.yearBounds()
+	dLo, dHi := f.lengthBounds()
 
 	rows, err := s.DB().QueryContext(ctx, `
 		SELECT DISTINCT t.id FROM tracks t
 		  JOIN effective_tags e ON e.track_id = t.id
 		 WHERE t.playable = 1 AND t.missing_at IS NULL
 		   AND (t.bpm IS NULL OR t.bpm BETWEEN ? AND ?)
+		   AND (t.year IS NULL OR t.year BETWEEN ? AND ?)
+		   AND (t.duration_s IS NULL OR t.duration_s BETWEEN ? AND ?)
 		   AND (json_array_length(?) = 0 OR EXISTS (
 		         SELECT 1 FROM json_each(e.station_tags) tag
 		          WHERE tag.value IN (SELECT value FROM json_each(?))))
 		   AND (json_array_length(?) = 0 OR EXISTS (
 		         SELECT 1 FROM json_each(e.mood) m
 		          WHERE m.value IN (SELECT value FROM json_each(?))))
-		 ORDER BY t.id`, lo, hi, genres, genres, moods, moods)
+		 ORDER BY t.id`, lo, hi, yLo, yHi, dLo, dHi, genres, genres, moods, moods)
 	if err != nil {
 		return nil, fmt.Errorf("station: selecting %v tracks: %w", f.Genres, err)
 	}
@@ -182,13 +278,17 @@ func (f Filter) unplacedTrackIDs(ctx context.Context, s *store.Store) ([]int64, 
 	// operator who placed the track has already answered the question.
 	// The catch-all takes a mood like any other station, so it answers the same
 	// question about tempo.
-	lo, hi := tempoBounds(f.Moods)
+	lo, hi := tempoBounds(f)
+	yLo, yHi := f.yearBounds()
+	dLo, dHi := f.lengthBounds()
 
 	rows, err := s.DB().QueryContext(ctx, `
 		SELECT t.id FROM tracks t
 		  JOIN effective_tags e ON e.track_id = t.id
 		 WHERE t.playable = 1 AND t.missing_at IS NULL
 		   AND (t.bpm IS NULL OR t.bpm BETWEEN ? AND ?)
+		   AND (t.year IS NULL OR t.year BETWEEN ? AND ?)
+		   AND (t.duration_s IS NULL OR t.duration_s BETWEEN ? AND ?)
 		   AND (json_array_length(e.station_tags) = 0
 		        OR (e.overridden = 0 AND e.confidence = ?)
 		        OR EXISTS (
@@ -198,7 +298,7 @@ func (f Filter) unplacedTrackIDs(ctx context.Context, s *store.Store) ([]int64, 
 		         SELECT 1 FROM json_each(e.mood) m
 		          WHERE m.value IN (SELECT value FROM json_each(?))))
 		 ORDER BY t.id`,
-		lo, hi, ConfidenceNone, enrich.FallbackStationTag, moods, moods)
+		lo, hi, yLo, yHi, dLo, dHi, ConfidenceNone, enrich.FallbackStationTag, moods, moods)
 	if err != nil {
 		return nil, fmt.Errorf("station: selecting unplaced tracks: %w", err)
 	}

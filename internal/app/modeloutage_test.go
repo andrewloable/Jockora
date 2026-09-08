@@ -4,8 +4,10 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -179,7 +181,45 @@ func TestModelOutageDoesNotCallADeadWorkerRunning(t *testing.T) {
 	if a.enrichmentRunning() {
 		t.Error("a worker that gave up still reports as running")
 	}
-	if !strings.Contains(a.enrichmentTrouble(), "gave up") {
-		t.Errorf("enrichment trouble = %q, want it to say the worker gave up", a.enrichmentTrouble())
+	// NOT YET TROUBLE: not-alive also covers a worker that has not started and
+	// one that is on its way back from a restart. The stored reason is what
+	// separates the three.
+	if why := a.enrichmentTrouble(); why != "" {
+		t.Errorf("a worker with no recorded failure is reported as trouble: %q", why)
+	}
+	a.enrichGaveUp.Store("rejected the API key")
+	if why := a.enrichmentTrouble(); !strings.Contains(why, "rejected the API key") {
+		t.Errorf("enrichment trouble = %q, want the reason it gave up", why)
+	}
+}
+
+// TestModelOutageWakeChannelExistsBeforeTheServerDoes: the wake must survive a
+// request that lands during startup.
+//
+// Run starts the HTTP server and only forty lines later reached the enricher
+// branch that used to create this channel. For the whole of that window a POST
+// to /admin/enriching or /admin/llm read the field on a handler goroutine while
+// Run wrote it -- a data race outright, and one that also LOST the wake: the
+// read saw nil, returned, and the operator's restart did nothing. The box that
+// gets a request the moment it comes up is the deployed one.
+func TestModelOutageWakeChannelExistsBeforeTheServerDoes(t *testing.T) {
+	a, err := New(testConfig(t), Options{
+		Tracks: []string{toneFile(t, t.TempDir(), "a.mp3", 1, 220)},
+		Log:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// BEFORE Run. Nothing has started, and a wake asked for now must still be
+	// waiting when the worker eventually looks.
+	if a.enrichWake == nil {
+		t.Fatal("the wake channel is nil until Run gets to it, so a restart asked for " +
+			"during startup is silently dropped")
+	}
+	a.wakeEnrichment()
+	select {
+	case <-a.enrichWake:
+	default:
+		t.Error("the wake was lost")
 	}
 }

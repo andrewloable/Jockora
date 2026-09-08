@@ -98,9 +98,19 @@ type Server struct {
 	regenerate Regenerator
 	runtimes   Runtimes
 	clk        clock.Clock
-	failures   loginFailures
-	tuner      Tuner
-	admin      Admin
+	logs       Logs
+	briefs     StationBriefs
+	ads        Ads
+	// deriveDeadline overrides DeriveDeadline. A field so a test can drive a
+	// timeout without waiting ninety seconds for one.
+	deriveDeadline time.Duration
+	// heartbeat is how often an idle SSE stream says it is alive. A field
+	// rather than the constant directly, so a test can drive the interval
+	// without waiting twenty seconds for one line.
+	heartbeat time.Duration
+	failures  loginFailures
+	tuner     Tuner
+	admin     Admin
 }
 
 // SetStatusSource wires the /now.json data source. Without one the endpoint

@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/andrewloable/jockora/internal/say"
 )
 
 // THE TAGS FILL A HOLE, NOTHING MORE. The scanner reads album and year out of
@@ -44,15 +46,23 @@ func TestTrackTagsYearParentheticalNotOwnLine(t *testing.T) {
 		CurrentArtist: "Bloc Party", CurrentTitle: "Banquet",
 		CurrentAlbum: "Silent Alarm", CurrentYear: 2005,
 	})
-	if !strings.Contains(got, "album: Silent Alarm (2005)") {
-		t.Errorf("the year is not on the album line:\n%s", got)
+	// AGAINST say.YearWords, never a hardcoded string. Jockora-3dp changed the
+	// FORM the year is printed in and this assertion said "(2005)", so it broke
+	// -- correctly, since it is a golden string. What it was guarding is that
+	// the year rides on the album line, and that is unchanged; pinning it to
+	// the function means the next format change cannot silently pass either.
+	if want := "album: Silent Alarm (" + say.YearWords(2005) + ")"; !strings.Contains(got, want) {
+		t.Errorf("the year is not on the album line as %q:\n%s", want, got)
 	}
 	// A BARE YEAR LINE READS AS A FACT STATED FLATLY, and a tag year is often
 	// the reissue rather than the release -- confidently wrong in a way a
-	// dossier release date is not.
+	// dossier release date is not. Checked in BOTH forms: the digit pattern
+	// would now never match anything, so on its own it had stopped guarding.
 	bare := regexp.MustCompile(`(?m)^\s*(year|released)?\s*:?\s*\(?\d{4}\)?\s*$`)
+	words := regexp.MustCompile(`(?m)^\s*(year|released)?\s*:?\s*\(?` +
+		regexp.QuoteMeta(say.YearWords(2005)) + `\)?\s*$`)
 	for _, line := range strings.Split(got, "\n") {
-		if bare.MatchString(line) {
+		if bare.MatchString(line) || words.MatchString(line) {
 			t.Errorf("a bare year line: %q", line)
 		}
 	}
@@ -76,8 +86,13 @@ func TestTrackTagsNoAlbumKeepsNothingKnownLine(t *testing.T) {
 	}
 	// A YEAR WITH NO ALBUM IS STILL NOT A LINE. It has nothing to hang on.
 	got = tagPrompt(t, PromptInput{CurrentArtist: "Bloc Party", CurrentTitle: "Banquet", CurrentYear: 2005})
-	if strings.Contains(got, "2005") {
-		t.Errorf("a year printed with no album to sit beside:\n%s", got)
+	// BOTH FORMS. Checking only the digits stopped meaning anything the moment
+	// years were printed as words -- it would pass against a prompt that said
+	// "two thousand five" on a line of its own.
+	for _, bad := range []string{"2005", say.YearWords(2005)} {
+		if strings.Contains(got, bad) {
+			t.Errorf("a year printed as %q with no album to sit beside:\n%s", bad, got)
+		}
 	}
 }
 
@@ -87,8 +102,8 @@ func TestTrackTagsNextTrackCarriesThemToo(t *testing.T) {
 		NextArtist: "Bloc Party", NextTitle: "Banquet",
 		NextAlbum: "Silent Alarm", NextYear: 2005,
 	})
-	if !strings.Contains(got, "album: Silent Alarm (2005)") {
-		t.Errorf("the coming track has no album line:\n%s", got)
+	if want := "album: Silent Alarm (" + say.YearWords(2005) + ")"; !strings.Contains(got, want) {
+		t.Errorf("the coming track has no album line %q:\n%s", want, got)
 	}
 }
 

@@ -542,7 +542,28 @@ func (v *Validator) names() []string {
 // twenty-one words is more than a third of it.
 //
 // So the answer is the SHARE of the break sitting inside a repeated run, which
-// separates the two with room to spare. It does not weaken the across-break
+// separates the two with room to spare.
+//
+// MEASURED AGAIN ON 2026-09-08 against 28 breaks that really aired, read out of
+// the deployed station's said_lines table, because Jockora-yex argued the rule
+// must still drop a device inside a SHORT break -- and short breaks are the
+// majority, 16 of the 28. The corpus says otherwise, and says why:
+//
+//   - The rule drops 4 of those 16, and all four are genuine loops: a tag list
+//     recited twice, "cure. mood cure. mood cure. mood", "nobody" eight times,
+//     and one that leaked its own JSON. No false drops.
+//   - Every real rhetorical device scores ZERO, not merely under the threshold:
+//     "HEY HEY HEY", "Welcome, welcome, welcome", "What a record! What a
+//     RECORD!". A triple repeats a WORD, not a four-gram, so GramSize is what
+//     protects it and RepeatShare never has to.
+//   - No short break in the corpus carries a device at all. The model writes
+//     flourishes when it has room -- every one of them landed in a 64 to 102
+//     word break -- and its short breaks are terse announcements with no
+//     rhetoric in them to lose.
+//
+// The worry was reasonable and the data does not support it. The harness that
+// produced this is TestRepeatShareAgainstTheRealCorpus; point it at a fresh
+// export before changing either constant. It does not weaken the across-break
 // index: a phrase reused in a LATER break is still refused outright by
 // said_lines, because saying the same thing twice on one station is a different
 // failure from a stuck model.

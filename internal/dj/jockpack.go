@@ -128,6 +128,12 @@ func (p *Pack) Ads() []Ad {
 //
 // Round-trips through the SAME shape it reads, so exporting and re-importing is
 // lossless for everything the format carries.
+//
+// NO CALLER YET, and when one is written it must read the adverts from the
+// DATABASE, not from p.Adverts. Pack adverts are imported into the ads table on
+// load (app.ImportPackAds) and the operator edits and deletes them there; a
+// pack exported from this struct would carry the adverts it shipped with and
+// silently undo every one of those edits for whoever installs it.
 func WritePack(path string, p *Pack) error {
 	var b strings.Builder
 	b.WriteString("# Copyright (C) 2026 Andrew Loable\n")

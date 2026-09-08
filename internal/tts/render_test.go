@@ -6,12 +6,15 @@ package tts
 import (
 	"context"
 	"encoding/binary"
+	"io"
 	"math"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,4 +190,42 @@ func abs32(f float32) float32 {
 		return -f
 	}
 	return f
+}
+
+// TestSpeakableRenderUsesIt: the wiring, which is the half a unit test of the
+// text function cannot prove. Jockora-hm2 is a defect a listener HEARD, and it
+// stays fixed only while Render keeps normalising before it speaks.
+func TestSpeakableRenderUsesIt(t *testing.T) {
+	s := startFake(t)
+	waitFor(t, "healthy", 10*time.Second, s.Healthy)
+	out := filepath.Join(t.TempDir(), "break.wav")
+
+	const line = "Feeder's 8.18 came out in 1993, and the 1990s were kind to it."
+	if _, err := Render(context.Background(), s, line, "", out); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	resp, err := http.Get("http://" + s.addr + "/last")
+	if err != nil {
+		t.Fatalf("asking the sidecar what it heard: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // test
+	heard, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading it back: %v", err)
+	}
+
+	got := string(heard)
+	for _, want := range []string{"nineteen ninety three", "nineteen nineties"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the sidecar was asked to say %q, which does not contain %q", got, want)
+		}
+	}
+	if strings.Contains(got, "1993") || strings.Contains(got, "1990s") {
+		t.Errorf("digits reached the sidecar: %q", got)
+	}
+	// The rest of the line is untouched: 8.18 is a title, not a year.
+	if !strings.Contains(got, "Feeder's 8.18") {
+		t.Errorf("the normaliser changed something that was not a year: %q", got)
+	}
 }

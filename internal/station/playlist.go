@@ -35,7 +35,16 @@ func Regenerate(ctx context.Context, s *store.Store, stationID int64) (Diff, err
 	if err != nil {
 		return Diff{}, err
 	}
-	filter := Filter{Genres: SplitList(st.Genre), Moods: SplitList(st.Mood)}
+	// EVERY parameter the station row carries, not only the tags. A brief that
+	// said "mostly 80s, calm but driving, nothing over four minutes" is stored
+	// as four numbers, and a filter built without them is a brief that stopped
+	// at the database. Jockora-g1t.3.
+	filter := Filter{
+		Genres: SplitList(st.Genre), Moods: SplitList(st.Mood),
+		YearMin: st.YearMin, YearMax: st.YearMax,
+		TempoMin: st.TempoMin, TempoMax: st.TempoMax,
+		DurationMinS: st.DurationMinS, DurationMaxS: st.DurationMaxS,
+	}
 	wanted, err := filter.TrackIDs(ctx, s)
 	if err != nil {
 		return Diff{}, err

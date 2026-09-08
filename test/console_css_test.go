@@ -159,7 +159,8 @@ func TestConsoleCSSStacksEveryAdminTable(t *testing.T) {
 		t.Fatal("the narrow-viewport rules are gone")
 	}
 	block := css[narrow:]
-	for _, table := range []string{"[data-playlist]", "[data-stations]", "[data-jocks]", "[data-overview]"} {
+	for _, table := range []string{"[data-playlist]", "[data-stations]", "[data-jocks]",
+		"[data-overview]", "[data-logs]", "[data-ads]"} {
 		if !strings.Contains(block, table+" tr") {
 			t.Errorf("%s does not become a card on a phone; its buttons are unreachable", table)
 		}
@@ -570,5 +571,64 @@ func TestModelOutageLooksLikeTrouble(t *testing.T) {
 		if !strings.Contains(rule, "var(--bad)") {
 			t.Errorf("%s does not use the colour reserved for something being wrong", sel)
 		}
+	}
+}
+
+// ---------------------------------------------------------- listener page --
+//
+// Jockora-e9a.47. At 390px the listener page is the best screen in the product:
+// zero overflowing elements, the station card full width, its metadata on two
+// comfortable lines. At 1280px the SAME card is 208px wide and its metadata
+// wraps to five cramped monospace lines, with 610px -- 48 percent of the
+// viewport -- empty. The desktop layout was the mobile layout left-aligned.
+
+// TestListenerPageIsAColumnNotALeftEdge: e9a.49 decided 68rem centred for the
+// console and said this task would read it as "centre the dial too". A listener
+// page is a player and a dial, not a data console, so it takes a narrower
+// measure -- but it is CHOSEN and centred rather than whatever is left over.
+func TestListenerPageIsAColumnNotALeftEdge(t *testing.T) {
+	rule := ruleFor(t, styles(t), "app-listener")
+	if !strings.Contains(rule, "max-width") {
+		t.Error("the listener page has no measure; it is as wide as the screen it is on")
+	}
+	if !strings.Contains(rule, "margin: 0 auto") {
+		t.Error("the listener page is not centred, so it hugs the left edge of a wide screen")
+	}
+}
+
+// TestListenerPageGivesAStationCardRoomToRead: at minmax(13rem, 1fr) a card was
+// 208px and its metadata -- tracks, jock, moods, listeners -- wrapped to five
+// lines in a monospace face.
+func TestListenerPageGivesAStationCardRoomToRead(t *testing.T) {
+	// COMMENTS STRIPPED FROM THE BODY, not only from the selector. The rule's
+	// own comment explains why min(100%, ...) is there, so a Contains check
+	// matched the explanation and passed with the guard deleted. Third time
+	// today a comment has defeated an assertion in this file.
+	rule := stripComments(ruleFor(t, styles(t), "[data-dial]"))
+	m := regexp.MustCompile(`minmax\(\s*(?:min\(100%,\s*)?([0-9.]+)rem`).FindStringSubmatch(rule)
+	if m == nil {
+		t.Fatalf("the dial's track size is not a rem minimum any more:\n%s", rule)
+	}
+	var min float64
+	if _, err := fmt.Sscanf(m[1], "%g", &min); err != nil {
+		t.Fatalf("track minimum %q is not a number", m[1])
+	}
+	if min < 16 {
+		t.Errorf("a station card is at least %grem; it was 13rem and drew five cramped lines", min)
+	}
+	// AND THE PHONE IS NOT REGRESSED. Without min(100%, ...) a track minimum
+	// wider than the viewport overflows the page sideways, which is the one
+	// thing the 390px layout measured clean.
+	if !strings.Contains(rule, "min(100%") {
+		t.Error("a track wider than a phone's viewport can now push the page sideways")
+	}
+}
+
+// TestListenerPageSettlesLiveWithTheTransport: margin-left auto pushed LIVE to
+// the far end of a full-width bar, so it sat alone with empty space either side
+// while Listen and Volume clustered at the left. It belongs to the transport.
+func TestListenerPageSettlesLiveWithTheTransport(t *testing.T) {
+	if strings.Contains(ruleFor(t, styles(t), "[data-live]"), "margin-left: auto") {
+		t.Error("LIVE is still pushed away from the controls it belongs to")
 	}
 }

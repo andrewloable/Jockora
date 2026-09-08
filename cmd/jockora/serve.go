@@ -92,6 +92,12 @@ func buildBreaks(ctx context.Context, cfg *config.Config, lib *app.Library, log 
 		log.Info("no DJ: no persona configured", "fix", "start with -persona personas/ to pick a jock by genre")
 		return nil, nil, nil, nil
 	}
+	// THE ROTATION READS THE DATABASE ON EVERY PICK, so an advert added,
+	// edited or deleted in the console is heard on the next slot without
+	// restarting the station. The pack's own adverts are imported once, as
+	// ordinary rows, so they are editable like everything else.
+	rotation := liveAdRotation(ctx, cfg.PersonaPath, lib, log)
+
 	persona, err := choosePersona(ctx, cfg.PersonaPath, lib, log)
 	if err != nil {
 		log.Error("no DJ: the persona could not be loaded", "path", cfg.PersonaPath, "err", err)
@@ -124,8 +130,12 @@ func buildBreaks(ctx context.Context, cfg *config.Config, lib *app.Library, log 
 	// index is keyed by JOCK -- a listener moving between two stations with the
 	// same jock should not hear the same opening twice, which is the whole
 	// reason that index exists.
+	// The ROTATION is shared too, and deliberately: adverts are global now, so
+	// two stations must share the cooldown or a listener flipping between them
+	// hears the same advert twice. It holds no per-station state -- the pool
+	// and the cooldown both live in the database.
 	newBreaks := func(stationID int64) (*station.Pipeline, *station.BreakWriter) {
-		return buildStationBreaks(cfg, lib, log, llm, sidecar, persona, stationID)
+		return buildStationBreaks(cfg, lib, log, llm, sidecar, persona, rotation, stationID)
 	}
 	pipeline, writer := newBreaks(0)
 	log.Info("DJ ready", "persona", persona.Name(), "voice", persona.VoiceID(),
@@ -136,7 +146,7 @@ func buildBreaks(ctx context.Context, cfg *config.Config, lib *app.Library, log 
 // buildStationBreaks makes one station's pipeline and writer.
 func buildStationBreaks(cfg *config.Config, lib *app.Library, log *slog.Logger,
 	llm enrich.Completer, sidecar *tts.Sidecar, persona *dj.Persona,
-	stationID int64) (*station.Pipeline, *station.BreakWriter) {
+	rotation *dj.AdRotation, stationID int64) (*station.Pipeline, *station.BreakWriter) {
 
 	writer := &station.BreakWriter{
 		// The station's own jock replaces this the moment it goes on air; the
@@ -163,7 +173,11 @@ func buildStationBreaks(cfg *config.Config, lib *app.Library, log *slog.Logger,
 			// the pack carries a pool. An advert then travels the SAME ladder a
 			// break does -- render, length check, relocate, enqueue -- so
 			// nothing proven about airing breaks has to be proven again.
-			Writer: station.NewAdWriter(writer, adRotation(cfg.PersonaPath, log), clock.Real{}),
+			// BUILT ONCE, HERE, beside the writer, exactly where the old
+			// pool-loading rotation was: the rotation OBJECT never changes,
+			// only what it reads, so the race the comment above describes
+			// cannot come back. Jockora-iyw.3.
+			Writer: station.NewAdWriter(writer, rotation, clock.Real{}),
 			Renderer: station.RendererFunc(func(ctx context.Context, text, voice, outPath string) (float64, error) {
 				return tts.Render(ctx, sidecar, text, voice, outPath)
 			}),
@@ -382,16 +396,43 @@ func librarySource(cfg *config.Config) library.Source {
 	return library.Folder{Root: cfg.LibraryPath}
 }
 
-// adRotation builds the advert pool from the jock's pack.
+// liveAdRotation is the rotation the station airs from.
 //
-// Adverts live in the JockPack rather than in the database because they are
-// part of the CHARACTER: a pack that travels without its adverts arrives as a
-// jock who has nothing to sell, and the pool is the most quotable thing the
-// product makes.
+// It reads the ads table on every pick rather than loading a pool at start,
+// because a station runs while it has a listener -- a busy one for days -- and
+// an operator who deletes an advert and keeps hearing it all afternoon reports
+// it as broken. One small SELECT roughly every fourth break is nothing.
 //
-// Returns nil when there are none, and NewAdWriter then leaves the writer
-// exactly as it was.
-func adRotation(personaPath string, log *slog.Logger) *dj.AdRotation {
+// A JockPack's own adverts are IMPORTED as rows the first time the pack is
+// seen, which keeps the decision that a pack travels with its adverts while
+// making them editable and deletable like everything the operator wrote.
+func liveAdRotation(ctx context.Context, personaPath string, lib *app.Library, log *slog.Logger) *dj.AdRotation {
+	if lib == nil || lib.Store == nil {
+		return nil
+	}
+	if ads := packAds(personaPath); len(ads) > 0 {
+		n, err := app.ImportPackAds(ctx, lib.Store, ads)
+		if err != nil {
+			// Not fatal: the rotation still reads whatever the table holds,
+			// and an advert that failed to import is one advert.
+			log.Warn("importing pack adverts", "err", err)
+		} else if n > 0 {
+			// ONCE, AT IMPORT, and it says the consequence rather than the
+			// count alone: they are in the shared pool now, every jock reads
+			// them, and the operator can edit or delete any of them.
+			log.Info("pack adverts imported into the shared pool -- every jock reads them, "+
+				"and you can edit or delete them in Ads",
+				"adverts", n, "from", personaPath)
+		}
+	}
+	r := dj.NewAdRotation(nil)
+	r.Source = app.AdSource(lib.Store)
+	r.Aired = app.AdAired(lib.Store)
+	return r
+}
+
+// packAds reads every advert a persona directory's packs carry.
+func packAds(personaPath string) []dj.Ad {
 	if personaPath == "" {
 		return nil
 	}
@@ -399,7 +440,6 @@ func adRotation(personaPath string, log *slog.Logger) *dj.AdRotation {
 	if err != nil {
 		return nil
 	}
-
 	paths := []string{personaPath}
 	if info.IsDir() {
 		found, err := filepath.Glob(filepath.Join(personaPath, "*.toml"))
@@ -419,11 +459,7 @@ func adRotation(personaPath string, log *slog.Logger) *dj.AdRotation {
 		}
 		ads = append(ads, pack.Ads()...)
 	}
-	if len(ads) == 0 {
-		return nil
-	}
-	log.Info("advert pool loaded", "adverts", len(ads), "from", personaPath)
-	return dj.NewAdRotation(ads)
+	return ads
 }
 
 // buildAnalyser measures loudness and tempo in the background.

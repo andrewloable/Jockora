@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -35,9 +36,19 @@ func runFakeSidecar(addr string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {})
 	mux.HandleFunc("/die", func(w http.ResponseWriter, r *http.Request) { os.Exit(1) })
+	// WHAT IT WAS ASKED TO SAY. The fake is a separate operating-system
+	// process, so a test cannot read a variable out of it -- and the one thing
+	// Jockora-hm2 has to prove is that the text reaching the sidecar has been
+	// normalised. It reports the last line back over the same HTTP it speaks.
+	var lastText atomic.Value
+	mux.HandleFunc("/last", func(w http.ResponseWriter, r *http.Request) {
+		text, _ := lastText.Load().(string)
+		_, _ = io.WriteString(w, text)
+	})
 	mux.HandleFunc("/synth", func(w http.ResponseWriter, r *http.Request) {
 		var req struct{ Text, Voice string }
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		lastText.Store(req.Text)
 		switch req.Text {
 		case "DIE":
 			os.Exit(1) // die mid-request, before writing a response

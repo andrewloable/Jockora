@@ -51,6 +51,7 @@ var matrix = []expectation{
 	{method: http.MethodPost, path: "/feedback", role: auth.RoleListener, body: `{"verdict":"down"}`},
 
 	{path: "/admin/overview.json", role: auth.RoleAdmin},
+	{path: "/admin/logs", role: auth.RoleAdmin, sample: "/admin/logs"},
 	{path: "/admin/vocab", role: auth.RoleAdmin},
 	{method: http.MethodPost, path: "/admin/voices/preview", role: auth.RoleAdmin,
 		body: `{"voice":"am_fenrir"}`},
@@ -62,6 +63,8 @@ var matrix = []expectation{
 	{path: "/admin/sources", sample: "/admin/sources", role: auth.RoleAdmin},
 	{path: "/admin/stations", sample: "/admin/stations", role: auth.RoleAdmin},
 	{path: "/admin/jocks", sample: "/admin/jocks", role: auth.RoleAdmin},
+	// What the operator sells. Admin only: it is airtime and it is their money.
+	{path: "/admin/ads", sample: "/admin/ads", role: auth.RoleAdmin},
 	// Re-filing a track is an admin act: it changes what every station
 	// containing it plays, not only the playlist it was edited from.
 	{path: "/admin/tracks", sample: "/admin/tracks/1/tags", role: auth.RoleAdmin},

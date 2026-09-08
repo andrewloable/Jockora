@@ -6,11 +6,16 @@ package dj
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/andrewloable/jockora/internal/enrich"
+	"github.com/andrewloable/jockora/internal/say"
 )
+
+// fourDigitYearRE is 1900-2099, the range a record could plausibly carry.
+var fourDigitYearRE = regexp.MustCompile(`\b(19|20)[0-9]{2}\b`)
 
 func testPersona(t *testing.T) *Persona {
 	t.Helper()
@@ -376,5 +381,123 @@ func TestPromptNamesARecordItKnowsNothingElseAbout(t *testing.T) {
 	}
 	if !strings.Contains(got, "nothing else is known") {
 		t.Error("the prompt does not say that the name is ALL that is known")
+	}
+}
+
+// Jockora-3dp. THE MODEL COPIES THE FORM IT IS SHOWN. A year in digits comes
+// back either as digits for the TTS to mangle or as the model's own bad
+// expansion -- "two thousand and seven" is already on record in llmwriter.go.
+//
+// This is the "asks" half of the house rule at validate.go: Jockora-hm2
+// normalises at render time and is the floor, catching whatever arrives
+// including years out of dossiers written long ago. This one reduces how often
+// anything needs catching. It also fixes the break TEXT, which is what lands in
+// said_lines and in /now.json -- where no TTS normaliser can reach.
+
+// yearPrompt builds a sleeve-only prompt for a track from the given year.
+//
+// NO DOSSIER, because the sleeve line is the only place a year is formatted
+// into a break prompt, and it renders only where there is nothing better.
+func yearPrompt(t *testing.T, year int) string {
+	t.Helper()
+	got, err := BuildBreakPrompt(PromptInput{
+		Persona:       testPersona(t),
+		CurrentArtist: "The Midnight Signal",
+		CurrentTitle:  "Long Way Out",
+		CurrentAlbum:  "Long Way Out",
+		CurrentYear:   year,
+		Placement:     "ramp",
+		WindowSeconds: 9,
+	})
+	if err != nil {
+		t.Fatalf("BuildBreakPrompt: %v", err)
+	}
+	return got
+}
+
+func TestPromptYearWords(t *testing.T) {
+	got := yearPrompt(t, 1993)
+	if !strings.Contains(got, "nineteen ninety three") {
+		t.Errorf("the prompt does not say the year the way a person does:\n%s", got)
+	}
+	if strings.Contains(got, "1993") {
+		t.Errorf("the prompt still shows the digits, which is the form we do not want:\n%s", got)
+	}
+}
+
+// TestPromptYearNoDigitExamples is the test that keeps this from being undone
+// by a helpful example six months from now. THE EXAMPLES IN A PROMPT ARE
+// FOLLOWED FAR MORE RELIABLY THAN THE INSTRUCTIONS, so one carrying "1993"
+// would quietly teach the model the digits again.
+//
+// The fixture carries no year in any DATA field, so anything this finds came
+// from the prompt's own scaffolding. Dossier text is deliberately left out of
+// that guarantee: enrichment stores "released in 1993" forever and by decision
+// is not being changed, which is exactly why the render-time normaliser stays.
+func TestPromptYearNoDigitExamples(t *testing.T) {
+	for _, year := range []int{0, 1993, 2007, 2026} {
+		got := yearPrompt(t, year)
+		for _, m := range fourDigitYearRE.FindAllString(got, -1) {
+			t.Errorf("a four-digit year %q survives in a prompt built for %d; "+
+				"an example in digits undoes the whole change:\n%s", m, year, got)
+		}
+	}
+
+	// AND THE FULLY-BUILT PROMPT, not only the sleeve path: persona,
+	// both dossiers, the prohibition lists, the placement guidance and the
+	// schema. An example in digits could be anywhere in that scaffolding, and
+	// the sleeve-only fixture would never see it. Every field the fixture
+	// supplies is year-free, so anything found here is the prompt's own.
+	full, err := BuildBreakPrompt(PromptInput{
+		Persona:       testPersona(t),
+		Previous:      testDossier(2),
+		Current:       testDossier(3),
+		Next:          testDossier(3),
+		CurrentArtist: "The Midnight Signal",
+		CurrentTitle:  "Long Way Out",
+		CurrentAlbum:  "Long Way Out",
+		CurrentYear:   1993,
+		NextArtist:    "Corvi",
+		NextTitle:     "Second Signal",
+		NextAlbum:     "Second Signal",
+		NextYear:      2007,
+		Prohibitions:  prohibitions(20, 100),
+		Placement:     "ramp",
+		WindowSeconds: 9,
+		Schema:        map[string]any{"type": "object"},
+		IsColdOpen:    true,
+	})
+	if err != nil {
+		t.Fatalf("BuildBreakPrompt: %v", err)
+	}
+	for _, m := range fourDigitYearRE.FindAllString(full, -1) {
+		t.Errorf("a four-digit year %q survives in a fully-built prompt:\n%s", m, full)
+	}
+}
+
+func TestPromptYearZero(t *testing.T) {
+	got := yearPrompt(t, 0)
+	// The guard at the sleeve line is year > 0 and must stay: a track with no
+	// year has no year clause, and certainly not "(zero)".
+	for _, bad := range []string{"(zero)", "(0)", "( )", "()"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("a track with no year produced %q:\n%s", bad, got)
+		}
+	}
+	if !strings.Contains(got, "Long Way Out") {
+		t.Errorf("the album line is gone entirely:\n%s", got)
+	}
+}
+
+// TestPromptYearUsesSay asserts against the FUNCTION, never a hardcoded string.
+// Two spellings of the same year is how the said-lines index starts treating
+// one break as two, so the prompt and the normaliser must not be able to drift.
+func TestPromptYearUsesSay(t *testing.T) {
+	for _, year := range []int{1993, 2007, 2000, 1900, 2026} {
+		want := say.YearWords(year)
+		if got := yearPrompt(t, year); !strings.Contains(got, want) {
+			t.Errorf("year %d: the prompt does not contain say.YearWords(%d) = %q:\n%s",
+				year, year, want, got)
+		}
 	}
 }

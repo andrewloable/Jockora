@@ -22,7 +22,10 @@ type Admin interface {
 	// SetCadence changes how many tracks pass between breaks.
 	SetCadence(n int) error
 	// SetEnriching pauses or resumes the background enrichment worker.
-	SetEnriching(on bool) error
+	// SetEnriching pauses or resumes, and SAYS WHICH THING IT DID: resuming a
+	// worker that gave up restarts it, resuming a paused one only unpauses it,
+	// and an operator pressing one button deserves to know which they got.
+	SetEnriching(on bool) (string, error)
 }
 
 // SetAdmin wires the operator surface. Without one every /admin route reports
@@ -78,10 +81,17 @@ func (s *Server) serveAdminWrite(w http.ResponseWriter, r *http.Request, path st
 			http.Error(w, `expected {"enriching": true|false}`, http.StatusBadRequest)
 			return
 		}
-		if err := s.admin.SetEnriching(*body.Enriching); err != nil {
+		said, err := s.admin.SetEnriching(*body.Enriching)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		// The one admin write that answers with a body. A restart that finds
+		// nothing to do and one that brings a dead worker back look identical
+		// from here, and the console has to be able to tell the operator which
+		// it was rather than reporting a bare success.
+		s.writeJSON(w, http.StatusOK, map[string]any{"said": said})
+		return
 	default:
 		http.NotFound(w, r)
 		return

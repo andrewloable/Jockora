@@ -22,7 +22,6 @@ export interface NowPlaying {
   /** "ready", "writing" or "none": what the DJ is about to do. */
   next_break?: string;
   last_break?: { text: string; aired_at: number; placement: string } | null;
-  enrichment?: { done: number; total: number; pct: number } | null;
 }
 
 export interface Source {
@@ -45,6 +44,10 @@ export interface Station {
   enabled: boolean;
   tracks: number;
   warning?: string;
+  /** What the operator asked for, and the bounds it became. */
+  brief?: string;
+  year_min?: number;
+  year_max?: number;
 }
 
 export interface Jock {
@@ -87,6 +90,74 @@ export interface LLMCurrent {
   account?: string;
   model?: string;
   has_key: boolean;
+}
+
+/**
+ * What a station is saved as.
+ *
+ * brief is the record of what the operator ASKED FOR; the rest is what they
+ * APPROVED. An unbounded year is simply absent rather than zero, so the server
+ * never has to guess whether 0 means "the year 0" or "no bound".
+ */
+export interface StationBody {
+  name: string;
+  genres: string[];
+  moods: string[];
+  brief?: string;
+  year_min?: number;
+  year_max?: number;
+}
+
+/** What the model made of a description, plus how much music it selects. */
+export interface Derived {
+  name: string;
+  genres: string[];
+  moods: string[];
+  year_min: number;
+  year_max: number;
+  tracks: number;
+  /**
+   * The verdict on that count, in the same words a saved station gets. Empty
+   * when the count is comfortable. Advice, never a refusal.
+   */
+  warning?: string;
+}
+
+/** One log line as the console renders it. */
+/** An advert the operator sells, as the console edits it. */
+export interface Ad {
+  id: number;
+  brand: string;
+  /** What the operator typed about the product; the model writes from it. */
+  brief: string;
+  /** How they asked for it to be read. */
+  delivery: string;
+  script: string;
+  /** RFC3339, or absent when it has never aired. Never the epoch. */
+  last_aired_at?: string;
+}
+
+/** What POST /admin/ads/write answers. It saves nothing. */
+export interface WrittenAd {
+  brand: string;
+  script: string;
+  /** Set when the blurb names a brand somebody else owns. ADVISORY. */
+  warning?: string;
+  matched?: string;
+}
+
+export interface LogRecord {
+  time: string;
+  level: string;
+  message: string;
+  attrs?: Record<string, string>;
+}
+
+/** The recent past, plus what was lost and what is being recorded. */
+export interface LogsAnswer {
+  records: LogRecord[];
+  dropped: number;
+  level: string;
 }
 
 /** What the console sends. An empty key means "keep the one you have". */
@@ -206,8 +277,8 @@ export class AdminApi {
     return this.http.post<void>('/admin/cadence', { cadence: n });
   }
 
-  setEnriching(on: boolean): Observable<void> {
-    return this.http.post<void>('/admin/enriching', { enriching: on });
+  setEnriching(on: boolean): Observable<{ said: string }> {
+    return this.http.post<{ said: string }>('/admin/enriching', { enriching: on });
   }
 
   vocab(): Observable<{ genres: string[]; moods: string[] }> {
@@ -254,6 +325,25 @@ export class AdminApi {
     return this.http.post<ImportReport>('/admin/enrichment/import', file);
   }
 
+  /** What the server has been doing, newest first. */
+  logs(limit: number, level = 'DEBUG'): Observable<LogsAnswer> {
+    // params rather than an interpolated query: it encodes, and it keeps the
+    // request's url the path alone, which is what every other call here does.
+    return this.http.get<LogsAnswer>('/admin/logs', {
+      params: { limit: String(limit), level },
+    });
+  }
+
+  /** Change what the server WRITES DOWN, which is not the display filter. */
+  setLogLevel(level: string): Observable<{ level: string }> {
+    return this.http.post<{ level: string }>('/admin/logs/level', { level });
+  }
+
+  /** Empty the live ring and the stored warnings. */
+  clearLogs(): Observable<{ cleared: boolean }> {
+    return this.http.delete<{ cleared: boolean }>('/admin/logs');
+  }
+
   /** Every way to reach a model, what each needs, and what is chosen now. */
   llm(): Observable<{ providers: LLMProvider[]; current: LLMCurrent; health: string }> {
     return this.http.get<{ providers: LLMProvider[]; current: LLMCurrent; health: string }>(
@@ -284,7 +374,7 @@ export class AdminApi {
     return this.http.get<Station[]>('/admin/stations');
   }
 
-  addStation(body: { name: string; genres: string[]; moods: string[] }): Observable<{
+  addStation(body: StationBody): Observable<{
     id: number;
     tracks: number;
   }> {
@@ -299,10 +389,40 @@ export class AdminApi {
    * either restates the whole playlist and the operator has to be told by how
    * much.
    */
-  updateStation(
-    id: number,
-    body: { name: string; genres: string[]; moods: string[] },
-  ): Observable<Diff> {
+  /** What a description would become, and how much music it selects. Saves nothing. */
+  deriveStation(brief: string): Observable<Derived> {
+    return this.http.post<Derived>('/admin/stations/derive', { brief });
+  }
+
+  /** The adverts, newest first. */
+  ads(): Observable<Ad[]> {
+    return this.http.get<Ad[]>('/admin/ads');
+  }
+
+  /**
+   * Draft a blurb from a brief. SAVES NOTHING.
+   *
+   * Writing and saving are separate calls on purpose: the operator reads the
+   * blurb, edits it if they like, and saves what is on screen. Re-writing on
+   * save would air words they never saw.
+   */
+  writeAd(brand: string, about: string, delivery: string): Observable<WrittenAd> {
+    return this.http.post<WrittenAd>('/admin/ads/write', { brand, about, delivery });
+  }
+
+  addAd(body: Omit<Ad, 'id'>): Observable<{ id: number }> {
+    return this.http.post<{ id: number }>('/admin/ads', body);
+  }
+
+  updateAd(id: number, body: Omit<Ad, 'id'>): Observable<void> {
+    return this.http.put<void>(`/admin/ads/${id}`, body);
+  }
+
+  removeAd(id: number): Observable<void> {
+    return this.http.delete<void>(`/admin/ads/${id}`);
+  }
+
+  updateStation(id: number, body: StationBody): Observable<Diff> {
     return this.http.put<Diff>(`/admin/stations/${id}`, body);
   }
 

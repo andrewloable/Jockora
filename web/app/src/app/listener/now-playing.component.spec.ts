@@ -39,7 +39,30 @@ describe('NowPlayingView', () => {
     );
   });
 
-  it('renders the track, the transcript and the enrichment', () => {
+  // ------------------------------------------------------- listener page --
+  //
+  // Jockora-e9a.47. This page showed the operator's own dossier progress to
+  // LISTENERS -- "Enriched 3649 of 7595 (48%)", in monospace, under the DJ
+  // transcript. A listener cannot act on it, it was the only debug-looking text
+  // on the page, and the same figure already has a home on the admin Overview.
+
+  it('listener page does not show enrichment progress to a listener', () => {
+    const fixture = TestBed.createComponent(Host);
+    fixture.detectChanges();
+    fixture.componentInstance.station.set(3);
+    fixture.detectChanges();
+    // The server still sends it -- /now.json is shared with the console -- so
+    // this is about what the LISTENER'S page chooses to render.
+    ctrl.expectOne('/now.json?station=3').flush({
+      now: { artist: 'New Order', title: 'Blue Monday' },
+      enrichment: { done: 3649, total: 7595, pct: 48 },
+    });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-enrichment]')).toBeNull();
+    expect(fixture.nativeElement.textContent).not.toContain('7595');
+  });
+
+  it('renders the track and the transcript', () => {
     const fixture = TestBed.createComponent(Host);
     fixture.detectChanges();
     fixture.componentInstance.station.set(3);
@@ -55,7 +78,6 @@ describe('NowPlayingView', () => {
     const el = fixture.nativeElement;
     expect(el.querySelector('[data-nowplaying]').textContent).toContain('Blue Monday');
     expect(el.querySelector('[data-transcript]').textContent).toContain('still holds up');
-    expect(el.querySelector('[data-enrichment]').textContent).toContain('412 of 4197');
   });
 
   it('polls on a timer', () => {
@@ -176,9 +198,6 @@ describe('NowPlayingView', () => {
     const el = fixture.nativeElement;
     expect(el.querySelector('[data-transcript]')).toBeNull();
     expect(el.querySelector('[data-nowplaying]').textContent).not.toContain('B');
-    // The enrichment figure is LIBRARY-WIDE and identical on every station, so
-    // blanking it would flicker a true number off the screen for a whole poll.
-    expect(el.querySelector('[data-enrichment]').textContent).toContain('412 of 4197');
     ctrl.expectOne('/now.json?station=1').flush({});
   });
 });

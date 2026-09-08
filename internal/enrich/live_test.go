@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -170,5 +171,83 @@ func TestLiveOnsetEndpoint(t *testing.T) {
 		if ramp.OutroS <= 0 || ramp.OutroS > MaxAnalysisRamp {
 			t.Errorf("OutroS = %v, outside (0, %v]", ramp.OutroS, MaxAnalysisRamp)
 		}
+	}
+}
+
+// TestBriefGateLive is Jockora-g1t's live check: a real model, briefs written
+// the way an operator writes them, and the vocabularies actually enforced.
+//
+// The dossier work paid for this three times -- three serious defects found
+// here and none by the unit tests -- which is why it is part of the gate and
+// not optional politeness.
+//
+//	JOCKORA_LIVE_LLM=http://127.0.0.1:8123 go test ./internal/enrich/ -run TestBriefGateLive -v
+func TestBriefGateLive(t *testing.T) {
+	base := os.Getenv("JOCKORA_LIVE_LLM")
+	if base == "" {
+		t.Skip("set JOCKORA_LIVE_LLM to run")
+	}
+
+	llm := NewLlamaCPP(base, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	if err := llm.Health(ctx); err != nil {
+		t.Fatalf("health: %v", err)
+	}
+
+	latest := time.Now().Year() + 1
+	for _, brief := range []string{
+		// A decade, stated the way people say it.
+		"Loud eighties rock for driving at night.",
+		// A FEELING WITH NO GENRE. The vocabulary has to carry this alone.
+		"Something calm and a bit sad for the end of the evening.",
+		// A GENRE THE VOCABULARY DOES NOT HAVE. "other" is the answer it
+		// already has, and inventing "chiptune" is the drift the enums exist
+		// to prevent.
+		"Chiptune and vaporwave, nothing after 2010.",
+		// TWO SENTENCES, which is how a real brief arrives.
+		"This is the late-night station. Slow, moody, mostly nineties, " +
+			"and nothing that sounds like a party.",
+		// Terse, which is the other way it arrives.
+		"angry guitars",
+	} {
+		t.Run(brief[:min(len(brief), 30)], func(t *testing.T) {
+			p, err := DeriveStationParams(ctx, llm, brief)
+			if err != nil {
+				t.Fatalf("DeriveStationParams(%q): %v", brief, err)
+			}
+			t.Logf("%q ->\n  name   %q\n  genres %v\n  moods  %v\n  years  %d..%d",
+				brief, p.Name, p.Genres, p.Moods, p.YearMin, p.YearMax)
+
+			for _, g := range p.Genres {
+				if !slices.Contains(StationTags, g) {
+					t.Errorf("genre %q is not in the vocabulary", g)
+				}
+			}
+			for _, m := range p.Moods {
+				if !slices.Contains(Moods, m) {
+					t.Errorf("mood %q is not in the vocabulary", m)
+				}
+			}
+			for _, y := range []int{p.YearMin, p.YearMax} {
+				if y != 0 && (y < 1900 || y > latest) {
+					t.Errorf("year %d is outside 1900..%d", y, latest)
+				}
+			}
+			if p.YearMin != 0 && p.YearMax != 0 && p.YearMin > p.YearMax {
+				t.Errorf("years %d..%d select nothing", p.YearMin, p.YearMax)
+			}
+			if p.Name == "" {
+				t.Error("no name, so the console pre-fills an empty box")
+			}
+			if n := len([]rune(p.Name)); n > MaxBriefName {
+				t.Errorf("name is %d runes, over the %d cap", n, MaxBriefName)
+			}
+			// NOT EMPTY: a station selecting the whole library is legal as a
+			// filter and never what a brief meant.
+			if len(p.Genres) == 0 && len(p.Moods) == 0 && p.YearMin == 0 && p.YearMax == 0 {
+				t.Error("the result selects the entire library")
+			}
+		})
 	}
 }

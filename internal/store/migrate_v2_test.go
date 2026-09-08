@@ -15,7 +15,69 @@ import (
 // v01SchemaVersion is the schema a v0.1 database is left at.
 const v01SchemaVersion = 5
 
-var v2Tables = []string{"users", "sources", "jocks", "stations", "station_tracks", "settings", "track_tags"}
+// Every table created after v0.1. A table missing from this list makes the
+// migration that creates it fail on "table already exists" when the fixture
+// rewinds -- loud, and meant to be. Add to it when you add a table.
+var v2Tables = []string{"users", "sources", "jocks", "stations", "station_tracks",
+	"settings", "track_tags", "log_records"}
+
+// WHAT EACH MIGRATION ADDED, so a fixture can undo it.
+//
+// THREE FIXTURES IN THIS PACKAGE REWIND A DATABASE and every new migration used
+// to break all of them, one at a time, each with the same "duplicate column
+// name" or "table already exists". Three separate hand-maintained lists is
+// three places to forget. This is the one place.
+//
+// The migration NUMBER is the version it brings the schema TO, matching
+// CurrentSchemaVersion. Rewinding to version v undoes everything numbered
+// above v.
+var migrationUndo = map[int][]string{
+	6: {`ALTER TABLE tracks DROP COLUMN source_id`},
+	7: {`ALTER TABLE tracks DROP COLUMN missing_at`, `ALTER TABLE tracks DROP COLUMN genre`},
+	9: {`ALTER TABLE ads DROP COLUMN station_id`, `ALTER TABLE break_feedback DROP COLUMN user_id`},
+	10: {`ALTER TABLE stations DROP COLUMN brief`,
+		`ALTER TABLE stations DROP COLUMN year_min`, `ALTER TABLE stations DROP COLUMN year_max`,
+		`ALTER TABLE stations DROP COLUMN tempo_min`, `ALTER TABLE stations DROP COLUMN tempo_max`,
+		`ALTER TABLE stations DROP COLUMN duration_min_s`,
+		`ALTER TABLE stations DROP COLUMN duration_max_s`},
+	11: {`ALTER TABLE ads DROP COLUMN brand`, `ALTER TABLE ads DROP COLUMN brief`,
+		`ALTER TABLE ads DROP COLUMN delivery`, `ALTER TABLE ads DROP COLUMN created_at`},
+	12: {`DROP TABLE log_records`},
+}
+
+// rewindTo puts a database back to an older schema version, undoing every
+// migration above it, so reopening re-runs them for real.
+//
+// It does NOT drop the v0.2 tables -- TestMigrateV2UpgradesV01Database needs
+// that and does it itself, because a fixture pretending to be v0.1 has to lose
+// the tables v0.2 created and one pretending to be v0.11 must not.
+func rewindToTolerant(t *testing.T, s *Store, version int) {
+	t.Helper()
+	for v := CurrentSchemaVersion; v > version; v-- {
+		for _, stmt := range migrationUndo[v] {
+			// Ignored: a statement naming a table the caller has already
+			// dropped has nothing to undo.
+			_, _ = s.DB().Exec(stmt)
+		}
+	}
+	if _, err := s.DB().Exec(`UPDATE schema_version SET version = ?`, version); err != nil {
+		t.Fatalf("rewinding to version %d: %v", version, err)
+	}
+}
+
+func rewindTo(t *testing.T, s *Store, version int) {
+	t.Helper()
+	for v := CurrentSchemaVersion; v > version; v-- {
+		for _, stmt := range migrationUndo[v] {
+			if _, err := s.DB().Exec(stmt); err != nil {
+				t.Fatalf("rewinding migration %d (%s): %v", v, stmt, err)
+			}
+		}
+	}
+	if _, err := s.DB().Exec(`UPDATE schema_version SET version = ?`, version); err != nil {
+		t.Fatalf("rewinding to version %d: %v", version, err)
+	}
+}
 
 func openAt(t *testing.T, path string) *Store {
 	t.Helper()
@@ -41,6 +103,10 @@ func TestMigrateV2CreatesTables(t *testing.T) {
 	for _, col := range []struct{ table, column string }{
 		{"tracks", "source_id"}, {"tracks", "missing_at"}, {"tracks", "genre"},
 		{"ads", "station_id"}, {"break_feedback", "user_id"},
+		// ads is a v0.1 table, so it SURVIVES the drop loop above and every
+		// column added to it since has to come off by hand. stations does not
+		// appear here because it is a v2 table and is dropped whole.
+		{"ads", "brand"}, {"ads", "brief"}, {"ads", "delivery"}, {"ads", "created_at"},
 	} {
 		if !hasColumn(t, s, col.table, col.column) {
 			t.Errorf("%s.%s missing", col.table, col.column)
@@ -134,22 +200,17 @@ func TestMigrateV2UpgradesV01Database(t *testing.T) {
 	if _, err := old.DB().Exec(`DROP VIEW IF EXISTS effective_tags`); err != nil {
 		t.Fatal(err)
 	}
-	// The ADD COLUMNs survive a table drop, so they have to come off too.
-	for _, c := range []struct{ table, column string }{
-		{"tracks", "source_id"}, {"tracks", "missing_at"}, {"tracks", "genre"},
-		{"ads", "station_id"}, {"break_feedback", "user_id"},
-	} {
-		if _, err := old.DB().Exec(`ALTER TABLE ` + c.table + ` DROP COLUMN ` + c.column); err != nil {
-			t.Fatalf("rewinding %s.%s: %v", c.table, c.column, err)
-		}
-	}
-	// The LAST v0.1 VERSION, written as the number it is. It used to be
-	// CurrentSchemaVersion-1, which silently stopped meaning "before v0.2" the
-	// moment a seventh migration was added: the fixture then rewound to 6, so
-	// migration 6 never re-ran and the columns it adds were simply missing.
-	if _, err := old.DB().Exec(`UPDATE schema_version SET version = ?`, v01SchemaVersion); err != nil {
-		t.Fatal(err)
-	}
+	// The ADD COLUMNs survive a table drop, so they have to come off too --
+	// and the version goes back to THE LAST v0.1 VERSION, written as the number
+	// it is. It used to be CurrentSchemaVersion-1, which silently stopped
+	// meaning "before v0.2" the moment a seventh migration was added: the
+	// fixture then rewound to 6, so migration 6 never re-ran and the columns it
+	// adds were simply missing. rewindTo does both, from the one list every
+	// fixture in this package shares.
+	//
+	// Statements naming a v0.2 table are no-ops here because the loop above
+	// already dropped it, which is why they are ignored rather than fatal.
+	rewindToTolerant(t, old, v01SchemaVersion)
 	old.Close() //nolint:errcheck // reopening to migrate
 
 	upgraded := openAt(t, path)

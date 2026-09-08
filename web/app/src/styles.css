@@ -534,7 +534,9 @@ table {
 @media (max-width: 47.99rem) {
   [data-playlist] thead,
   [data-stations] thead,
-  [data-jocks] thead {
+  [data-jocks] thead,
+  [data-ads] thead,
+  [data-logs] thead {
     display: none;
   }
 
@@ -550,6 +552,14 @@ table {
   [data-jocks] tbody,
   [data-jocks] tr,
   [data-jocks] td,
+  [data-ads],
+  [data-ads] tbody,
+  [data-ads] tr,
+  [data-ads] td,
+  [data-logs],
+  [data-logs] tbody,
+  [data-logs] tr,
+  [data-logs] td,
   [data-overview],
   [data-overview] tbody,
   [data-overview] tr,
@@ -562,6 +572,7 @@ table {
   [data-playlist] tr,
   [data-stations] tr,
   [data-jocks] tr,
+  [data-ads] tr,
   [data-overview] tr {
     margin-bottom: var(--s3);
     padding: var(--s2) var(--s3);
@@ -572,6 +583,7 @@ table {
   [data-playlist] td,
   [data-stations] td,
   [data-jocks] td,
+  [data-ads] td,
   [data-overview] td,
   [data-overview] th {
     padding: 0.15rem 0;
@@ -580,7 +592,8 @@ table {
 
   [data-playlist] td[data-label]::before,
   [data-stations] td[data-label]::before,
-  [data-jocks] td[data-label]::before {
+  [data-jocks] td[data-label]::before,
+  [data-ads] td[data-label]::before {
     content: attr(data-label) ': ';
     color: var(--ink-faint);
     font-size: var(--t-sm);
@@ -590,7 +603,8 @@ table {
    * a fact about the row. */
   [data-playlist] td:empty,
   [data-stations] td:empty,
-  [data-jocks] td:empty {
+  [data-jocks] td:empty,
+  [data-ads] td:empty {
     display: none;
   }
 
@@ -785,8 +799,10 @@ app-player {
 }
 
 /* Pushed to the far end, where a running time used to be. */
+/* LIVE BELONGS TO THE TRANSPORT. margin-left:auto pushed it to the far end of a
+   full-width bar, so it sat alone with empty space either side while Listen and
+   Volume clustered at the left. */
 [data-live] {
-  margin-left: auto;
   font-size: var(--t-sm);
   font-weight: 600;
   letter-spacing: 0.08em;
@@ -828,7 +844,12 @@ app-player {
 /* The dial. Stations as physical presets, not a list of links. */
 [data-dial] {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+  /* 17rem, not 13. At 13rem a card was 208px and its metadata -- tracks, jock,
+     moods, listeners -- wrapped to five lines in a monospace face.
+     min(100%, ...) is what keeps the 390px layout: without it a track wider
+     than the viewport pushes the whole page sideways, which is the one thing
+     that screen measured clean. */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr));
   gap: var(--s3);
   margin-top: var(--s5);
 }
@@ -1263,4 +1284,103 @@ app-admin nav button[aria-current='page']:hover:not(:disabled) {
   color: var(--ink);
   font-size: var(--t-sm);
   font-weight: 550;
+}
+
+/* ---------------------------------------------------------- listener page -- */
+
+/* A COLUMN, CHOSEN AND CENTRED, not whatever is left over.
+ *
+ * At 390px this page is the best screen in the product: zero overflowing
+ * elements, the station card full width, its metadata on two comfortable
+ * lines. At 1280px the same card was 208px wide with its metadata wrapped to
+ * five cramped monospace lines, and 610px -- 48 percent of the viewport -- was
+ * empty. The desktop layout was the mobile layout left-aligned.
+ *
+ * 46rem rather than the console's 68rem because this is a player and a dial,
+ * not a table of data. e9a.49 decided 68rem centred for the console and said
+ * this task would read it as: centre the dial too. */
+app-listener {
+  display: block;
+  max-width: 46rem;
+  margin: 0 auto;
+}
+
+/* ------------------------------------------------------------------ logs -- */
+
+/* THE LEVEL IS WHAT THE EYE SHOULD CATCH FIRST. Most records carry several
+   attributes and a wall of key-value pairs is unreadable at a glance, so the
+   level is coloured and the attributes are quiet. --ok, --warn and --bad were
+   defined for exactly this kind of thing. */
+[data-logs] {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+}
+
+[data-logs] td:nth-child(2) {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+[data-log-row][data-level='ERROR'] td:nth-child(2) {
+  color: var(--bad);
+}
+
+[data-log-row][data-level='WARN'] td:nth-child(2) {
+  color: var(--warn);
+}
+
+[data-log-row][data-level='DEBUG'] td:nth-child(2) {
+  color: var(--ink-faint);
+}
+
+/* AVAILABLE, NOT SHOUTING. On its own line so a long attribute list does not
+   push the message off the side of the row. */
+[data-log-attrs] {
+  display: block;
+  margin-top: var(--s1);
+  color: var(--ink-faint);
+  overflow-wrap: anywhere;
+}
+
+[data-log-status] {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  font-size: var(--t-sm);
+  color: var(--ink-faint);
+}
+
+/* Connected, reconnecting, or disconnected -- a quiet station and a dead
+   connection look identical without it. */
+[data-log-connection] {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: var(--t-xs);
+}
+
+/* The count IS the control: "14 new" is both the notice and the way to see
+   them, so it is a button rather than a label beside one. */
+[data-log-pending] {
+  min-height: 0;
+  padding: var(--s1) var(--s3);
+  border-color: var(--ember);
+  color: var(--ember);
+}
+
+[data-log-debug-warning] {
+  flex: 1 0 100%;
+  color: var(--warn);
+}
+
+[data-log-dropped] {
+  display: block;
+  max-width: 62ch;
+  margin: 0 0 var(--s4);
+  padding: var(--s3) var(--s4);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--r-control);
+  background: color-mix(in oklab, var(--warn) 12%, transparent);
+  color: var(--ink);
+  font-size: var(--t-sm);
 }

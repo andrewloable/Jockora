@@ -57,6 +57,17 @@ func TestSeedStationsWhenEmpty(t *testing.T) {
 	if !ok {
 		t.Fatalf("no rock station: %+v", list)
 	}
+	// A SEEDED STATION IS DESCRIBED like every other one. This runs on a fresh
+	// install, where migration 10's back-fill has nothing to back-fill -- so
+	// without it the very first dial an operator ever sees is the one dial with
+	// empty briefs, which is the two-shapes problem the back-fill removes.
+	// Jockora-g1t.1.
+	if rock.Brief != store.BriefFor("rock", "") {
+		t.Errorf("seeded station brief = %q, want %q", rock.Brief, store.BriefFor("rock", ""))
+	}
+	if rock.Brief == "" {
+		t.Error("a seeded station has no brief at all")
+	}
 	// §22A renders the dial as ROCK 412 - SYNTHWAVE 208 - OPM 173, so the name
 	// is the tag upper-cased. One rule, so the catch-all needs no special case.
 	if rock.Name != "ROCK" {

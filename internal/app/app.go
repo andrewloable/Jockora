@@ -48,6 +48,12 @@ type Options struct {
 	BreakPath  string   // a WAV to splice, optional
 	BreakAtSec int      // when the first one should be heard, seconds from start
 
+	// Level is the process's log level, live. Nil means a fixed level.
+	Level *slog.LevelVar
+	// LogSink is the ring the console reads. Nil means logs go to stderr only,
+	// which is every path that is not the server.
+	LogSink *obs.Sink
+
 	// BreakEverySec repeats the break at this interval. Zero means one only.
 	//
 	// A single short break is very hard to catch by ear: HLS runs 12-18 seconds
@@ -190,7 +196,12 @@ func applyTuning(cfg *config.Config, log *slog.Logger) {
 		}
 		station.DefaultLookahead = d
 	}
-	if cfg.AdEveryNBreaks != 0 && cfg.AdEveryNBreaks != station.AdEveryNBreaks {
+	// NO != 0 GUARD. It was here to keep a zero out of adDue's modulo, and the
+	// cost was that -ad-every-n-breaks 0 silently did nothing while the flag
+	// help promised it disabled adverts -- with no log line to say so, because
+	// the branch was never taken. NewAdWriter now refuses to wrap at zero, so
+	// the value travels here meaning exactly what the operator typed.
+	if cfg.AdEveryNBreaks != station.AdEveryNBreaks {
 		log.Info("advert frequency changed", "one_slot_in", cfg.AdEveryNBreaks)
 		station.AdEveryNBreaks = cfg.AdEveryNBreaks
 	}
@@ -256,6 +267,14 @@ type App struct {
 	now   map[int64]nowPlaying
 	// lastBreaks is the most recent break PER STATION.
 	lastBreaks map[int64]*server.LastBreak
+
+	// level is the process's log level, live.
+	//
+	// A slog.LevelVar rather than a rebuilt handler: swapping a handler under
+	// the goroutines that are already logging through it is a race, and this is
+	// exactly what LevelVar exists for. Nil on the spike path, which logs at
+	// whatever it was built with.
+	level *slog.LevelVar
 
 	// enrichWake restarts an enrichment worker that gave up.
 	//
@@ -367,7 +386,21 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 	a := &App{cfg: cfg, opts: opts, log: log, now: map[int64]nowPlaying{},
 		lastBreaks: map[int64]*server.LastBreak{},
 		breaks:     map[int64]*stationBreaks{},
-		cadence:    cfg.BreakEveryNTracks}
+		cadence:    cfg.BreakEveryNTracks,
+		level:      opts.Level,
+		// HERE, NOT IN Run, and the reason is a race the detector never saw.
+		// Run starts the HTTP server and only forty lines later reached the
+		// enricher branch that used to create this -- so for the whole of that
+		// window a POST to /admin/enriching or /admin/llm read this field on a
+		// handler goroutine while Run wrote it. That is a data race outright,
+		// and it also silently LOST the wake: the read saw nil, returned, and
+		// the operator's restart did nothing on the one box that gets a request
+		// the moment it comes up.
+		//
+		// Written once, before any goroutine exists, so there is nothing to
+		// synchronise. Buffered and never read when there is no worker, which
+		// costs one slot and no behaviour.
+		enrichWake: make(chan struct{}, 1)}
 
 	// THE SPIKE PATH keeps one runtime, started directly: no database means no
 	// stations, no listeners to count and nothing to reconcile. With a library
@@ -450,6 +483,15 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 	srv.SetStatusSource(a)
 	srv.SetTuner(a)
 	srv.SetAdmin(a)
+	// The Logs section. Wired unconditionally: an App with no ring answers
+	// honestly rather than the route reporting 503 as though the feature were
+	// missing, which is a different problem for an operator to chase.
+	srv.SetLogs(a)
+	// Turning a description into a station. Wired unconditionally: an App with
+	// no model answers ErrNoModel, which the console renders as a sentence
+	// naming both ways out -- more use than the route reporting 503 as though
+	// the capability were missing.
+	srv.SetStationBriefs(a)
 
 	// The dial is cached and REFRESHED PERIODICALLY, never computed per
 	// request: it reads every dossier in the library, which is fine every few
@@ -499,6 +541,11 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 
 		a.rescan = library.NewRescan(opts.Library.Store, clock.Real{})
 		srv.SetSources(opts.Library.Store, a.rescan)
+		// Adverts: the rows are the store's, the drafting is the App's. Inside
+		// the store block, unlike Logs and station briefs, because with no
+		// library there is nothing to manage and 503 is the honest answer
+		// rather than a list that is empty for the wrong reason.
+		srv.SetAds(consoleAds{Store: opts.Library.Store, app: a})
 		srv.SetStations(opts.Library.Store, func(ctx context.Context, id int64) (station.Diff, error) {
 			return station.Regenerate(ctx, opts.Library.Store, id)
 		}, a.mgr)
@@ -967,9 +1014,14 @@ func (a *App) enrichmentTrouble() string {
 	if !a.enriching.Load() || a.enrichAlive.Load() {
 		return ""
 	}
+	// A REASON, not merely a dead flag. Not-alive covers three things and only
+	// one of them is trouble: the worker has not started yet, the operator has
+	// just asked for a restart and it is on its way, or it gave up. Only the
+	// last one stores a reason, so the reason IS the state -- without this the
+	// console went on reporting the failure an operator had just acted on.
 	why, _ := a.enrichGaveUp.Load().(string)
 	if why == "" {
-		return "enrichment gave up"
+		return ""
 	}
 	return "enrichment gave up: " + why
 }
@@ -1332,10 +1384,13 @@ func (a *App) Run(ctx context.Context) error {
 		}()
 	}
 
+	// The durable half of the log, started here because it needs both the
+	// store and a live context. Jockora-69n.2.
+	a.persistLogs(ctx)
+
 	if a.opts.Enricher != nil {
 		a.enriching.Store(true)
 		a.opts.Enricher.Paused = a.enriching.Load
-		a.enrichWake = make(chan struct{}, 1)
 		go func() {
 			for {
 				a.enrichAlive.Store(true)
@@ -2324,8 +2379,43 @@ func (a *App) SetCadence(n int) error {
 // Pausing is a real need rather than a toggle for its own sake: enrichment is
 // the heaviest thing this process does, and an operator who wants the machine
 // back for an evening currently has to stop the station to get it.
-func (a *App) SetEnriching(on bool) error {
+// EnrichmentStopped is whether the worker GAVE UP, as opposed to being paused.
+//
+// The console needs this to say which of two different promises its Resume
+// button is about to keep: restarting a dead worker and unpausing a live one
+// are not the same action and should not wear the same word.
+func (a *App) EnrichmentStopped() bool {
+	return a.enriching.Load() && !a.enrichAlive.Load()
+}
+
+// SetEnrichingSaying pauses or resumes, and says which thing it actually did.
+//
+// THE BUTTON USED TO LIE. Resume set a boolean, and once Queue.Run had returned
+// -- after ten refusals in a row, which is a deliberate stop -- nothing was
+// reading that boolean any more. During the outage of 2026-09-08 the operator
+// had a Resume button on the page that looked like the fix, did nothing, and
+// reported success. That is worse than not having one.
+//
+// Resuming a worker that gave up now restarts it, through the SAME channel
+// Jockora-e9a.51 added rather than a second mechanism: two ways to start one
+// worker is how one of them rots. Resuming a live one only flips the flag,
+// because waking it would be a second Run against a worker already holding the
+// enrichment lock.
+func (a *App) SetEnriching(on bool) (string, error) {
+	restart := on && !a.enrichAlive.Load()
 	a.enriching.Store(on)
-	a.log.Info("enrichment", "running", on)
-	return nil
+	if !on {
+		a.log.Info("enrichment", "running", false)
+		return "Enrichment paused. The stream is unaffected.", nil
+	}
+	if !restart {
+		a.log.Info("enrichment", "running", true)
+		return "Enrichment running.", nil
+	}
+	// Cleared BEFORE the wake, so the console stops showing the failure the
+	// operator has just acted on rather than after the worker gets round to it.
+	a.enrichGaveUp.Store("")
+	a.wakeEnrichment()
+	a.log.Info("enrichment restarting after it gave up")
+	return "Enrichment restarted. It had stopped; watch the dossier count.", nil
 }

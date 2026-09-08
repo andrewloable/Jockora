@@ -26,6 +26,7 @@ import (
 	"github.com/andrewloable/jockora/internal/doctor"
 	"github.com/andrewloable/jockora/internal/errs"
 	"github.com/andrewloable/jockora/internal/library"
+	"github.com/andrewloable/jockora/internal/obs"
 	"golang.org/x/term"
 )
 
@@ -156,8 +157,13 @@ Run `+"`jockora <command> -h`"+` for a command's flags.
 // on the way in. A human at a terminal wants the readable form. Neither should
 // have to remember a flag, so the default is inferred and the flag exists to
 // override it.
-func newHandler(w *os.File, format string) slog.Handler {
-	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
+// The LEVEL IS A LevelVar, not a constant. It was fixed at build time, so an
+// operator wanting more detail had to change a flag and redeploy -- restarting
+// the station, cutting off whoever was listening, and quite possibly destroying
+// the state being investigated. Jockora-69n.3 makes it live; the console turns
+// it on and off.
+func newHandler(w *os.File, format string, level *slog.LevelVar) slog.Handler {
+	opts := &slog.HandlerOptions{Level: level}
 	switch format {
 	case "json":
 		return slog.NewJSONHandler(w, opts)
@@ -223,7 +229,12 @@ func runSubcommand(ctx context.Context, name string, args []string, out io.Write
 		return err
 	}
 
-	log := slog.New(newHandler(os.Stderr, cfg.LogFormat))
+	// ONE LevelVar FOR THE PROCESS, and the ring the console reads wrapped
+	// around the real handler rather than replacing it: stderr and Seq keep
+	// receiving every record exactly as they did.
+	level := new(slog.LevelVar)
+	sink := obs.NewSink(newHandler(os.Stderr, cfg.LogFormat, level), obs.RingCapacity)
+	log := slog.New(sink)
 
 	doctorCfg := doctor.Config{
 		LibraryPath: cfg.LibraryPath,
@@ -321,6 +332,9 @@ func runSubcommand(ctx context.Context, name string, args []string, out io.Write
 		BreakAtSec:    breakAt,
 		BreakEverySec: breakEvery,
 		Log:           log,
+		// The console turns the level up and down and reads the ring.
+		Level:   level,
+		LogSink: sink,
 	}
 
 	// EITHER source puts the station in library mode. Gating on LibraryPath
@@ -382,6 +396,13 @@ func runSubcommand(ctx context.Context, name string, args []string, out io.Write
 	if err != nil {
 		return err
 	}
+
+	// AFTER THE STORE IS OPEN, and this is the ordering trap: the logger above
+	// is built long before there is a database to read, so the operator's saved
+	// level cannot be applied when the LevelVar is created. Moving the read
+	// earlier finds a nil store. The restore logs what it applied, so the level
+	// actually in force is always visible in the log itself.
+	a.RestoreLogLevel(ctx)
 
 	// SIGINT must reach the encoder so ffmpeg flushes its final segment. An
 	// orphaned ffmpeg keeps the segment directory and the next start fails.

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/andrewloable/jockora/internal/enrich"
+	"github.com/andrewloable/jockora/internal/say"
 )
 
 // TokenBudget caps the assembled prompt AND the schema sent with it.
@@ -422,7 +423,18 @@ func writeDossier(b *strings.Builder, heading, prefix string, d *enrich.Dossier,
 		}
 		b.WriteString("  album: " + album)
 		if year > 0 {
-			fmt.Fprintf(b, " (%d)", year)
+			// WORDS, NOT DIGITS. The model copies the form it is shown, and a
+			// year in digits comes back either as digits for the sidecar's G2P
+			// to mangle -- it does no number normalisation at all -- or as the
+			// model's own bad expansion, "two thousand and seven", which is
+			// already on record in llmwriter.go.
+			//
+			// This is the "asks" half of the rule at validate.go: internal/say
+			// still normalises at render time and is the floor, because
+			// dossiers written before this carry digits forever. What this adds
+			// is the break TEXT, which lands in said_lines and in /now.json --
+			// where no render-time normaliser can reach.
+			fmt.Fprintf(b, " (%s)", say.YearWords(year))
 		}
 		b.WriteString("\n")
 		// ONE LINE, NO CAVEAT UNDER IT. A second line saying the sleeve is not

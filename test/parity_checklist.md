@@ -27,9 +27,16 @@ reach.
 | index.html | 55 | `#status` — what the page says before anybody has tuned | listener/listener.spec.ts | shows the player, the dial and what is on air |
 | index.html | 61 | `#dial` — the station list a person picks from | listener/dial.component.spec.ts | renders what a person picks a station by |
 | index.html | 65 | `#jocks` — a jock picker | DROPPED | Listeners pick stations, never jocks. A station IS a genre plus one jock, chosen by the admin; the dial is the listener's whole UI. The API behind this control (Jocks, SetJock) was removed in row 13, so the control had nothing left to call. |
-| index.html | 70 | `#nowplaying` — the track on air | listener/now-playing.component.spec.ts | renders the track, the transcript and the enrichment |
-| index.html | 71 | `#transcript` — what the DJ just said | listener/now-playing.component.spec.ts | renders the track, the transcript and the enrichment |
-| index.html | 76 | `#enrichment` — dossier progress, hidden when there is none | listener/now-playing.component.spec.ts | renders the track, the transcript and the enrichment |
+| index.html | 70 | `#nowplaying` — the track on air | listener/now-playing.component.spec.ts | renders the track and the transcript |
+| index.html | 71 | `#transcript` — what the DJ just said | listener/now-playing.component.spec.ts | renders the track and the transcript |
+<!-- Row 76 MOVED PAGE rather than being dropped, Jockora-e9a.47. The dossier
+     count was operator telemetry rendered to LISTENERS: "Enriched 3649 of 7595
+     (48%)" in monospace under the DJ transcript, a library-wide figure nobody
+     listening can act on and the only debug-looking text on the screen. The
+     behaviour is intact and better -- the admin Overview has it with a
+     progress bar, an ETA and a cost line, where somebody who can act on it is
+     already looking -- so this row points at the spec that covers it there. -->
+| index.html | 76 | `#enrichment` — dossier progress, hidden when there is none | admin/overview.component.spec.ts | shows how far along it is, and how long is left |
 | index.html | 82 | `#feedback` — hidden until a break has aired | listener/feedback.component.spec.ts | offers nothing until a break has aired |
 | index.html | 82 | `#thumbsdown` — the only verdict there is | listener/feedback.component.spec.ts | has no thumbs-up |
 | index.html | 83 | `#feedback-said` — what came of it | listener/feedback.component.spec.ts | says so when it could not be recorded |

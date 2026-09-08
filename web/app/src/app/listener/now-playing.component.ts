@@ -24,9 +24,6 @@ export const POLL_MS = 4000;
     @if (transcript()) {
       <p data-transcript>“{{ transcript() }}”</p>
     }
-    @if (enrichment(); as e) {
-      <p data-enrichment>Enriched {{ e.done }} of {{ e.total }} ({{ e.pct }}%)</p>
-    }
   `,
 })
 export class NowPlayingView implements OnDestroy {
@@ -50,7 +47,6 @@ export class NowPlayingView implements OnDestroy {
    * stands for minutes.
    */
   readonly spoke = output<string>();
-  readonly enrichment = signal<NowPlaying['enrichment']>(null);
   readonly nextBreak = signal('');
 
   /** What the DJ is about to do, in words rather than a state name. */
@@ -94,7 +90,6 @@ export class NowPlayingView implements OnDestroy {
           this.transcript.set(said);
           this.spoke.emit(said);
         }
-        this.enrichment.set(n.enrichment ?? null);
       },
       // A poll that fails leaves the LAST answer on screen. Blanking it would
       // make one dropped request look like the stream stopping.
@@ -105,9 +100,8 @@ export class NowPlayingView implements OnDestroy {
   /**
    * Drop everything the previous station said.
    *
-   * NOT the enrichment: that is a library-wide figure, identical on every
-   * station, and blanking it would flicker a true number off the screen for a
-   * poll interval on every change.
+   * A stale transcript is a thumbs-down button offering to rate a break from
+   * the station they just left.
    */
   private forget(): void {
     this.label.set('Nothing playing yet.');

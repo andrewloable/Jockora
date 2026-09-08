@@ -76,10 +76,18 @@ func (s *Server) Routes() []Route {
 		{Method: http.MethodPost, Path: "/admin/cadence", Role: auth.RoleAdmin, H: adminWrite},
 		{Method: http.MethodPost, Path: "/admin/enriching", Role: auth.RoleAdmin, H: adminWrite},
 		{Method: http.MethodPost, Path: "/admin/rescan", Role: auth.RoleAdmin, H: s.serveRescan},
+		// THE FIRST NON-HLS STREAMING ENDPOINT. /admin/logs/stream is SSE and
+		// the server has no WriteTimeout, which is what makes a long-lived
+		// connection possible at all -- do not add one to "protect" it.
+		{Path: "/admin/logs", Prefix: true, AnyMethod: true, Role: auth.RoleAdmin, H: withPath(s.serveLogs)},
 		{Path: "/admin/users", Prefix: true, AnyMethod: true, Role: auth.RoleAdmin, H: withPath(s.serveUsers)},
 		{Path: "/admin/sources", Prefix: true, AnyMethod: true, Role: auth.RoleAdmin, H: withPath(s.serveSources)},
 		{Path: "/admin/stations", Prefix: true, AnyMethod: true, Role: auth.RoleAdmin, H: withPath(s.serveStations)},
 		{Path: "/admin/jocks", Prefix: true, AnyMethod: true, Role: auth.RoleAdmin, H: withPath(s.serveAdminJocks)},
+		// WRITING IS NOT SAVING, and both live here: POST /admin/ads/write
+		// calls the model and stores nothing, everything else stores what it
+		// is given and never calls the model.
+		{Path: "/admin/ads", Prefix: true, AnyMethod: true, Role: auth.RoleAdmin, H: withPath(s.serveAds)},
 		// TRACKS, not stations. A track's tags belong to the track, so the
 		// path says so even though the console edits them from a playlist.
 		{Path: "/admin/tracks", Prefix: true, AnyMethod: true, Role: auth.RoleAdmin, H: withPath(s.serveTrackTags)},

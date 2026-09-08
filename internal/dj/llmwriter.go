@@ -63,9 +63,13 @@ func NewWriter(c enrich.Completer, nPredict int) Writer {
 	return NewWriterAt(c, nPredict, enrich.WritingTemperature)
 }
 
-// NewWriterAt is NewWriter with an explicit sampling temperature, for callers
-// that need more variety than a break does -- adverts have to be ten different
-// things, not one thing ten times.
+// NewWriterAt is NewWriter with an explicit sampling temperature.
+//
+// It was added for the advert generator that invented ten brands, which needed
+// more variety than a break does. That generator is gone: the operator names
+// the brand now and app.WriteAd uses NewWriter, because an advert about a real
+// product must not be written by a hotter sampler than a break is. The one
+// caller left is cmd/jockora-breaks, where the temperature is a flag.
 func NewWriterAt(c enrich.Completer, nPredict int, temperature float64) Writer {
 	if nPredict <= 0 {
 		nPredict = BreakTokenBudget

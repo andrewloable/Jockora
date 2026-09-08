@@ -56,6 +56,19 @@ func NewAdWriter(w Writer, rotation *dj.AdRotation, clk clock.Clock) Writer {
 	if rotation == nil {
 		return w
 	}
+	// ZERO MEANS NO ADVERTS, which is what the flag help has always said and
+	// what the code did not do.
+	//
+	// The guard belongs HERE rather than inside adDue, so a zero divisor cannot
+	// exist in a live writer at all: adDue does breaks % everyN, and a zero
+	// that got that far would take the station off air on the first break slot
+	// rather than merely being ignored. Not wrapping is also honest -- a
+	// station with no adverts should not carry an advert writer that always
+	// declines. Negative is the same state; nobody means one advert every minus
+	// two breaks. Jockora-bpr.
+	if AdEveryNBreaks <= 0 {
+		return w
+	}
 	return &AdWriter{Writer: w, Rotation: rotation, Clock: clk,
 		everyN: AdEveryNBreaks, interval: MinAdInterval}
 }
@@ -73,7 +86,7 @@ func (a *AdWriter) Write(ctx context.Context, wordTarget int, placement mix.Plac
 		return a.Writer.Write(ctx, wordTarget, placement)
 	}
 
-	ad, err := a.Rotation.Next(a.now())
+	ad, err := a.Rotation.Next(ctx, a.now())
 	if err != nil {
 		// An empty or fully-cooled-down pool is not a failure. The slot goes
 		// back to the DJ, which is the whole point of adverts being optional.
@@ -83,7 +96,9 @@ func (a *AdWriter) Write(ctx context.Context, wordTarget int, placement mix.Plac
 	a.mu.Lock()
 	a.lastAd = a.now()
 	a.mu.Unlock()
-	a.Rotation.Aired(ad.ID, a.now())
+	// Recorded through the rotation, which writes to the row when there
+	// is one behind it -- the cooldown is global now.
+	_ = a.Rotation.MarkAired(ctx, ad.ID, a.now()) //nolint:errcheck // a lost cooldown is not a reason to drop the advert
 
 	return ad.Script, nil
 }

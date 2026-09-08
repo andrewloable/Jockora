@@ -15,7 +15,7 @@ import (
 // It exists from the very first migration, not from the first time the schema
 // changes. Retrofitting versioning after dossiers exist means either discarding
 // hours of enrichment or hand-writing a recovery script.
-const CurrentSchemaVersion = 9
+const CurrentSchemaVersion = 12
 
 // migrations are applied in order; index i brings the schema to version i+1.
 var migrations = []string{
@@ -291,6 +291,84 @@ var migrations = []string{
 	  LEFT JOIN dossiers d   ON d.track_id = t.id
 	  LEFT JOIN track_tags o ON o.track_id = t.id;
 	`,
+
+	// 10. A STATION IS DESCRIBED, NOT TAGGED.
+	//
+	// The operator writes a sentence and one model pass derives every
+	// parameter a song can be selected on. These are the columns that hold the
+	// answer; Jockora-g1t.2 is the pass that fills them.
+	//
+	// All seven are NULLABLE and unset means NULL. Zero would be a value SQL
+	// compares against, and 0 BPM or a 0-second maximum would silently empty a
+	// playlist -- which is the same class of bug as an operator's cleared range
+	// going on filtering for ever.
+	//
+	// ONLY THE BRIEF IS BACK-FILLED. No station has ever expressed a year, a
+	// tempo or a length; inventing one would shrink a playlist that works
+	// today, and five of sixteen moods already imply a tempo through
+	// station.TempoRange, which an explicit range would override. The brief is
+	// different: without it the console has two shapes to show, one with a
+	// description and one without, for as long as the install lives.
+	//
+	// The sentence is composed in Go by BriefFor rather than written as SQL
+	// here, because seed.go needs the identical sentence on a fresh install
+	// where this back-fill has nothing to back-fill -- and two copies of a
+	// sentence is two sentences eventually.
+	`
+	ALTER TABLE stations ADD COLUMN brief          TEXT;
+	ALTER TABLE stations ADD COLUMN year_min       INTEGER;
+	ALTER TABLE stations ADD COLUMN year_max       INTEGER;
+	ALTER TABLE stations ADD COLUMN tempo_min      REAL;
+	ALTER TABLE stations ADD COLUMN tempo_max      REAL;
+	ALTER TABLE stations ADD COLUMN duration_min_s REAL;
+	ALTER TABLE stations ADD COLUMN duration_max_s REAL;
+	`,
+
+	// 11. THE OPERATOR SELLS AIRTIME.
+	//
+	// The ads table has existed since migration 1 with no reader and no writer
+	// -- adverts came from JockPack TOML loaded at station start. These are the
+	// columns an operator-authored advert needs and an invented one never had.
+	//
+	// text is the SCRIPT and already exists; there is deliberately no second
+	// column for it. brand is the name the advert says, brief is what the
+	// operator typed about the product, and delivery is how they asked for it
+	// to be read.
+	//
+	// All nullable, because every advert that already exists predates them --
+	// a JockPack import has a script and nothing else, and inventing a brand
+	// for it would put a name on air that nobody wrote.
+	`
+	ALTER TABLE ads ADD COLUMN brand      TEXT;
+	ALTER TABLE ads ADD COLUMN brief      TEXT;
+	ALTER TABLE ads ADD COLUMN delivery   TEXT;
+	ALTER TABLE ads ADD COLUMN created_at INTEGER;
+	`,
+
+	// 12. WARNINGS AND ERRORS SURVIVE A RESTART.
+	//
+	// The ring in package obs is the live view and is the right thing for
+	// watching. It is the wrong thing for the case that matters most -- the
+	// station breaking at three in the morning with nobody watching -- because
+	// a crash loop empties it of exactly the evidence somebody wanted.
+	//
+	// WARN AND ABOVE ONLY, enforced by the writer rather than by the schema:
+	// info is chatter and a station produces a great deal of it, and persisting
+	// all of it would turn a music library into a log database.
+	//
+	// attrs is JSON, redacted before it arrives, so this table cannot leak a
+	// secret by forgetting to.
+	`
+	CREATE TABLE log_records (
+		id    INTEGER PRIMARY KEY,
+		at    INTEGER NOT NULL,
+		level TEXT NOT NULL,
+		msg   TEXT NOT NULL,
+		attrs TEXT
+	);
+
+	CREATE INDEX idx_log_records_at ON log_records(at);
+	`,
 }
 
 // migrate brings the database up to CurrentSchemaVersion.
@@ -339,6 +417,12 @@ func (s *Store) applyMigration(ctx context.Context, v int) error {
 		return fmt.Errorf("store: migration %d: %w", v+1, err)
 	}
 
+	// A migration that needs Go runs INSIDE the same transaction, so a
+	// half-applied schema is not a state anything can be left in.
+	if err := backfill(ctx, tx, v); err != nil {
+		return err
+	}
+
 	if v == 0 {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_version (version) VALUES (?)`, v+1); err != nil {
 			return fmt.Errorf("store: migration %d: recording version: %w", v+1, err)
@@ -381,4 +465,59 @@ func (s *Store) readVersion(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("store: reading schema version: %w", err)
 	}
 	return v, nil
+}
+
+// backfill runs the part of a migration that cannot be written as SQL.
+//
+// Only migration 10 needs one so far: the station brief is composed by BriefFor
+// so the migration and seed.go produce the identical sentence. Doing it in SQL
+// would mean writing that sentence twice, and two copies of a sentence is two
+// sentences eventually.
+func backfill(ctx context.Context, tx *sql.Tx, v int) error {
+	if v != 9 {
+		return nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id, genre, coalesce(mood, '') FROM stations`)
+	if err != nil {
+		return fmt.Errorf("store: migration 10: reading stations: %w", err)
+	}
+	type row struct {
+		id    int64
+		brief string
+	}
+	var briefs []row
+	var readErr error
+	for rows.Next() {
+		var id int64
+		var genre, mood string
+		if readErr = rows.Scan(&id, &genre, &mood); readErr != nil {
+			break
+		}
+		briefs = append(briefs, row{id, BriefFor(genre, mood)})
+	}
+	// ONE path for both ways a read fails -- a row this build cannot scan, and
+	// an iteration that stopped early -- because they mean the same thing to
+	// the operator and to the transaction: nothing is written and the upgrade
+	// stops here.
+	if readErr == nil {
+		readErr = rows.Err()
+	}
+	// Closed BEFORE the updates run, not deferred: an open read cursor and a
+	// write on the same SQLite transaction is a deadlock, which is why the
+	// briefs are collected first rather than updated as they are read.
+	rows.Close() //nolint:errcheck // a read-only cursor
+	if readErr != nil {
+		return fmt.Errorf("store: migration 10: %w", readErr)
+	}
+
+	for _, b := range briefs {
+		if b.brief == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE stations SET brief = ? WHERE id = ?`, b.brief, b.id); err != nil {
+			return fmt.Errorf("store: migration 10: station %d: %w", b.id, err)
+		}
+	}
+	return nil
 }

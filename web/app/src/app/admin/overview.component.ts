@@ -72,7 +72,13 @@ const REFRESH_MS = 10_000;
       }
 
       <button type="button" data-pause (click)="setEnriching(false)">Pause enrichment</button>
-      <button type="button" data-resume (click)="setEnriching(true)">Resume</button>
+      <!-- IT SAYS WHICH OF TWO THINGS IT WILL DO. "Resume" over a worker that
+           gave up and "Resume" over one the operator paused are different
+           promises, and before Jockora-e9a.52 the first of them set a boolean
+           nothing was reading and reported success. -->
+      <button type="button" data-resume (click)="setEnriching(true)">
+        {{ enrichmentTrouble() ? 'Restart enrichment' : 'Resume' }}
+      </button>
 
       @if (cost(); as c) {
         <p data-cost-line>
@@ -416,8 +422,21 @@ export class Overview implements OnDestroy {
 
   setEnriching(on: boolean): void {
     this.api.setEnriching(on).subscribe({
-      next: () =>
-        this.said.set(on ? 'Enrichment running.' : 'Enrichment paused. The stream is unaffected.'),
+      // THE SERVER'S OWN WORDS. A restart that brings a dead worker back and
+      // one that finds nothing to do look identical from here, and which one
+      // happened is the entire reason the operator pressed it.
+      next: (r) => {
+        // r ?? : an older server answers 204 with no body at all, and reading
+        // .said off null threw inside the subscribe -- which left the operator
+        // pressing a button that neither worked nor said anything. Same defect
+        // shape as the missing health field on the model page.
+        this.said.set(
+          r?.said ?? (on ? 'Enrichment running.' : 'Enrichment paused. The stream is unaffected.'),
+        );
+        // Re-read: the state this page is reporting has just changed, and the
+        // give-up line has to clear without waiting for the ten-second poll.
+        this.load();
+      },
       error: () => this.said.set('Could not change that.'),
     });
   }

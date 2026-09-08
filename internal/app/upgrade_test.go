@@ -71,11 +71,25 @@ func v01Fixture(t *testing.T) string {
 		`DROP VIEW effective_tags`, `DROP TABLE track_tags`,
 		`DROP TABLE station_tracks`, `DROP TABLE stations`, `DROP TABLE jocks`,
 		`DROP TABLE sources`, `DROP TABLE users`, `DROP TABLE settings`,
+		// Every table created after v0.1. One missing here makes the migration
+		// that creates it fail on "table already exists" -- loud, and meant to
+		// be. Add to this list when you add a table.
+		`DROP TABLE log_records`,
 		`ALTER TABLE tracks DROP COLUMN source_id`,
 		`ALTER TABLE tracks DROP COLUMN missing_at`,
 		`ALTER TABLE tracks DROP COLUMN genre`,
 		`ALTER TABLE ads DROP COLUMN station_id`,
 		`ALTER TABLE break_feedback DROP COLUMN user_id`,
+		// ads is a v0.1 TABLE, so it survives the drop above and every column
+		// added to it since has to come off by hand. stations does not appear
+		// here because it is a v0.2 table and is dropped whole. Add to this
+		// list when a migration adds a column to a v0.1 table, or the next
+		// migration fails on "duplicate column name" -- which is loud, and is
+		// meant to be.
+		`ALTER TABLE ads DROP COLUMN brand`,
+		`ALTER TABLE ads DROP COLUMN brief`,
+		`ALTER TABLE ads DROP COLUMN delivery`,
+		`ALTER TABLE ads DROP COLUMN created_at`,
 		`PRAGMA user_version = 5`,
 	} {
 		if _, err := s.DB().Exec(stmt); err != nil {

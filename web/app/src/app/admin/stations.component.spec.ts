@@ -3,6 +3,7 @@ import { TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { Stations } from './stations.component';
+import { Derived } from '../api/api';
 
 const stations = [
   { id: 1, name: 'ROCK', genre: 'rock', genres: ['rock'], moods: [], tracks: 412, enabled: true },
@@ -636,5 +637,495 @@ describe('Stations', () => {
     for (const cell of row.querySelectorAll('td')) {
       expect(cell.getAttribute('data-label')).toBeTruthy();
     }
+  });
+});
+
+// -------------------------------------------------------- stations brief --
+//
+// Jockora-g1t.6. MAKING A STATION MEANS DESCRIBING IT. Ticking boxes against
+// two closed vocabularies is a form that makes the operator do the model's job;
+// the boxes stay, they just stop being where you start.
+describe('stations brief', () => {
+  let ctrl: HttpTestingController;
+
+  beforeEach(async () => {
+    vi.stubGlobal('confirm', () => true);
+    await TestBed.configureTestingModule({
+      imports: [Stations],
+      providers: [provideHttpClient(), provideHttpClientTesting()],
+    }).compileComponents();
+    ctrl = TestBed.inject(HttpTestingController);
+  });
+
+  function mounted(list: unknown[] = []) {
+    const fixture = TestBed.createComponent(Stations);
+    ctrl.expectOne('/admin/stations').flush(list);
+    ctrl.expectOne('/admin/vocab').flush(vocab);
+    ctrl.expectOne('/admin/jocks').flush(jocks);
+    fixture.detectChanges();
+    return fixture;
+  }
+
+  function typeBrief(f: { nativeElement: HTMLElement; detectChanges(): void }, text: string) {
+    const box = f.nativeElement.querySelector('[data-brief]') as HTMLTextAreaElement;
+    box.value = text;
+    box.dispatchEvent(new Event('input'));
+    f.detectChanges();
+  }
+
+  const derived: Derived = {
+    name: 'Night Rock',
+    genres: ['rock'],
+    moods: ['raw'],
+    year_min: 1975,
+    year_max: 2005,
+    tracks: 412,
+  };
+
+  function describeIt(f: { nativeElement: HTMLElement; detectChanges(): void }, answer = derived) {
+    (f.nativeElement.querySelector('[data-describe]') as HTMLButtonElement).click();
+    const req = ctrl.expectOne('/admin/stations/derive');
+    req.flush(answer);
+    f.detectChanges();
+    return req;
+  }
+
+  it('stations brief describes a brief and shows the tags, years and count', () => {
+    const fixture = mounted();
+    typeBrief(fixture, 'late-night rock for driving, nothing after 2005');
+    const req = describeIt(fixture);
+
+    expect(req.request.body).toEqual({ brief: 'late-night rock for driving, nothing after 2005' });
+
+    // THE TAGS STAY VISIBLE. An operator who cannot see the filter cannot fix
+    // it, and this feature's failure mode is a plausible-looking wrong answer.
+    expect(fixture.componentInstance.genres()).toEqual(['rock']);
+    expect(fixture.componentInstance.moods()).toEqual(['raw']);
+    expect(fixture.componentInstance.yearMin()).toBe(1975);
+    expect(fixture.componentInstance.yearMax()).toBe(2005);
+    expect(fixture.nativeElement.querySelector('[data-derived]')!.textContent).toContain('412');
+  });
+
+  it('stations brief pre-fills the suggested name and lets it be typed over', () => {
+    const fixture = mounted();
+    typeBrief(fixture, 'late-night rock');
+    describeIt(fixture);
+    expect(fixture.componentInstance.name()).toBe('Night Rock');
+
+    const nameBox = fixture.nativeElement.querySelector('[data-name]') as HTMLInputElement;
+    nameBox.value = 'AFTER HOURS';
+    nameBox.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    expect(fixture.componentInstance.name()).toBe('AFTER HOURS');
+  });
+
+  // THE WHOLE POINT OF PREVIEW-THEN-CONFIRM: what is saved is what is ON
+  // SCREEN, including whatever the operator changed after the derive.
+  it('stations brief saves the parameters on screen, not the brief alone', () => {
+    const fixture = mounted();
+    typeBrief(fixture, 'late-night rock');
+    describeIt(fixture);
+
+    // The operator disagrees with one of them.
+    fixture.componentInstance.moods.set(['calm']);
+    fixture.componentInstance.yearMax.set(1999);
+    fixture.detectChanges();
+
+    (fixture.nativeElement.querySelector('[data-add]') as HTMLButtonElement).click();
+    const req = ctrl.expectOne('/admin/stations');
+    expect(req.request.body).toEqual({
+      name: 'Night Rock',
+      genres: ['rock'],
+      moods: ['calm'],
+      brief: 'late-night rock',
+      year_min: 1975,
+      year_max: 1999,
+    });
+    req.flush({ id: 1, tracks: 88 });
+    ctrl.expectOne('/admin/stations').flush([]);
+    fixture.detectChanges();
+  });
+
+  it('stations brief does not call derive on save', () => {
+    const fixture = mounted();
+    typeBrief(fixture, 'late-night rock');
+    describeIt(fixture);
+
+    (fixture.nativeElement.querySelector('[data-add]') as HTMLButtonElement).click();
+    ctrl.expectOne('/admin/stations').flush({ id: 1, tracks: 5 });
+    ctrl.expectOne('/admin/stations').flush([]);
+    // Re-deriving would produce a DIFFERENT station from the one approved.
+    ctrl.expectNone('/admin/stations/derive');
+  });
+
+  // A 503 is "no model", and the server's sentence names both ways out. Leaving
+  // the operator at a dead button is the failure this opens the door against.
+  it('stations brief opens the manual path when there is no model', () => {
+    const fixture = mounted();
+    typeBrief(fixture, 'late-night rock');
+    (fixture.nativeElement.querySelector('[data-describe]') as HTMLButtonElement).click();
+    ctrl.expectOne('/admin/stations/derive').flush(
+      {
+        error:
+          'no language model is configured. Choose one on the Model page, or set the ' +
+          'genres and moods by hand.',
+      },
+      { status: 503, statusText: 'Service Unavailable' },
+    );
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-said]')!.textContent).toContain('by hand');
+    const manual = fixture.nativeElement.querySelector('[data-manual]') as HTMLDetailsElement;
+    expect(manual.open).toBe(true);
+  });
+
+  it('stations brief leaves the form alone when the model itself fails', () => {
+    const fixture = mounted();
+    typeBrief(fixture, 'late-night rock');
+    fixture.componentInstance.genres.set(['ambient']);
+    (fixture.nativeElement.querySelector('[data-describe]') as HTMLButtonElement).click();
+    ctrl
+      .expectOne('/admin/stations/derive')
+      .flush(
+        { error: 'the language model could not do it: rejected the API key' },
+        { status: 502, statusText: 'Bad Gateway' },
+      );
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-said]')!.textContent).toContain('API key');
+    // NOTHING WAS TOUCHED: a 502 is the model failing, not the operator being
+    // wrong, and wiping their tags would punish them for it.
+    expect(fixture.componentInstance.genres()).toEqual(['ambient']);
+    const manual = fixture.nativeElement.querySelector('[data-manual]') as HTMLDetailsElement;
+    expect(manual.open).toBe(false);
+  });
+
+  it('stations brief still creates a station by hand with no brief at all', () => {
+    const fixture = mounted();
+    fixture.componentInstance.name.set('ROCK');
+    fixture.componentInstance.genres.set(['rock']);
+    fixture.detectChanges();
+
+    (fixture.nativeElement.querySelector('[data-add]') as HTMLButtonElement).click();
+    const req = ctrl.expectOne('/admin/stations');
+    expect(req.request.body).toEqual({ name: 'ROCK', genres: ['rock'], moods: [] });
+    req.flush({ id: 1, tracks: 9 });
+    ctrl.expectOne('/admin/stations').flush([]);
+  });
+
+  it('stations brief loads a stored brief into the row editor and re-describes it', () => {
+    const fixture = mounted([
+      {
+        id: 3,
+        name: 'AMBIENT',
+        genre: 'ambient',
+        genres: ['ambient'],
+        moods: ['calm'],
+        brief: 'Plays ambient. Feels calm.',
+        year_min: 0,
+        year_max: 0,
+        tracks: 12,
+        enabled: true,
+      },
+    ]);
+    (fixture.nativeElement.querySelector('[data-edit]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(fixture.componentInstance.editBrief()).toBe('Plays ambient. Feels calm.');
+
+    (fixture.nativeElement.querySelector('[data-edit-describe]') as HTMLButtonElement).click();
+    ctrl.expectOne('/admin/stations/derive').flush(derived);
+    fixture.detectChanges();
+
+    // The suggestion REPLACES the ticked boxes and the years.
+    expect(fixture.componentInstance.editGenres()).toEqual(['rock']);
+    expect(fixture.componentInstance.editYearMin()).toBe(1975);
+  });
+
+  it('stations brief will not describe nothing, and says so while it is working', () => {
+    const fixture = mounted();
+    const button = () =>
+      fixture.nativeElement.querySelector('[data-describe]') as HTMLButtonElement;
+    // BLANK: there is nothing to derive from.
+    expect(button().disabled).toBe(true);
+
+    typeBrief(fixture, 'late-night rock');
+    expect(button().disabled).toBe(false);
+
+    button().click();
+    fixture.detectChanges();
+    // IN FLIGHT: a live LLM call takes seconds on a local model, and an
+    // unlabelled button that does nothing reads as broken.
+    expect(button().disabled).toBe(true);
+    expect(button().textContent!.toLowerCase()).toContain('describ');
+    ctrl.expectOne('/admin/stations/derive').flush(derived);
+    fixture.detectChanges();
+    expect(button().disabled).toBe(false);
+  });
+
+  it('stations brief round-trips the years and sends none when they are cleared', () => {
+    const fixture = mounted();
+    fixture.componentInstance.name.set('N');
+    fixture.componentInstance.genres.set(['rock']);
+    fixture.componentInstance.yearMin.set(1980);
+    fixture.componentInstance.yearMax.set(1989);
+    fixture.detectChanges();
+
+    (fixture.nativeElement.querySelector('[data-add]') as HTMLButtonElement).click();
+    const withYears = ctrl.expectOne('/admin/stations');
+    expect(withYears.request.body).toMatchObject({ year_min: 1980, year_max: 1989 });
+    withYears.flush({ id: 1, tracks: 4 });
+    ctrl.expectOne('/admin/stations').flush([]);
+    fixture.detectChanges();
+
+    // CLEARED means unbounded, and an unbounded side is simply not sent --
+    // a zero would be a year the server has to guess the meaning of.
+    fixture.componentInstance.name.set('N2');
+    fixture.componentInstance.genres.set(['rock']);
+    fixture.componentInstance.yearMin.set(0);
+    fixture.componentInstance.yearMax.set(0);
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('[data-add]') as HTMLButtonElement).click();
+    const noYears = ctrl.expectOne('/admin/stations');
+    expect(noYears.request.body).not.toHaveProperty('year_min');
+    expect(noYears.request.body).not.toHaveProperty('year_max');
+    noYears.flush({ id: 2, tracks: 4 });
+    ctrl.expectOne('/admin/stations').flush([]);
+  });
+
+  it('stations brief takes the years and the description from the boxes themselves', () => {
+    const fixture = mounted();
+    const type = (sel: string, value: string) => {
+      const el = fixture.nativeElement.querySelector(sel) as HTMLInputElement;
+      el.value = value;
+      el.dispatchEvent(new Event('input'));
+      fixture.detectChanges();
+    };
+    type('[data-year-min]', '1980');
+    type('[data-year-max]', '1989');
+    expect(fixture.componentInstance.yearMin()).toBe(1980);
+    expect(fixture.componentInstance.yearMax()).toBe(1989);
+  });
+
+  it('stations brief takes the row editor’s boxes too', () => {
+    const fixture = mounted([
+      {
+        id: 3,
+        name: 'AMBIENT',
+        genre: 'ambient',
+        genres: ['ambient'],
+        moods: [],
+        brief: 'Plays ambient.',
+        tracks: 12,
+        enabled: true,
+      },
+    ]);
+    (fixture.nativeElement.querySelector('[data-edit]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    const type = (sel: string, value: string) => {
+      const el = fixture.nativeElement.querySelector(sel) as HTMLInputElement;
+      el.value = value;
+      el.dispatchEvent(new Event('input'));
+      fixture.detectChanges();
+    };
+    type('[data-edit-brief]', 'something else entirely');
+    type('[data-edit-year-min]', '1990');
+    type('[data-edit-year-max]', '1999');
+    expect(fixture.componentInstance.editBrief()).toBe('something else entirely');
+    expect(fixture.componentInstance.editYearMin()).toBe(1990);
+    expect(fixture.componentInstance.editYearMax()).toBe(1999);
+  });
+
+  // A server mid-upgrade, or one that answered with only what it was sure of.
+  // A partial answer must leave empty lists rather than undefined ones, or the
+  // checkbox loop renders nothing and the form looks broken.
+  it('stations brief survives a derive that answers with almost nothing', () => {
+    const fixture = mounted();
+    typeBrief(fixture, 'late-night rock');
+    describeIt(fixture, { name: 'Sparse' } as unknown as typeof derived);
+    expect(fixture.componentInstance.genres()).toEqual([]);
+    expect(fixture.componentInstance.moods()).toEqual([]);
+    expect(fixture.componentInstance.yearMin()).toBe(0);
+    expect(fixture.componentInstance.yearMax()).toBe(0);
+  });
+
+  it('stations brief reports a failed re-describe without losing the row', () => {
+    const fixture = mounted([
+      {
+        id: 3,
+        name: 'AMBIENT',
+        genre: 'ambient',
+        genres: ['ambient'],
+        moods: ['calm'],
+        brief: 'Plays ambient.',
+        tracks: 12,
+        enabled: true,
+      },
+    ]);
+    (fixture.nativeElement.querySelector('[data-edit]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('[data-edit-describe]') as HTMLButtonElement).click();
+    ctrl
+      .expectOne('/admin/stations/derive')
+      .flush(null, { status: 502, statusText: 'Bad Gateway' });
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-said]')!.textContent).toContain(
+      'Could not describe',
+    );
+    // THE ROW STAYS OPEN with what it had: a failed suggestion is not a reason
+    // to throw away the operator's station.
+    expect(fixture.componentInstance.editGenres()).toEqual(['ambient']);
+    expect(fixture.componentInstance.editing()).toBe(3);
+  });
+
+  it('stations brief survives an edit derive that answers with almost nothing', () => {
+    const fixture = mounted([
+      {
+        id: 3,
+        name: 'AMBIENT',
+        genre: 'ambient',
+        genres: ['ambient'],
+        moods: ['calm'],
+        brief: 'Plays ambient.',
+        tracks: 12,
+        enabled: true,
+      },
+    ]);
+    (fixture.nativeElement.querySelector('[data-edit]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('[data-edit-describe]') as HTMLButtonElement).click();
+    ctrl.expectOne('/admin/stations/derive').flush({ name: 'Sparse' });
+    fixture.detectChanges();
+    expect(fixture.componentInstance.editGenres()).toEqual([]);
+    expect(fixture.componentInstance.editYearMin()).toBe(0);
+  });
+
+  it('stations brief says the row editor is working, not sitting there', () => {
+    const fixture = mounted([
+      {
+        id: 3,
+        name: 'AMBIENT',
+        genre: 'ambient',
+        genres: ['ambient'],
+        moods: ['calm'],
+        brief: 'Plays ambient.',
+        tracks: 12,
+        enabled: true,
+      },
+    ]);
+    (fixture.nativeElement.querySelector('[data-edit]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const button = () =>
+      fixture.nativeElement.querySelector('[data-edit-describe]') as HTMLButtonElement;
+
+    button().click();
+    fixture.detectChanges();
+    // A live model call takes seconds on a local model, and an unlabelled
+    // button that does nothing reads as broken -- in the row editor exactly as
+    // in the add form.
+    expect(button().disabled).toBe(true);
+    expect(button().textContent!.toLowerCase()).toContain('describing');
+
+    ctrl.expectOne('/admin/stations/derive').flush(derived);
+    fixture.detectChanges();
+    expect(button().disabled).toBe(false);
+    expect(button().textContent!.toLowerCase()).not.toContain('describing');
+  });
+
+  it('stations brief says so when the derive fails with no words at all', () => {
+    const fixture = mounted();
+    typeBrief(fixture, 'late-night rock');
+    (fixture.nativeElement.querySelector('[data-describe]') as HTMLButtonElement).click();
+    ctrl.expectOne('/admin/stations/derive').flush(null, { status: 500, statusText: 'Error' });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-said]')!.textContent).toContain(
+      'Could not describe',
+    );
+  });
+
+  it('stations brief says whether the count is enough to run', () => {
+    const fixture = mounted();
+    typeBrief(fixture, 'something obscure');
+    describeIt(fixture, { ...derived, tracks: 7, warning: 'too few tracks to run' });
+
+    const warn = fixture.nativeElement.querySelector('[data-derived-warning]');
+    expect(warn).not.toBeNull();
+    expect(warn!.textContent).toContain('too few');
+    // ADVICE, NOT A REFUSAL: the save button is untouched, because twelve deep
+    // cuts is a real station somebody may want.
+    expect((fixture.nativeElement.querySelector('[data-add]') as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+  });
+
+  it('stations brief stays quiet when the count is comfortable', () => {
+    const fixture = mounted();
+    typeBrief(fixture, 'late-night rock');
+    describeIt(fixture, { ...derived, tracks: 412, warning: '' });
+    expect(fixture.nativeElement.querySelector('[data-derived-warning]')).toBeNull();
+  });
+
+  it('stations brief explains a slow derive while it is still running', () => {
+    const fixture = mounted();
+    typeBrief(fixture, 'late-night rock');
+    (fixture.nativeElement.querySelector('[data-describe]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    // The operator started enrichment this morning and has no way to connect
+    // the two on their own.
+    const note = fixture.nativeElement.querySelector('[data-describing-note]');
+    expect(note).not.toBeNull();
+    expect(note!.textContent!.toLowerCase()).toContain('enrichment');
+    expect(note!.textContent!.toLowerCase()).toContain('overview');
+
+    ctrl.expectOne('/admin/stations/derive').flush(derived);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-describing-note]')).toBeNull();
+  });
+
+  it('stations brief shows the server’s words when the model runs out of time', () => {
+    const fixture = mounted();
+    typeBrief(fixture, 'late-night rock');
+    (fixture.nativeElement.querySelector('[data-describe]') as HTMLButtonElement).click();
+    ctrl.expectOne('/admin/stations/derive').flush(
+      {
+        error:
+          'the language model did not answer in time. Enrichment may be running and using ' +
+          'it; you can pause that on the Overview. The genres and moods can also be set by hand.',
+      },
+      { status: 504, statusText: 'Gateway Timeout' },
+    );
+    fixture.detectChanges();
+
+    // THE SERVER'S SENTENCE, not a generic fallback. A status-code-only test
+    // passes happily while those words are thrown away.
+    const said = fixture.nativeElement.querySelector('[data-said]')!.textContent!;
+    expect(said).toContain('Enrichment may be running');
+    expect(said).toContain('Overview');
+  });
+
+  it('stations brief stops an over-long description in the box', () => {
+    const fixture = mounted();
+    const box = fixture.nativeElement.querySelector('[data-brief]') as HTMLTextAreaElement;
+    // Before the round trip, so the operator never meets the flat 4KB refusal.
+    expect(box.maxLength).toBe(fixture.componentInstance.maxBrief);
+    const edit = mounted([
+      {
+        id: 3,
+        name: 'A',
+        genre: 'ambient',
+        genres: ['ambient'],
+        moods: [],
+        brief: 'x',
+        tracks: 1,
+        enabled: true,
+      },
+    ]);
+    (edit.nativeElement.querySelector('[data-edit]') as HTMLButtonElement).click();
+    edit.detectChanges();
+    expect(
+      (edit.nativeElement.querySelector('[data-edit-brief]') as HTMLTextAreaElement).maxLength,
+    ).toBe(edit.componentInstance.maxBrief);
   });
 });

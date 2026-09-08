@@ -51,9 +51,15 @@ func SeedStations(ctx context.Context, s *store.Store, personas []*dj.Persona) (
 		// the tracks that made it worth proposing. Narrowing by mood is an
 		// operator decision, taken in the console with the counts visible.
 		id, err := s.CreateStation(ctx, store.Station{
-			Name:    strings.ToUpper(st.Tag),
-			Genre:   st.Tag,
-			JockID:  st.Jock,
+			Name:   strings.ToUpper(st.Tag),
+			Genre:  st.Tag,
+			JockID: st.Jock,
+			// THE SAME SENTENCE THE MIGRATION WRITES. This runs on a FRESH
+			// install, where the back-fill has nothing to back-fill -- so
+			// without it the very first dial an operator ever sees is the one
+			// dial with empty briefs, which is exactly the two-shapes problem
+			// the back-fill was decided on to remove. Jockora-g1t.1.
+			Brief:   store.BriefFor(st.Tag, ""),
 			Enabled: true,
 		})
 		if err != nil {

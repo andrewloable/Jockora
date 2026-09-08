@@ -1,5 +1,5 @@
 import { Component, inject, output, signal } from '@angular/core';
-import { AdminApi, Diff, Jock, Station } from '../api/api';
+import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api';
 
 /**
  * The dial, from the operator's side.
@@ -30,6 +30,43 @@ import { AdminApi, Diff, Jock, Station } from '../api/api';
                   [value]="editName()"
                   (input)="editName.set($any($event.target).value)"
                 />
+                <!-- The SAME description this station was made from, so an
+                     operator can rewrite the sentence rather than reverse
+                     engineer the boxes. Describing again replaces what is
+                     ticked; they can adjust it or leave without saving. -->
+                <textarea
+                  data-edit-brief
+                  rows="2"
+                  [attr.maxlength]="maxBrief"
+                  [value]="editBrief()"
+                  (input)="editBrief.set($any($event.target).value)"
+                ></textarea>
+                <button
+                  type="button"
+                  data-edit-describe
+                  [disabled]="editDescribing() || !editBrief().trim()"
+                  (click)="describeEdit()"
+                >
+                  {{ editDescribing() ? 'Describing…' : 'Describe it' }}
+                </button>
+                <label>
+                  From year
+                  <input
+                    data-edit-year-min
+                    type="number"
+                    [value]="editYearMin() || ''"
+                    (input)="editYearMin.set(+$any($event.target).value)"
+                  />
+                </label>
+                <label>
+                  To year
+                  <input
+                    data-edit-year-max
+                    type="number"
+                    [value]="editYearMax() || ''"
+                    (input)="editYearMax.set(+$any($event.target).value)"
+                  />
+                </label>
               </td>
               <td data-label="Genre · mood">
                 <!-- CHECKBOXES, not a multiple select. A multiple select needs
@@ -134,44 +171,117 @@ import { AdminApi, Diff, Jock, Station } from '../api/api';
 
     <fieldset>
       <legend>Add a station</legend>
+
+      <!-- A STATION IS DESCRIBED, NOT TICKED. Two closed vocabularies in a
+           checkbox grid is a form that makes the operator do the model's job;
+           the boxes are still here, they just stop being where you start. -->
+      <label data-brief-label>
+        What is this station?
+        <textarea
+          data-brief
+          rows="2"
+          [attr.maxlength]="maxBrief"
+          placeholder="Late-night driving music, mostly 80s, nothing cheerful."
+          [value]="brief()"
+          (input)="brief.set($any($event.target).value)"
+        ></textarea>
+      </label>
+      <!-- DISABLED WHILE BLANK AND WHILE WORKING, and it says which. A live
+           model call takes seconds, and an unlabelled button that does nothing
+           reads as broken. -->
+      <button
+        type="button"
+        data-describe
+        [disabled]="describing() || !brief().trim()"
+        (click)="describeStation()"
+      >
+        {{ describing() ? 'Describing…' : 'Describe it' }}
+      </button>
+      @if (derived(); as d) {
+        <small data-derived
+          >{{ d.tracks }} tracks match. Change anything below before saving.</small
+        >
+        @if (d.warning) {
+          <!-- THE VERDICT ON THE NUMBER, at the one moment the operator can
+               still change the brief. Without it they read "7 tracks", save,
+               and discover the station cannot be enabled at all. Advice, not a
+               refusal: twelve deep cuts is a real station. -->
+          <small role="alert" data-derived-warning>{{ d.warning }}</small>
+        }
+      }
+      @if (describing()) {
+        <!-- WHY IT IS SLOW. Enrichment is serial and pauses only on the
+             operator's own toggle, so a derive fired mid-enrichment queues
+             behind a dossier pass on the same model. Without this they watch a
+             spinner on a feature that worked yesterday. -->
+        <small data-describing-note
+          >Asking the model. If this is slow, enrichment may be running — you can pause it on the
+          Overview.</small
+        >
+      }
+
       <input
         data-name
         placeholder="name"
         [value]="name()"
         (input)="name.set($any($event.target).value)"
       />
+      <label>
+        From year
+        <input
+          data-year-min
+          type="number"
+          [value]="yearMin() || ''"
+          (input)="yearMin.set(+$any($event.target).value)"
+        />
+      </label>
+      <label>
+        To year
+        <input
+          data-year-max
+          type="number"
+          [value]="yearMax() || ''"
+          (input)="yearMax.set(+$any($event.target).value)"
+        />
+      </label>
       <!-- [selected] per option, never [value] on the select: these options
            come from the vocabulary, which arrives over HTTP, and a select whose
            value is bound before its options exist silently falls back to the
            first one. -->
-      <fieldset data-genre>
-        <legend>Genre</legend>
-        @for (g of vocab().genres; track g) {
-          <label>
-            <input
-              type="checkbox"
-              [value]="g"
-              [checked]="genres().includes(g)"
-              (change)="genres.set(pick(vocab().genres, genres(), g, $event))"
-            />{{ g }}
-          </label>
-        }
-        <small>{{ genres().length ? '' : 'none ticked · any genre' }}</small>
-      </fieldset>
-      <fieldset data-mood>
-        <legend>Mood</legend>
-        @for (m of vocab().moods; track m) {
-          <label>
-            <input
-              type="checkbox"
-              [value]="m"
-              [checked]="moods().includes(m)"
-              (change)="moods.set(pick(vocab().moods, moods(), m, $event))"
-            />{{ m }}
-          </label>
-        }
-        <small>{{ moods().length ? '' : 'none ticked · any mood' }}</small>
-      </fieldset>
+      <!-- ONE details element, closed by default. This is the path a library
+           with no model configured must use, so a 503 from the derive opens it
+           rather than leaving the operator at a dead button. -->
+      <details data-manual [open]="manualOpen()">
+        <summary>set genres and moods by hand</summary>
+        <fieldset data-genre>
+          <legend>Genre</legend>
+          @for (g of vocab().genres; track g) {
+            <label>
+              <input
+                type="checkbox"
+                [value]="g"
+                [checked]="genres().includes(g)"
+                (change)="genres.set(pick(vocab().genres, genres(), g, $event))"
+              />{{ g }}
+            </label>
+          }
+          <small>{{ genres().length ? '' : 'none ticked · any genre' }}</small>
+        </fieldset>
+        <fieldset data-mood>
+          <legend>Mood</legend>
+          @for (m of vocab().moods; track m) {
+            <label>
+              <input
+                type="checkbox"
+                [value]="m"
+                [checked]="moods().includes(m)"
+                (change)="moods.set(pick(vocab().moods, moods(), m, $event))"
+              />{{ m }}
+            </label>
+          }
+          <small>{{ moods().length ? '' : 'none ticked · any mood' }}</small>
+        </fieldset>
+      </details>
       <button type="button" data-add (click)="add()">Add</button>
     </fieldset>
 
@@ -204,6 +314,33 @@ export class Stations {
   readonly name = signal('');
   readonly genres = signal<string[]>([]);
   readonly moods = signal<string[]>([]);
+
+  /**
+   * The server's own cap, mirrored so the box stops an operator BEFORE the
+   * round trip rather than after it.
+   */
+  readonly maxBrief = 2000;
+
+  /** What the operator wrote, and what the model made of it. */
+  readonly brief = signal('');
+  readonly yearMin = signal(0);
+  readonly yearMax = signal(0);
+  readonly derived = signal<Derived | null>(null);
+  readonly describing = signal(false);
+  /**
+   * Whether the by-hand fieldsets are open.
+   *
+   * Opened by a 503, because a library with no model configured has to be able
+   * to make a station and the alternative is an operator staring at a button
+   * that will never work.
+   */
+  readonly manualOpen = signal(false);
+
+  /** The same four, for the row editor. */
+  readonly editBrief = signal('');
+  readonly editYearMin = signal(0);
+  readonly editYearMax = signal(0);
+  readonly editDescribing = signal(false);
   readonly said = signal('');
 
   /** playlist asks the console to open one station's playlist. */
@@ -279,6 +416,11 @@ export class Stations {
     this.editGenres.set([...(st.genres ?? [])]);
     this.editMoods.set([...(st.moods ?? [])]);
     this.editJock.set(st.jock_id ?? '');
+    // Every station has a brief after migration 10's back-fill, so this is
+    // never empty in practice -- and re-describing replaces the ticked boxes.
+    this.editBrief.set(st.brief ?? '');
+    this.editYearMin.set(st.year_min ?? 0);
+    this.editYearMax.set(st.year_max ?? 0);
   }
 
   /** The jock's NAME, for a row that is not being edited. */
@@ -300,11 +442,17 @@ export class Stations {
   save(st: Station): void {
     this.said.set('');
     this.api
-      .updateStation(st.id, {
-        name: this.editName(),
-        genres: this.editGenres(),
-        moods: this.editMoods(),
-      })
+      .updateStation(
+        st.id,
+        this.stationBody(
+          this.editName(),
+          this.editGenres(),
+          this.editMoods(),
+          this.editBrief(),
+          this.editYearMin(),
+          this.editYearMax(),
+        ),
+      )
       .subscribe({
         next: (d) => this.saveJock(st, d),
         error: (e: { error?: { error?: string } }) =>
@@ -360,10 +508,102 @@ export class Stations {
     this.load();
   }
 
+  /**
+   * Turn the description into a suggestion. NOTHING IS SAVED.
+   *
+   * The result lands in the same controls the operator would have filled in by
+   * hand, already filled in -- so what they save is what is on screen, edits
+   * included, and the tags the model chose stay visible. An operator who cannot
+   * see the filter cannot fix it, and this feature's failure mode is a
+   * plausible-looking wrong answer.
+   */
+  describeStation(): void {
+    this.said.set('');
+    this.describing.set(true);
+    this.api.deriveStation(this.brief()).subscribe({
+      next: (d) => {
+        this.describing.set(false);
+        this.derived.set(d);
+        this.name.set(d.name);
+        this.genres.set(d.genres ?? []);
+        this.moods.set(d.moods ?? []);
+        this.yearMin.set(d.year_min ?? 0);
+        this.yearMax.set(d.year_max ?? 0);
+      },
+      error: (e: { status?: number; error?: { error?: string } }) => {
+        this.describing.set(false);
+        this.said.set(String(e.error?.error ?? 'Could not describe that station.'));
+        // 503 IS "NO MODEL", and the server's sentence names both ways out.
+        // Opening the manual path is the second of them, done rather than
+        // described. A 502 is the model failing -- the operator was not wrong
+        // and their tags are left exactly as they were.
+        if (e.status === 503) {
+          this.manualOpen.set(true);
+        }
+      },
+    });
+  }
+
+  /** The same, for a station being edited. */
+  describeEdit(): void {
+    this.said.set('');
+    this.editDescribing.set(true);
+    this.api.deriveStation(this.editBrief()).subscribe({
+      next: (d) => {
+        this.editDescribing.set(false);
+        this.editName.set(d.name);
+        this.editGenres.set(d.genres ?? []);
+        this.editMoods.set(d.moods ?? []);
+        this.editYearMin.set(d.year_min ?? 0);
+        this.editYearMax.set(d.year_max ?? 0);
+      },
+      error: (e: { error?: { error?: string } }) => {
+        this.editDescribing.set(false);
+        this.said.set(String(e.error?.error ?? 'Could not describe that station.'));
+      },
+    });
+  }
+
+  /**
+   * The request body, with unbounded years ABSENT rather than zero.
+   *
+   * A zero is a year the server would have to guess the meaning of, and the
+   * schema on the other side already treats absent as unbounded.
+   */
+  private stationBody(
+    name: string,
+    genres: string[],
+    moods: string[],
+    brief: string,
+    yearMin: number,
+    yearMax: number,
+  ): StationBody {
+    const body: StationBody = { name, genres, moods };
+    if (brief.trim()) {
+      body.brief = brief.trim();
+    }
+    if (yearMin) {
+      body.year_min = yearMin;
+    }
+    if (yearMax) {
+      body.year_max = yearMax;
+    }
+    return body;
+  }
+
   add(): void {
     this.said.set('');
     this.api
-      .addStation({ name: this.name(), genres: this.genres(), moods: this.moods() })
+      .addStation(
+        this.stationBody(
+          this.name(),
+          this.genres(),
+          this.moods(),
+          this.brief(),
+          this.yearMin(),
+          this.yearMax(),
+        ),
+      )
       .subscribe({
         next: (made) => {
           // The TRACK COUNT, immediately: the operator sees a number rather
@@ -371,6 +611,10 @@ export class Stations {
           // nothing.
           this.said.set(`Added with ${made.tracks} tracks.` + this.moodHint(made.tracks));
           this.name.set('');
+          this.brief.set('');
+          this.yearMin.set(0);
+          this.yearMax.set(0);
+          this.derived.set(null);
           this.load();
         },
         error: (e: { error?: { error?: string } }) =>

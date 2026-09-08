@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -26,6 +27,74 @@ type Station struct {
 	JockID    string    `json:"jock_id,omitempty"`
 	Enabled   bool      `json:"enabled"`
 	CreatedAt time.Time `json:"created_at"`
+
+	// A STATION IS DESCRIBED, NOT TAGGED. Brief is the sentence the operator
+	// wrote; everything below is what the model derived from it.
+	Brief string `json:"brief,omitempty"`
+
+	// ZERO MEANS UNSET for every one of these, and is written as NULL, so "no
+	// upper bound" and "the year 0" cannot be confused. It matters more for the
+	// tempo and the length than for the years, because 0 BPM and 0 seconds are
+	// values SQL would happily compare a track against.
+	YearMin      int     `json:"year_min,omitempty"`
+	YearMax      int     `json:"year_max,omitempty"`
+	TempoMin     float64 `json:"tempo_min,omitempty"`
+	TempoMax     float64 `json:"tempo_max,omitempty"`
+	DurationMinS float64 `json:"duration_min_s,omitempty"`
+	DurationMaxS float64 `json:"duration_max_s,omitempty"`
+}
+
+// BriefFor writes the sentence a station's tags already say.
+//
+// SHARED, because two callers need the identical sentence and writing it twice
+// is how they drift: migration 10 back-fills every station that already exists,
+// and seed.go writes it on a FRESH install where the back-fill has nothing to
+// back-fill. Without both, the very first dial an operator ever sees is the one
+// dial with empty briefs -- exactly the two-shapes problem the back-fill was
+// decided on to remove.
+//
+// English, not a tag dump: the stored commas are spaced out and the mood clause
+// is omitted when there is no mood. The catch-all reads "Plays unsorted.",
+// which is correct and is what the operator sees.
+func BriefFor(genre, mood string) string {
+	genre = spaceTags(genre)
+	if genre == "" {
+		return ""
+	}
+	brief := "Plays " + genre + "."
+	if m := spaceTags(mood); m != "" {
+		brief += " Feels " + m + "."
+	}
+	return brief
+}
+
+// spaceTags turns "rock,punk" into "rock, punk" without doubling a space that
+// is already there.
+func spaceTags(tags string) string {
+	parts := strings.Split(tags, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return strings.Join(out, ", ")
+}
+
+// nullableInt and nullableFloat store a zero as NULL, the same rule nullable
+// follows for a string. See the field comments above for why zero is unset.
+func nullableInt(n int) any {
+	if n == 0 {
+		return nil
+	}
+	return n
+}
+
+func nullableFloat(f float64) any {
+	if f == 0 {
+		return nil
+	}
+	return f
 }
 
 // SelectorState is where a station's playlist had got to.
@@ -49,15 +118,20 @@ type StationTrack struct {
 	Missing bool `json:"missing,omitempty"`
 }
 
-const stationColumns = `id, name, genre, mood, jock_id, enabled, created_at`
+const stationColumns = `id, name, genre, mood, jock_id, enabled, created_at, brief, year_min, year_max, tempo_min, tempo_max, duration_min_s, duration_max_s`
 
 // CreateStation inserts a station and returns its id.
 func (s *Store) CreateStation(ctx context.Context, st Station) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO stations (name, genre, mood, jock_id, enabled, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+		INSERT INTO stations (name, genre, mood, jock_id, enabled, created_at,
+		                      brief, year_min, year_max,
+		                      tempo_min, tempo_max, duration_min_s, duration_max_s)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		st.Name, st.Genre, nullable(st.Mood), nullable(st.JockID),
-		st.Enabled, time.Now().Unix())
+		st.Enabled, time.Now().Unix(),
+		nullable(st.Brief), nullableInt(st.YearMin), nullableInt(st.YearMax),
+		nullableFloat(st.TempoMin), nullableFloat(st.TempoMax),
+		nullableFloat(st.DurationMinS), nullableFloat(st.DurationMaxS))
 	if err != nil {
 		return 0, fmt.Errorf("store: creating station %q: %w", st.Name, err)
 	}
@@ -106,9 +180,15 @@ func (s *Store) ListStations(ctx context.Context) ([]Station, error) {
 // the operator touched.
 func (s *Store) UpdateStation(ctx context.Context, st Station) error {
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE stations SET name = ?, genre = ?, mood = ?, jock_id = ?, enabled = ?
+		UPDATE stations SET name = ?, genre = ?, mood = ?, jock_id = ?, enabled = ?,
+		                    brief = ?, year_min = ?, year_max = ?,
+		                    tempo_min = ?, tempo_max = ?,
+		                    duration_min_s = ?, duration_max_s = ?
 		 WHERE id = ?`,
-		st.Name, st.Genre, nullable(st.Mood), nullable(st.JockID), st.Enabled, st.ID)
+		st.Name, st.Genre, nullable(st.Mood), nullable(st.JockID), st.Enabled,
+		nullable(st.Brief), nullableInt(st.YearMin), nullableInt(st.YearMax),
+		nullableFloat(st.TempoMin), nullableFloat(st.TempoMax),
+		nullableFloat(st.DurationMinS), nullableFloat(st.DurationMaxS), st.ID)
 	if err != nil {
 		return fmt.Errorf("store: updating station %d: %w", st.ID, err)
 	}
@@ -264,12 +344,18 @@ func (s *Store) setFlag(ctx context.Context, col string, stationID, trackID int6
 // so one NULL-handling rule serves both.
 func scanStation(sc interface{ Scan(...any) error }) (Station, error) {
 	var st Station
-	var mood, jock sql.NullString
+	var mood, jock, brief sql.NullString
+	var yearMin, yearMax sql.NullInt64
+	var tempoMin, tempoMax, durMin, durMax sql.NullFloat64
 	var created int64
-	if err := sc.Scan(&st.ID, &st.Name, &st.Genre, &mood, &jock, &st.Enabled, &created); err != nil {
+	if err := sc.Scan(&st.ID, &st.Name, &st.Genre, &mood, &jock, &st.Enabled, &created,
+		&brief, &yearMin, &yearMax, &tempoMin, &tempoMax, &durMin, &durMax); err != nil {
 		return Station{}, err
 	}
-	st.Mood, st.JockID = mood.String, jock.String
+	st.Mood, st.JockID, st.Brief = mood.String, jock.String, brief.String
+	st.YearMin, st.YearMax = int(yearMin.Int64), int(yearMax.Int64)
+	st.TempoMin, st.TempoMax = tempoMin.Float64, tempoMax.Float64
+	st.DurationMinS, st.DurationMaxS = durMin.Float64, durMax.Float64
 	st.CreatedAt = time.Unix(created, 0)
 	return st, nil
 }

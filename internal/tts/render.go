@@ -14,6 +14,7 @@ import (
 	"strconv"
 
 	"github.com/andrewloable/jockora/internal/mix"
+	"github.com/andrewloable/jockora/internal/say"
 )
 
 // Render turns a break script into a WAV the mixer can read directly.
@@ -30,7 +31,17 @@ import (
 // ffmpeg does all of it, out of process, as everywhere else in Jockora: it is
 // GPL and must never be linked in.
 func Render(ctx context.Context, s *Sidecar, text, voice, outPath string) (durationSeconds float64, err error) {
-	raw, err := s.Synthesize(ctx, text, voice)
+	// SPOKEN FORM, and only here. The DJ said "nineteen hundred and ninety
+	// three" for 1993 because kokoro_server.py does no number normalisation at
+	// all and the model's own spelling is no better.
+	//
+	// NOT EARLIER, and this is the part that matters: the said-lines index
+	// records the break text and the length check counts its words, so
+	// normalising before either would make the stored text differ from what the
+	// validator saw. This is the last point before the audio, and it covers DJ
+	// breaks, adverts and the voice preview because all three arrive through
+	// here. Jockora-hm2.
+	raw, err := s.Synthesize(ctx, say.SpeakableText(text), voice)
 	if err != nil {
 		return 0, err
 	}

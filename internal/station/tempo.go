@@ -56,8 +56,18 @@ const anyTempoLo, anyTempoHi = 0, 100000
 
 // tempoBounds is what the filter passes to SQL: the mood's range, or bounds
 // nothing can fall outside.
-func tempoBounds(moods []string) (lo, hi float64) {
-	if lo, hi, ok := TempoRange(moods); ok {
+// REPLACEMENT, NOT INTERSECTION, and this is the whole decision.
+//
+// Five of sixteen moods imply a tempo. Intersecting an explicit 120-180 with
+// calm's 50-95 gives an EMPTY station, and an operator who wrote "calm but
+// driving" would get silence with nothing on screen to explain it. The explicit
+// range is the operator's own words and it wins; with none set, the mood's
+// implication is exactly today's behaviour.
+func tempoBounds(f Filter) (lo, hi float64) {
+	if f.TempoMin != 0 || f.TempoMax != 0 {
+		return bounds(f.TempoMin, f.TempoMax, anyTempoLo, anyTempoHi)
+	}
+	if lo, hi, ok := TempoRange(f.Moods); ok {
 		return lo, hi
 	}
 	return anyTempoLo, anyTempoHi

@@ -430,6 +430,7 @@ func post(t *testing.T, s *Server, path, body string, header ...string) *httptes
 type fakeAdmin struct {
 	cadence   int
 	enriching bool
+	said      string
 	err       error
 }
 
@@ -441,7 +442,13 @@ func (f *fakeAdmin) SetCadence(n int) error {
 	f.cadence = n
 	return nil
 }
-func (f *fakeAdmin) SetEnriching(on bool) error { f.enriching = on; return f.err }
+func (f *fakeAdmin) SetEnriching(on bool) (string, error) {
+	f.enriching = on
+	if f.said != "" {
+		return f.said, f.err
+	}
+	return "Enrichment running.", f.err
+}
 
 // oldTokenHeader is the header the shared-secret path used to accept. Spelled
 // out here rather than imported, because the constant it came from is deleted:

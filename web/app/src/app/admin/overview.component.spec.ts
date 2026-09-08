@@ -84,6 +84,53 @@ describe('Overview', () => {
     expect(fixture.nativeElement.querySelector('[data-enrichment-health]')).toBeNull();
   });
 
+  // ------------------------------------------------------ enrichment restart --
+  //
+  // Jockora-e9a.52. This button has been on the page since the beginning and
+  // set a boolean nothing was reading once the worker had exited. During the
+  // outage of 2026-09-08 it sat there looking like the fix, did nothing, and
+  // reported success.
+
+  it('enrichment restart names what the button is about to do', () => {
+    const stopped = mounted({
+      library: { tracks: 7595, enriched: 3923 },
+      enriching: true,
+      enrichment_stopped: 'enrichment gave up: rejected the API key',
+    });
+    // "Resume" over a dead worker and "Resume" over a paused one are different
+    // promises. The operator cannot tell which they are about to get.
+    expect(stopped.nativeElement.querySelector('[data-resume]').textContent).toContain('Restart');
+
+    const paused = mounted({ library: { tracks: 7595, enriched: 3923 }, enriching: false });
+    expect(paused.nativeElement.querySelector('[data-resume]').textContent).toContain('Resume');
+    expect(paused.nativeElement.querySelector('[data-resume]').textContent).not.toContain(
+      'Restart',
+    );
+  });
+
+  it('enrichment restart repeats what the server says it did', () => {
+    const fixture = mounted({
+      library: { tracks: 7595, enriched: 3923 },
+      enriching: true,
+      enrichment_stopped: 'enrichment gave up: rejected the API key',
+    });
+    fixture.nativeElement.querySelector('[data-resume]').click();
+    ctrl.expectOne('/admin/enriching').flush({
+      said: 'Enrichment restarted. It had stopped; watch the dossier count.',
+    });
+    // Re-read, because the state it is reporting has just changed.
+    ctrl.expectOne('/admin/overview.json').flush({
+      library: { tracks: 7595, enriched: 3923 },
+      enriching: true,
+    });
+    fixture.detectChanges();
+    // The SERVER's words, not a guess made on this side: a restart that finds
+    // nothing to do and one that brings a dead worker back look identical from
+    // here, and the difference is exactly what the operator needs.
+    expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('restarted');
+    expect(fixture.nativeElement.querySelector('[data-enrichment-health]')).toBeNull();
+  });
+
   it('renders the overview as rows', () => {
     const text = mounted().nativeElement.querySelector('[data-overview]').textContent;
     expect(text).toContain('library.tracks');
@@ -130,6 +177,8 @@ describe('Overview', () => {
     const paused = ctrl.expectOne('/admin/enriching');
     expect(paused.request.body).toEqual({ enriching: false });
     paused.flush(null);
+    // The page re-reads after a toggle: what it is reporting has just changed.
+    ctrl.expectOne('/admin/overview.json').flush({ library: { tracks: 7595, enriched: 412 } });
     fixture.detectChanges();
     // Saying the stream is unaffected is the point: an operator pausing
     // enrichment is handing the machine back for an evening, not stopping the
@@ -140,6 +189,7 @@ describe('Overview', () => {
     const req = ctrl.expectOne('/admin/enriching');
     expect(req.request.body).toEqual({ enriching: true });
     req.flush(null);
+    ctrl.expectOne('/admin/overview.json').flush({ library: { tracks: 7595, enriched: 412 } });
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('running');
   });

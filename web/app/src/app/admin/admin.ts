@@ -5,8 +5,10 @@ import { Sources } from './sources.component';
 import { Stations } from './stations.component';
 import { Playlist } from './playlist.component';
 import { Jocks } from './jocks.component';
+import { Ads } from './ads.component';
 import { Users } from './users.component';
 import { LLM } from './llm.component';
+import { Logs } from './logs.component';
 import { ThemeToggle } from '../theme';
 
 const sections = [
@@ -15,8 +17,10 @@ const sections = [
   'stations',
   'playlist',
   'jocks',
+  'ads',
   'accounts',
   'model',
+  'logs',
 ] as const;
 type Section = (typeof sections)[number];
 
@@ -30,7 +34,7 @@ type Section = (typeof sections)[number];
 @Component({
   selector: 'app-admin',
   standalone: true,
-  imports: [Overview, Sources, Stations, Playlist, Jocks, Users, LLM, ThemeToggle],
+  imports: [Overview, Sources, Stations, Playlist, Jocks, Ads, Users, LLM, Logs, ThemeToggle],
   template: `
     <header data-masthead>
       <!-- "operator console", not a name. It read as one -- reported as "i
@@ -87,8 +91,14 @@ type Section = (typeof sections)[number];
       @case ('jocks') {
         <app-jocks />
       }
+      @case ('ads') {
+        <app-ads />
+      }
       @case ('model') {
         <app-llm />
+      }
+      @case ('logs') {
+        <app-logs />
       }
       @default {
         <!-- 'accounts'. @default rather than @case so the switch is exhaustive:
