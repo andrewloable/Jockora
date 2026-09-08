@@ -155,6 +155,11 @@ func buildStationBreaks(cfg *config.Config, lib *app.Library, log *slog.Logger,
 	}
 
 	pipeline := &station.Pipeline{
+		// SET HERE AND NEVER AGAIN. It used to be rebound on every feed, on the
+		// feed goroutine, while the break ticker read it on its own -- a race
+		// the detector finds in a few hundred iterations. A pipeline and its
+		// writer are built together, so there is no window to race in.
+		Writer: writer,
 		// THIS is where config.BreakEveryNTracks finally has a consumer. It was
 		// parsed, env-mapped and defaulted since the spine and read by nothing.
 		Cadence:   station.NewCadence(cfg.BreakEveryNTracks),

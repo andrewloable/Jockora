@@ -20,11 +20,7 @@ import (
 // A gzipped export of a very large library is a few tens of megabytes; this is
 // generous against that and small enough that a mistaken upload cannot fill the
 // disk of a machine whose whole job is to keep playing.
-var MaxImportBytes int64 = 256 << 20
-
-// setMaxImport lowers the cap so a test can prove the streaming backstop
-// without a quarter of a gigabyte of fixture.
-func setMaxImport(n int64) { MaxImportBytes = n }
+const MaxImportBytes int64 = 256 << 20
 
 // EnrichmentPort moves enrichment between installs.
 //
@@ -38,6 +34,15 @@ type EnrichmentPort interface {
 
 // SetEnrichmentPort wires export and import.
 func (s *Server) SetEnrichmentPort(p EnrichmentPort) { s.port = p }
+
+// maxImport is the upload cap. A field rather than a package variable so a test
+// can lower it without reaching into global state two tests would then share.
+func (s *Server) maxImport() int64 {
+	if s.importCap > 0 {
+		return s.importCap
+	}
+	return MaxImportBytes
+}
 
 // serveEnrichment handles /admin/enrichment/export and /import.
 func (s *Server) serveEnrichment(w http.ResponseWriter, r *http.Request, path string) {
@@ -82,13 +87,13 @@ func (s *Server) importEnrichment(w http.ResponseWriter, r *http.Request) {
 	// THE DECLARED LENGTH FIRST. Refusing a 4GB upload after streaming it is a
 	// refusal that already cost what it was meant to prevent, and a browser
 	// sending a file always says how big it is.
-	if r.ContentLength > MaxImportBytes {
+	if r.ContentLength > s.maxImport() {
 		http.Error(w, "that file is too large to be an enrichment export",
 			http.StatusRequestEntityTooLarge)
 		return
 	}
 	// And the reader as the backstop, for a request that does not say.
-	body := http.MaxBytesReader(w, r.Body, MaxImportBytes)
+	body := http.MaxBytesReader(w, r.Body, s.maxImport())
 	defer body.Close() //nolint:errcheck // request body
 
 	// OVERWRITE IS ASKED FOR EXPLICITLY. Filling holes is the default; an

@@ -551,6 +551,7 @@ func repeatsItself(text string, names []string) (string, bool) {
 	nameWords := nameWordSet(names)
 
 	first := map[string]int{}
+	seen := map[string]int{}
 	// Word POSITIONS inside a repeated run, deduplicated: a phrase repeated
 	// once produces several overlapping grams, and counting the grams would
 	// make one device look like four.
@@ -561,13 +562,23 @@ func repeatsItself(text string, names []string) (string, bool) {
 		if len(nameWords) > 0 && allNameWords(g, nameWords) {
 			continue
 		}
-		at, seen := first[g]
-		if !seen {
+		seen[g]++
+		at, repeat := first[g]
+		if !repeat {
 			first[g] = i
 			continue
 		}
 		if worst == "" {
 			worst = g
+		}
+		// SAID THREE TIMES IS A LOOP whatever the share says. Share alone had a
+		// hole: a phrase repeated five times covers twenty words, which in a
+		// long break is under the threshold, so the more a stuck model wrote
+		// around its loop the safer the loop became. Three is measured, not
+		// picked -- across every device caught live, no gram appears twice
+		// over.
+		if seen[g] >= 3 {
+			return g, true
 		}
 		for k := 0; k < GramSize; k++ {
 			covered[at+k] = true

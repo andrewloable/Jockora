@@ -159,10 +159,15 @@ const REFRESH_MS = 10_000;
         <ul data-import-report>
           <li>{{ r.applied }} applied</li>
           <li>{{ r.had_dossier }} already had a dossier</li>
-          <li>{{ r.had_override }} left alone because you had edited the tags</li>
+          <!-- The RECORD is not left alone: its dossier still came in. What was
+               kept is the tag edit, which is the part somebody typed. -->
+          <li>{{ r.had_override }} kept your own tag edits</li>
           <li>{{ r.unmatched }} unmatched, no file at that path here</li>
           <li>{{ r.wrong_track }} refused, a different recording at that path</li>
-          <li>{{ r.rejected }} rejected</li>
+          <!-- A record can be PARTLY applied: a tag list nothing survived is
+               refused while the dossier beside it lands. The refusal is what
+               gets reported, because the file is what you can go and look at. -->
+          <li>{{ r.rejected }} refused, something in the file could not be used</li>
           <li>{{ r.unreadable }} unreadable lines</li>
         </ul>
       }

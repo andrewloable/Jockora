@@ -3,7 +3,10 @@
 
 package dj
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // A DEVICE IS NOT A LOOP.
 //
@@ -78,4 +81,58 @@ func TestDegenerateCountsTheShareNotTheHit(t *testing.T) {
 	if _, bad := repeatsItself(short, nil); !bad {
 		t.Error("a break that is only its own repeat was allowed")
 	}
+}
+
+// TestDegenerateCatchesALoopHidingInALongBreak: SHARE alone has a hole. A
+// four-word phrase said five times covers twenty words, which in a
+// hundred-and-twenty-word break is under the threshold -- so the more a stuck
+// model wrote around its loop, the safer the loop became.
+//
+// Occurrences close it, and the number is measured rather than picked: across
+// every device caught live, no gram appears more than TWICE. Three is not a
+// turn of phrase.
+func TestDegenerateCatchesALoopHidingInALongBreak(t *testing.T) {
+	filler := []string{
+		"the weather outside has been doing something peculiar all week long friends",
+		"my neighbour bought a trombone and regrets nothing about that decision yet",
+		"there is a sandwich in the studio fridge with somebody else s name on",
+		"anyway that was a record and this is another record coming up shortly",
+		"i have been awake since four and it shows in ways i cannot hide",
+		"somebody wrote in to ask about the thing and i have lost the letter",
+	}
+	text := "boom now we ride"
+	for _, f := range filler {
+		text += " " + f + " boom now we ride"
+	}
+	if got := len(strings.Fields(text)); got < 100 {
+		t.Fatalf("the fixture is only %d words; it has to be long enough to hide in", got)
+	}
+	if _, bad := repeatsItself(text, nil); !bad {
+		t.Error("a phrase said seven times went unflagged because the break was wordy")
+	}
+}
+
+// TestDegenerateCatchesAGramSaidThreeTimes: the occurrence rule on its own,
+// where share would not reach.
+func TestDegenerateCatchesAGramSaidThreeTimes(t *testing.T) {
+	// Across every device measured live, no gram appears more than TWICE.
+	// Three is not a turn of phrase, however much text surrounds it.
+	for _, d := range devices {
+		if _, n := worstRepeat(d.text); n > 2 {
+			t.Fatalf("a real device repeats a gram %d times; the rule below would drop it", n)
+		}
+	}
+}
+
+// worstRepeat is the most-repeated gram in a text and how often it appears.
+func worstRepeat(text string) (string, int) {
+	counts := map[string]int{}
+	best, n := "", 0
+	for _, g := range NGrams(spokenWords(text), GramSize) {
+		counts[g]++
+		if counts[g] > n {
+			best, n = g, counts[g]
+		}
+	}
+	return best, n
 }

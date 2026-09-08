@@ -82,15 +82,17 @@ type Server struct {
 
 	// signer and users are sign-in. Nil until SetAuth, which is the spike
 	// path: no database means no accounts to check against.
-	signer     *auth.Signer
-	users      Users
-	sources    Sources
-	rescan     Rescanner
-	stations   Stations
-	jocks      Jocks
-	voices     Voices
-	personas   Personas
-	port       EnrichmentPort
+	signer   *auth.Signer
+	users    Users
+	sources  Sources
+	rescan   Rescanner
+	stations Stations
+	jocks    Jocks
+	voices   Voices
+	personas Personas
+	port     EnrichmentPort
+	// importCap lowers MaxImportBytes, for tests only.
+	importCap  int64
 	playlists  Playlists
 	regenerate Regenerator
 	runtimes   Runtimes

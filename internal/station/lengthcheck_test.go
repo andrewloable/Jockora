@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/andrewloable/jockora/internal/mix"
@@ -216,4 +217,43 @@ func TestLengthDropAlwaysSaysWhy(t *testing.T) {
 	if !got.Dropped || got.Reason == "" {
 		t.Errorf("overlong break dropped with reason %q, want a reason", got.Reason)
 	}
+}
+
+// TestLengthCheckRefusesWithoutTheParts: both halves of a pipeline built wrong.
+// SAID, NOT DEREFERENCED -- this runs on the break goroutine, where a panic is
+// caught by a recover that stops generation for the life of the process.
+func TestLengthCheckRefusesWithoutTheParts(t *testing.T) {
+	ctx := context.Background()
+
+	got, err := LengthCheck{}.Enforce(ctx, mix.PlacementBetween, 20)
+	if err != nil {
+		t.Fatalf("Enforce with no writer: %v", err)
+	}
+	if !got.Dropped || !strings.Contains(got.Reason, "no writer") {
+		t.Errorf("= %+v, want a drop naming the missing writer", got)
+	}
+
+	// A writer but nothing to render with: the write still happens, because the
+	// break's track context is applied as it does.
+	wrote := false
+	got, err = LengthCheck{Writer: writerFunc(func(context.Context, int, mix.Placement) (string, error) {
+		wrote = true
+		return "a line", nil
+	})}.Enforce(ctx, mix.PlacementBetween, 20)
+	if err != nil {
+		t.Fatalf("Enforce with no renderer: %v", err)
+	}
+	if !wrote {
+		t.Error("the writer was skipped, so a break's context would never be applied")
+	}
+	if !got.Dropped || !strings.Contains(got.Reason, "no renderer") {
+		t.Errorf("= %+v, want a drop naming the missing renderer", got)
+	}
+}
+
+// writerFunc adapts a function to the Writer a LengthCheck needs.
+type writerFunc func(ctx context.Context, target int, placement mix.Placement) (string, error)
+
+func (f writerFunc) Write(ctx context.Context, target int, placement mix.Placement) (string, error) {
+	return f(ctx, target, placement)
 }

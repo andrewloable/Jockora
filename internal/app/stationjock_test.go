@@ -77,7 +77,7 @@ func TestStationJockOnAir(t *testing.T) {
 
 	a.applyStationJock(context.Background(), id)
 
-	if got := a.currentPersona().ID(); got != "sunny_marchetti" {
+	if got := a.breaksFor(id).writer.CurrentPersona().ID(); got != "sunny_marchetti" {
 		t.Errorf("persona on air = %q, want the station's own jock", got)
 	}
 	// The VOICE is the half the operator previewed, and it travels with the
@@ -98,7 +98,7 @@ func TestStationJockOnAirKeepsSeedWhenUnassigned(t *testing.T) {
 
 	a.applyStationJock(context.Background(), id)
 
-	if got := a.currentPersona().ID(); got != "dutch_mahoney" {
+	if got := a.breaksFor(id).writer.CurrentPersona().ID(); got != "dutch_mahoney" {
 		t.Errorf("persona on air = %q, want the boot-time seed kept", got)
 	}
 }
@@ -106,7 +106,7 @@ func TestStationJockOnAirKeepsSeedWhenUnassigned(t *testing.T) {
 func TestStationJockOnAirSurvivesAMissingStation(t *testing.T) {
 	a, _ := jockApp(t)
 	a.applyStationJock(context.Background(), 404)
-	if got := a.currentPersona().ID(); got != "dutch_mahoney" {
+	if got := a.breaksFor(404).writer.CurrentPersona().ID(); got != "dutch_mahoney" {
 		t.Errorf("persona on air = %q, want it left alone", got)
 	}
 }
@@ -127,9 +127,9 @@ func TestStationJockOnAirLeavesTheSameJockAlone(t *testing.T) {
 	id := stationWithJock(t, s, "sunny_marchetti")
 	a.applyStationJock(context.Background(), id)
 
-	was := a.currentPersona()
+	was := a.breaksFor(id).writer.CurrentPersona()
 	a.applyStationJock(context.Background(), id)
-	if a.currentPersona() != was {
+	if a.breaksFor(id).writer.CurrentPersona() != was {
 		t.Error("the persona was replaced with an identical one")
 	}
 }

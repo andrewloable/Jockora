@@ -152,8 +152,9 @@ func Export(ctx context.Context, s *store.Store, w io.Writer) error {
 		  LEFT JOIN dossiers d    ON d.track_id = t.id
 		  LEFT JOIN track_tags o  ON o.track_id = t.id
 		  LEFT JOIN enrich_cost c ON c.track_id = t.id
-		 WHERE d.track_id IS NOT NULL OR o.track_id IS NOT NULL
+		 WHERE d.track_id IS NOT NULL OR o.track_id IS NOT NULL OR c.track_id IS NOT NULL
 		    OR t.loudness_lufs IS NOT NULL OR t.bpm IS NOT NULL
+		    OR t.ramp_s IS NOT NULL OR t.outro_s IS NOT NULL
 		 ORDER BY t.id`)
 	if err != nil {
 		return fmt.Errorf("enrich: reading the library to export: %w", err)
@@ -348,68 +349,141 @@ func apply(ctx context.Context, s *store.Store, rec Record, overwrite bool, rep 
 
 	applied := false
 	if rec.Analysis != nil {
-		applyAnalysis(ctx, s, id, rec.Analysis)
-		applied = true
+		// THE ERROR DECIDES. Throwing it away meant a record whose write the
+		// database refused was still counted as applied, and the report is the
+		// whole point of this endpoint.
+		if applyAnalysis(ctx, s, id, rec.Analysis, overwrite) == nil {
+			applied = true
+		}
 	}
 	if rec.Cost != nil {
-		_, _ = s.DB().ExecContext(ctx, `
-			INSERT INTO enrich_cost (track_id, tokens, wall_seconds) VALUES (?, ?, ?)
-			ON CONFLICT(track_id) DO UPDATE SET
-				tokens = excluded.tokens, wall_seconds = excluded.wall_seconds`,
-			id, rec.Cost.Tokens, rec.Cost.WallSeconds) //nolint:errcheck // counted below
+		// FILL A HOLE unless asked otherwise, like everything else here. What
+		// the other install spent is not a measurement of this library.
+		clause := `INSERT INTO enrich_cost (track_id, tokens, wall_seconds) VALUES (?, ?, ?)
+			ON CONFLICT(track_id) DO NOTHING`
+		if overwrite {
+			clause = `INSERT INTO enrich_cost (track_id, tokens, wall_seconds) VALUES (?, ?, ?)
+				ON CONFLICT(track_id) DO UPDATE SET
+					tokens = excluded.tokens, wall_seconds = excluded.wall_seconds`
+		}
+		// COUNTED, like everything else: the export carries a track whose only
+		// enrichment is what the pass cost, so the import needs somewhere to
+		// put it other than "rejected".
+		if _, err := s.DB().ExecContext(ctx, clause,
+			id, rec.Cost.Tokens, rec.Cost.WallSeconds); err == nil {
+			applied = true
+		}
 	}
 
-	switch {
-	case rec.Tags == nil:
-	case hasOverride(ctx, s, id):
-		// NEVER. Somebody sat and typed the local one.
-		rep.HadOverride++
-		return
-	default:
-		if err := s.SetTrackTags(ctx, id, rec.Tags.Genres, rec.Tags.Moods); err == nil {
-			applied = true
+	// THE TAGS AND THE DOSSIER ARE SEPARATE DECISIONS. Refusing to overwrite a
+	// local tag edit is not a reason to throw away the enrichment that arrived
+	// with it -- and returning here did exactly that, on precisely the tracks
+	// an operator had cared enough about to file by hand.
+	heldBack, refused := "", false
+	if rec.Tags != nil {
+		switch {
+		case hasOverride(ctx, s, id):
+			// NEVER. Somebody sat and typed the local one.
+			heldBack = "override"
+		default:
+			// THE SAME GATE THE DOSSIER GOES THROUGH, and for a stronger
+			// reason: the override outranks the enrichment everywhere in this
+			// codebase, and a hand-written file could put anything in it. An
+			// out-of-vocabulary tag is not cosmetic -- stations match on the
+			// closed vocabulary, so the track would belong to no station at all.
+			genres := filterVocab(rec.Tags.Genres, stationTagSet, maxTags)
+			moods := filterVocab(rec.Tags.Moods, moodSet, maxTags)
+			// NOTHING SURVIVED A LIST THAT HAD SOMETHING IN IT. Writing the
+			// empty result would be an override saying "this is not anything",
+			// which outranks a perfectly good dossier and removes the track
+			// from every station. An override that ARRIVED empty is a different
+			// statement and is honoured.
+			// EITHER LIST. A mood list that survived nothing is the same
+			// mistake with a smaller blast radius: the track drops out of every
+			// mood-narrowed station instead of out of every station.
+			if (len(genres) == 0 && len(rec.Tags.Genres) > 0) ||
+				(len(moods) == 0 && len(rec.Tags.Moods) > 0) {
+				refused = true
+			} else if err := s.SetTrackTags(ctx, id, genres, moods); err == nil {
+				applied = true
+			}
 		}
 	}
 
 	if rec.Dossier != nil {
 		switch {
 		case hasDossier(ctx, s, id) && !overwrite:
-			rep.HadDossier++
+			if heldBack == "" {
+				heldBack = "dossier"
+			}
+		case !storeImported(ctx, s, id, rec):
+			rep.Rejected++
 			return
 		default:
-			if !storeImported(ctx, s, id, rec) {
-				rep.Rejected++
-				return
-			}
 			applied = true
 		}
 	}
 
-	if applied {
+	// ONE OUTCOME PER RECORD, and the one that says why something was left
+	// alone wins: an operator reading the report needs to know their own edit
+	// stood, not that some other part of the same record landed.
+	// ONE OUTCOME PER RECORD, ordered by what the operator most needs to know.
+	// A record can be partly applied -- a junk tag list refused while its
+	// dossier lands -- and when that happens the REFUSAL is reported, because
+	// the file is the thing they can go and look at. The data still landed.
+	switch {
+	case refused:
+		rep.Rejected++
+	case heldBack == "override":
+		rep.HadOverride++
+	case heldBack == "dossier":
+		rep.HadDossier++
+	case applied:
 		rep.Applied++
-		return
+	default:
+		rep.Rejected++
 	}
-	rep.Rejected++
 }
 
-func applyAnalysis(ctx context.Context, s *store.Store, id int64, a *PortAnalysis) {
+// applyAnalysis merges the measured audio.
+//
+// FILLS HOLES unless the operator asked to overwrite: a loudness measured HERE
+// came from this copy of the file, and an imported one came from a different
+// encoding of the same recording. The duration check proves it is the same
+// song; it does not prove it is the same master.
+func applyAnalysis(ctx context.Context, s *store.Store, id int64, a *PortAnalysis, overwrite bool) error {
 	noFade := 0
 	if a.NoCrossfadeNext {
 		noFade = 1
 	}
-	// COALESCE on the way in: an export carrying a zero for something it never
-	// measured must not erase a local measurement.
-	_, _ = s.DB().ExecContext(ctx, `
+	// force is 1 when the operator asked for the incoming numbers; otherwise a
+	// column that already holds a measurement keeps it.
+	force := 0
+	if overwrite {
+		force = 1
+	}
+	// Two guards on every column: an export carrying a zero for something it
+	// never measured must not erase a local measurement either.
+	_, err := s.DB().ExecContext(ctx, `
 		UPDATE tracks SET
-			loudness_lufs   = CASE WHEN ? != 0 THEN ? ELSE loudness_lufs END,
-			ramp_s          = CASE WHEN ? != 0 THEN ? ELSE ramp_s END,
-			outro_s         = CASE WHEN ? != 0 THEN ? ELSE outro_s END,
-			ramp_confidence = CASE WHEN ? != '' THEN ? ELSE ramp_confidence END,
-			bpm             = CASE WHEN ? != 0 THEN ? ELSE bpm END,
-			no_crossfade_next = ?
+			loudness_lufs   = CASE WHEN ? != 0  AND (loudness_lufs IS NULL   OR ? = 1) THEN ? ELSE loudness_lufs END,
+			ramp_s          = CASE WHEN ? != 0  AND (ramp_s IS NULL          OR ? = 1) THEN ? ELSE ramp_s END,
+			outro_s         = CASE WHEN ? != 0  AND (outro_s IS NULL         OR ? = 1) THEN ? ELSE outro_s END,
+			ramp_confidence = CASE WHEN ? != '' AND (ramp_confidence IS NULL OR ? = 1) THEN ? ELSE ramp_confidence END,
+			bpm             = CASE WHEN ? != 0  AND (bpm IS NULL             OR ? = 1) THEN ? ELSE bpm END,
+			-- SET, NEVER CLEARED, like every column above it. A record that
+			-- never measured the join carries false, and writing that flat
+			-- turned a locally measured gapless album pair back into a
+			-- crossfade -- audible, on exactly the records it matters for.
+			no_crossfade_next = CASE WHEN ? = 1 THEN 1 ELSE no_crossfade_next END
 		 WHERE id = ?`,
-		a.LoudnessLUFS, a.LoudnessLUFS, a.RampS, a.RampS, a.OutroS, a.OutroS,
-		a.RampConfidence, a.RampConfidence, a.BPM, a.BPM, noFade, id) //nolint:errcheck // best effort
+		a.LoudnessLUFS, force, a.LoudnessLUFS,
+		a.RampS, force, a.RampS,
+		a.OutroS, force, a.OutroS,
+		a.RampConfidence, force, a.RampConfidence,
+		a.BPM, force, a.BPM,
+		noFade, id)
+	return err
 }
 
 // storeImported puts an imported dossier through the SAME gate the model's own

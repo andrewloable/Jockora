@@ -271,3 +271,42 @@ func TestDialGivesNoJockToEitherCatchAll(t *testing.T) {
 		t.Errorf("a catch-all is not last: %+v", d.Stations)
 	}
 }
+
+// TestDialCountsTheOperatorsOwnFiling: the dial is proposed from what the
+// library sounds like, and a hand edit outranks the enrichment everywhere else.
+// It can pre-exist the first station too -- an enrichment file imported into a
+// fresh install carries overrides with it.
+func TestDialCountsTheOperatorsOwnFiling(t *testing.T) {
+	ctx := context.Background()
+	// Twelve rock tracks, of which eleven are re-filed as folk by hand. Both
+	// buckets have to clear MinStationTracks to appear on the dial.
+	moods := make([]string, 12)
+	for i := range moods {
+		moods[i] = "raw"
+	}
+	s := dialStore(t, map[string][]string{"rock": moods}, 0)
+	for id := int64(1); id <= 11; id++ {
+		if err := s.SetTrackTags(ctx, id, []string{"folk"}, []string{"gentle"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	d, err := ProposeDial(ctx, s, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rock, folk int
+	for _, st := range d.Stations {
+		switch st.Tag {
+		case "rock":
+			rock = st.Tracks
+		case "folk":
+			folk = st.Tracks
+		}
+	}
+	// Folk is a station; the one rock track left is below MinStationTracks and
+	// correctly does not get one, which is the same rule as any thin bucket.
+	if folk != 11 || rock != 0 {
+		t.Errorf("dial proposed rock=%d folk=%d, want the re-filed tracks counted as folk", rock, folk)
+	}
+}

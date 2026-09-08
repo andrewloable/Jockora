@@ -89,10 +89,13 @@ func ProposeDial(ctx context.Context, s *store.Store, personas []*dj.Persona) (D
 		return d, fmt.Errorf("station: counting tracks: %w", err)
 	}
 
+	// THROUGH effective_tags: an operator's own filing outranks the enrichment
+	// everywhere else, and it can pre-exist the first station when the
+	// enrichment was imported rather than run here.
 	rows, err := s.DB().QueryContext(ctx, `
-		SELECT d.json FROM dossiers d
-		  JOIN tracks t ON t.id = d.track_id
-		 WHERE t.playable = 1`)
+		SELECT e.station_tags, e.mood FROM effective_tags e
+		  JOIN tracks t ON t.id = e.track_id
+		 WHERE t.playable = 1 AND e.station_tags != '[]'`)
 	if err != nil {
 		return d, fmt.Errorf("station: reading dossiers: %w", err)
 	}
@@ -101,14 +104,15 @@ func ProposeDial(ctx context.Context, s *store.Store, personas []*dj.Persona) (D
 	counts := map[string]int{}
 	moods := map[string]map[string]int{}
 	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
+		var rawTags, rawMood string
+		if err := rows.Scan(&rawTags, &rawMood); err != nil {
 			return d, err
 		}
 		var doc enrich.Dossier
-		if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		if json.Unmarshal([]byte(rawTags), &doc.StationTags) != nil {
 			continue // one unreadable row must not cost the whole dial
 		}
+		_ = json.Unmarshal([]byte(rawMood), &doc.Mood) //nolint:errcheck // a bad mood list is no moods
 		d.Enriched++
 
 		// A track with two tags belongs to BOTH stations. Stations are views of

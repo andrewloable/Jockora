@@ -233,6 +233,11 @@ type App struct {
 	// back to a station they were on expects.
 	breaksMu sync.Mutex
 	breaks   map[int64]*stationBreaks
+	// cadence is the operator's live choice, which a station coming up
+	// inherits. HERE rather than in cfg: cfg is the startup default, read
+	// without a lock all over this package, and writing it from an HTTP
+	// handler is a race this code has already met once -- see SetCadence.
+	cadence int
 
 	// stallUntil pauses the feeder, for the fault injection GATE 2 requires.
 	// Guarded because the signal handler and the feeder are different goroutines.
@@ -243,9 +248,10 @@ type App struct {
 	// schedules one window at startup and topUpBreaks continues from here.
 	nextBreak int64
 
-	nowMu     sync.Mutex
-	now       map[int64]nowPlaying
-	lastBreak *server.LastBreak
+	nowMu sync.Mutex
+	now   map[int64]nowPlaying
+	// lastBreaks is the most recent break PER STATION.
+	lastBreaks map[int64]*server.LastBreak
 
 	// enriching gates the background worker so an operator can hand the
 	// machine back for an evening without stopping the station.
@@ -329,7 +335,9 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 	}
 
 	a := &App{cfg: cfg, opts: opts, log: log, now: map[int64]nowPlaying{},
-		breaks: map[int64]*stationBreaks{}}
+		lastBreaks: map[int64]*server.LastBreak{},
+		breaks:     map[int64]*stationBreaks{},
+		cadence:    cfg.BreakEveryNTracks}
 
 	// THE SPIKE PATH keeps one runtime, started directly: no database means no
 	// stations, no listeners to count and nothing to reconcile. With a library
@@ -349,9 +357,18 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 	// caller cannot have the queue -- it is created above. Leaving it to be
 	// passed in produced a nil-pointer panic in the break goroutine that took
 	// the whole station off air.
+	// The single pair's pipeline gets its writer HERE, before anything runs, for
+	// the same reason the factory sets it at construction: assigning it later
+	// races with the goroutine that reads it.
+	if opts.Breaks != nil && opts.Breaks.Writer == nil {
+		opts.Breaks.Writer = opts.Writer
+	}
 	if opts.Breaks != nil && queue != nil {
 		opts.Breaks.Queue = queue
-		opts.Breaks.OnScheduled = a.recordBreak
+		// The spike path has exactly one station, and it is this one.
+		opts.Breaks.OnScheduled = func(text string, p mix.Placement) {
+			a.recordBreakOn(singleStationID, text, p)
+		}
 	}
 
 	if opts.BreakPath != "" && queue != nil {
@@ -513,7 +530,11 @@ func (a *App) applyStoredCadence(ctx context.Context, breaks *station.Pipeline) 
 		return
 	}
 	breaks.SetCadence(station.NewCadence(n))
+	// BOTH, and safely: this runs at startup before any goroutine exists, so
+	// the config default may be corrected here even though an HTTP handler
+	// must never touch it.
 	a.cfg.BreakEveryNTracks = n
+	a.setLiveCadence(n)
 	a.log.Info("break cadence restored", "every_n_tracks", n)
 }
 
@@ -677,8 +698,9 @@ func (a *App) breaksFor(id int64) *stationBreaks {
 		}
 		br := &stationBreaks{pipeline: pipeline, writer: writer}
 		// The operator's cadence applies to every station, including one that
-		// comes up long after they set it.
-		if n := a.cfg.BreakEveryNTracks; n > 0 {
+		// comes up long after they set it. Read under breaksMu, which this
+		// function already holds.
+		if n := a.cadence; n > 0 {
 			pipeline.SetCadence(station.NewCadence(n))
 		}
 		a.breaks[id] = br
@@ -692,6 +714,20 @@ func (a *App) breaksFor(id int64) *stationBreaks {
 	return br
 }
 
+// setLiveCadence records the operator's choice for stations not yet built.
+func (a *App) setLiveCadence(n int) {
+	a.breaksMu.Lock()
+	a.cadence = n
+	a.breaksMu.Unlock()
+}
+
+// liveCadenceSetting is that choice, or zero if nobody has made one.
+func (a *App) liveCadenceSetting() int {
+	a.breaksMu.Lock()
+	defer a.breaksMu.Unlock()
+	return a.cadence
+}
+
 // hasDJ reports whether this deployment can write breaks at all.
 //
 // A build with no persona, no language model or no speech sidecar runs as a
@@ -699,6 +735,16 @@ func (a *App) breaksFor(id int64) *stationBreaks {
 // than by testing one pipeline for nil, because with a library the pipelines
 // are built per station and none exists until one is on air.
 func (a *App) hasDJ() bool { return a.opts.NewBreaks != nil || a.opts.Breaks != nil }
+
+// existingBreaks is one station's machinery IF IT HAS ANY, and never builds it.
+//
+// The read-only half of breaksFor, for the paths a listener drives: polling a
+// status page must not allocate anything.
+func (a *App) existingBreaks(id int64) *stationBreaks {
+	a.breaksMu.Lock()
+	defer a.breaksMu.Unlock()
+	return a.breaks[id]
+}
 
 // eachBreaks runs fn over every station that has break machinery, so a setting
 // an operator changes once reaches all of them.
@@ -875,20 +921,32 @@ func dependencyHealth(inUse bool) string {
 	return "not configured"
 }
 
-// recordBreak remembers what the DJ last said, for /now.json and the page.
-func (a *App) recordBreak(text string, placement mix.Placement) {
+// recordBreakOn remembers what the DJ last said ON ONE STATION, for /now.json
+// and for the thumbs-down that rates it.
+func (a *App) recordBreakOn(stationID int64, text string, placement mix.Placement) {
 	a.nowMu.Lock()
-	a.lastBreak = &server.LastBreak{
+	// A zero-valued App is a legitimate thing to hold, and writing into a nil
+	// map panics -- in the goroutine that airs breaks, which would take the
+	// station off air.
+	if a.lastBreaks == nil {
+		a.lastBreaks = map[int64]*server.LastBreak{}
+	}
+	// PER STATION. /now.json carries the last thing the DJ said and it is what
+	// the thumbs-down rates, so one global copy showed a listener on one
+	// station a break that aired on another, in a different jock's voice, about
+	// records they never heard.
+	a.lastBreaks[stationID] = &server.LastBreak{
 		Text:      text,
 		Placement: placement.String(),
 		AiredAt:   time.Now().Unix(),
 	}
 	a.nowMu.Unlock()
 
-	if a.opts.Writer != nil {
-		// Clears the cold open: the next break is no longer the first thing a
-		// listener hears after pressing play.
-		a.opts.Writer.Aired()
+	// THIS STATION'S writer, not the shared one. Clearing the cold open on a
+	// writer nothing else uses left every station permanently cold, writing
+	// every break as the first thing a listener hears.
+	if br := a.breaksFor(stationID); br != nil && br.writer != nil {
+		br.writer.Aired()
 	}
 }
 
@@ -974,12 +1032,17 @@ func (a *App) Status() server.Status {
 	if np, ok := a.now[a.primaryID()]; ok && (np.artist != "" || np.title != "") {
 		st.Now = &server.Track{Artist: np.artist, Title: np.title}
 	}
-	st.LastBreak = a.lastBreak
+	st.LastBreak = a.lastBreaks[a.primaryID()]
 	a.nowMu.Unlock()
 
 	// THE PRIMARY STATION'S, which is the spike path's only one. A listener
 	// asks about a station by name; see StatusForStation.
-	if br := a.breaksFor(a.primaryID()); br != nil {
+	//
+	// existing, not breaksFor: a status poll must not BUILD a station's DJ as a
+	// side effect of being read. Every listener polls this every few seconds,
+	// and a station nobody has tuned to should not acquire a writer, a session
+	// and a row in the break stats because somebody looked at the page.
+	if br := a.existingBreaks(a.primaryID()); br != nil {
 		// Told what the mixer queue is holding, because the pipeline is handed
 		// a queue only once a station is on air and must not reach for one.
 		br.pipeline.SetScheduled(a.PendingBreaks())
@@ -1059,6 +1122,7 @@ func (a *App) StatusForStation(id int64) server.Status {
 
 	a.nowMu.Lock()
 	np, ok := a.now[id]
+	st.LastBreak = a.lastBreaks[id]
 	a.nowMu.Unlock()
 	if ok && (np.artist != "" || np.title != "") {
 		st.Now = &server.Track{Artist: np.artist, Title: np.title}
@@ -1072,7 +1136,7 @@ func (a *App) StatusForStation(id int64) server.Status {
 			// THIS STATION'S DJ, not the first one that happened to be built.
 			// "The DJ speaks after this track" on a station whose DJ is not
 			// writing anything is a promise the stream does not keep.
-			if br := a.breaksFor(id); br != nil {
+			if br := a.existingBreaks(id); br != nil {
 				br.pipeline.SetScheduled(rt.Queue().Pending())
 				st.NextBreak = string(br.pipeline.Outlook())
 			}
@@ -1157,7 +1221,11 @@ func (a *App) Run(ctx context.Context) error {
 	// listenable from the first minute -- an unenriched track simply gets
 	// personality-only talk, which is what the empty dossier means everywhere
 	// else in this design.
-	if a.opts.Breaks != nil {
+	if a.hasDJ() {
+		// hasDJ, not one pipeline being non-nil: with a library the pipelines
+		// are built PER STATION and none exists until one is on air, so asking
+		// the old question would have left the ticker unstarted and the DJ
+		// silent on a deployment that supplied only the factory.
 		go a.generateBreaks(ctx)
 	}
 
@@ -1266,8 +1334,13 @@ func (a *App) feedFromLibrary(ctx context.Context, rt *station.Runtime) {
 		// THE QUEUE OF THE STATION ACTUALLY ON AIR. Every station owns its own
 		// ring and queue, and a runtime builds a fresh queue when it restarts,
 		// so this is bound per feed rather than once.
-		br.pipeline.SetQueue(rt.Queue(), a.recordBreak)
-		br.pipeline.Writer = br.writer
+		br.pipeline.SetQueue(rt.Queue(), func(text string, p mix.Placement) {
+			a.recordBreakOn(rt.StationID(), text, p)
+		})
+		// THE WRITER IS NOT REBOUND HERE. It was, on every feed start, while
+		// the break ticker read it on its own goroutine -- a data race on the
+		// field the break's track context is written through. The pipeline is
+		// built with its writer instead.
 		a.applyStationJock(ctx, rt.StationID())
 
 		// The boundary counter below starts at zero, so the cadence has to
@@ -1823,16 +1896,22 @@ func (a *App) Feedback(ctx context.Context, userID, stationID int64, verdict str
 	if a.opts.Library == nil || a.opts.Library.Store == nil {
 		return fmt.Errorf("no store to record feedback in")
 	}
+	// THE BREAK THAT AIRED ON THE STATION THEY WERE LISTENING TO, and the jock
+	// who said it. Both used to come from the shared writer, so a thumbs-down
+	// on one station recorded another station's line against another station's
+	// jock -- into the table the console reports as what listeners said.
 	a.nowMu.Lock()
-	last := a.lastBreak
+	last := a.lastBreaks[stationID]
 	a.nowMu.Unlock()
 
 	if last == nil || last.Text == "" {
 		return fmt.Errorf("no break has aired yet")
 	}
 	jockID := ""
-	if a.opts.Writer != nil && a.opts.Writer.Persona != nil {
-		jockID = a.opts.Writer.Persona.ID()
+	if br := a.breaksFor(stationID); br != nil && br.writer != nil {
+		if p := br.writer.CurrentPersona(); p != nil {
+			jockID = p.ID()
+		}
 	}
 	_, err := a.opts.Library.Store.DB().ExecContext(ctx,
 		`INSERT INTO break_feedback (jock_id, text, verdict, aired_at, at, user_id)
@@ -1859,20 +1938,6 @@ type Jock struct {
 //
 // The roster was invisible until this existed: nine personas shipped, the
 // station chose one from what the library sounded like, and a listener had no
-
-// currentPersona is whoever is writing breaks right now.
-func (a *App) currentPersona() *dj.Persona {
-	if a.opts.Writer == nil {
-		return nil
-	}
-	return a.opts.Writer.CurrentPersona()
-}
-
-// SetJock puts a different persona on air.
-//
-// The break already being generated is NOT recalled: it was written by the
-// previous jock and airs in that jock's voice. Cancelling a half-rendered break
-// to honour a click is the stutter this whole design avoids, and the listener
 
 // Overview is everything the operator page renders.
 //
@@ -1966,12 +2031,13 @@ func (a *App) breakStats() map[string]any {
 		aired += st.Breaks
 		dropped += st.Drops
 		ungrounded += st.Ungrounded
+		// THE MOST INTERESTING ANSWER ACROSS THE DIAL, in that order: a station
+		// writing a break beats one holding a finished break, which beats one
+		// with nothing coming. Testing "next == ''" only worked for the first
+		// station, because Outlook never returns an empty string -- so a
+		// station that was ready could never displace another's "none".
 		outlook := string(br.pipeline.Outlook())
-		// The first station with something to say about the next break. A
-		// station writing one is more interesting than three that are not.
-		if next == "" || outlook == string(station.OutlookWriting) {
-			next = outlook
-		}
+		next = moreInteresting(next, outlook)
 		perStation[strconv.FormatInt(id, 10)] = map[string]any{
 			"aired": st.Breaks, "dropped": st.Drops,
 			"drop_rate": dropRate(st.Breaks, st.Drops), "reasons": own,
@@ -1988,6 +2054,30 @@ func (a *App) breakStats() map[string]any {
 		"mislabelled_facts": ungrounded,
 		"next":              next,
 		"by_station":        perStation,
+	}
+}
+
+// moreInteresting picks the outlook an operator most needs to see.
+func moreInteresting(a, b string) string {
+	if outlookRank(b) > outlookRank(a) {
+		return b
+	}
+	return a
+}
+
+func outlookRank(o string) int {
+	switch o {
+	case string(station.OutlookWriting):
+		return 2
+	case string(station.OutlookReady):
+		return 1
+	case "":
+		// NOTHING YET, which every real outlook beats. Ranking it alongside
+		// "none" left the summary empty when every station had nothing coming,
+		// which reads as a missing field rather than as a quiet dial.
+		return -1
+	default:
+		return 0
 	}
 }
 
@@ -2019,6 +2109,9 @@ func (a *App) liveCadence() int {
 	// inherits before any station has come up.
 	if n == 0 && a.opts.Breaks != nil {
 		n = a.opts.Breaks.EveryN()
+	}
+	if n == 0 {
+		n = a.liveCadenceSetting()
 	}
 	if n > 0 {
 		return n
@@ -2072,9 +2165,10 @@ func (a *App) SetCadence(n int) error {
 	if !a.hasDJ() {
 		return fmt.Errorf("no DJ is running")
 	}
-	// EVERY STATION, and the config default too, so a station that comes up
-	// tomorrow inherits the choice rather than the value it was built with.
-	a.cfg.BreakEveryNTracks = n
+	// EVERY STATION, and the default a later one inherits. Written under
+	// breaksMu and released before the pipelines are touched, because
+	// eachBreaks takes the same lock.
+	a.setLiveCadence(n)
 	a.eachBreaks(func(_ int64, br *stationBreaks) {
 		br.pipeline.SetCadence(station.NewCadence(n))
 	})
@@ -2082,9 +2176,11 @@ func (a *App) SetCadence(n int) error {
 		a.opts.Breaks.SetCadence(station.NewCadence(n))
 	}
 
-	// THE CONFIG FIELD IS NOT UPDATED HERE. It is the startup default, and
-	// writing it from an HTTP handler raced with the overview handler reading
-	// it. The pipeline is the one place the live cadence lives.
+	// THE CONFIG FIELD IS NOT UPDATED HERE. It is the startup default, read
+	// without a lock across this package, and writing it from an HTTP handler
+	// raced with the overview handler reading it. That race was reintroduced
+	// once by a line placed directly above this comment; the guarded field is
+	// where the live cadence lives now.
 
 	// WRITTEN DOWN, not just applied. Everything else about a station survives
 	// a restart; a cadence that does not is a setting the operator has to

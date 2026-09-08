@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -373,4 +374,52 @@ type refusingWriter struct{}
 
 func (refusingWriter) Write(context.Context, int, mix.Placement) (string, error) {
 	return "", errors.New("no model in this test")
+}
+
+// TestPipelineWriterIsNotRebound: the writer is read on the goroutine that
+// GENERATES a break, and used to be assigned on the goroutine that FEEDS the
+// station, with nothing between them -- a data race the detector finds in a few
+// hundred iterations of this.
+//
+// The fix is structural rather than a mutex: the writer belongs to the pipeline
+// from the moment it is built, so nothing reassigns it and there is no window.
+// Run this under -race or it proves nothing.
+func TestPipelineWriterIsNotRebound(t *testing.T) {
+	p := &Pipeline{Cadence: NewCadence(1), Lookahead: NewLookahead(0), Writer: &BreakWriter{}}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		// The FEED goroutine: it announces boundaries as tracks start.
+		for i := 0; i < 200; i++ {
+			p.Announce(Boundary{Index: i, InsertionAt: float64(i + 5), Cur: &Track{DurationS: 10}})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		// The TICKER goroutine: it generates, which reads the writer.
+		for i := 0; i < 200; i++ {
+			_, _ = p.Tick(context.Background(), float64(i))
+			_ = p.Outlook()
+		}
+	}()
+	wg.Wait()
+}
+
+// TestPipelineWithNoWriterDeclinesRatherThanPanicking: a nil writer used to
+// dereference inside the break goroutine. The panic is caught by a recover that
+// stops break generation for the life of the process, so the station would keep
+// playing music and never speak again, with one line in the log.
+func TestPipelineWithNoWriterDeclinesRatherThanPanicking(t *testing.T) {
+	p := &Pipeline{Cadence: NewCadence(1), Lookahead: NewLookahead(0)}
+	p.Announce(Boundary{Index: 1, InsertionAt: 100, Cur: &Track{DurationS: 100}})
+
+	n, err := p.Tick(context.Background(), 99)
+	if err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("scheduled %d breaks with no writer", n)
+	}
 }

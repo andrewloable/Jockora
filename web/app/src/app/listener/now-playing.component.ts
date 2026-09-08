@@ -71,6 +71,11 @@ export class NowPlayingView implements OnDestroy {
     effect(() => {
       const id = this.station();
       this.stop();
+      // NOTHING FROM THE STATION THEY JUST LEFT. Until the new one answers --
+      // up to a whole poll interval -- the old transcript would still be on
+      // screen with a thumbs-down offering to rate it, and the old track name
+      // would still read as what is playing.
+      this.forget();
       if (id === null) {
         return;
       }
@@ -95,6 +100,20 @@ export class NowPlayingView implements OnDestroy {
       // make one dropped request look like the stream stopping.
       error: () => undefined,
     });
+  }
+
+  /**
+   * Drop everything the previous station said.
+   *
+   * NOT the enrichment: that is a library-wide figure, identical on every
+   * station, and blanking it would flicker a true number off the screen for a
+   * poll interval on every change.
+   */
+  private forget(): void {
+    this.label.set('Nothing playing yet.');
+    this.transcript.set('');
+    this.nextBreak.set('');
+    this.spoke.emit('');
   }
 
   private stop(): void {

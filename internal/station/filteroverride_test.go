@@ -219,3 +219,38 @@ func setBPM(t *testing.T, s *store.Store, id int64, bpm float64) {
 		t.Fatal(err)
 	}
 }
+
+// TestFilterOverrideDecidesTheSeededPoolsToo: PoolForTag builds the pool for a
+// station the first run PROPOSED, and it read dossiers directly. An enrichment
+// file imported into a fresh install carries overrides with it, so the operator
+// could have filed tracks before any station existed -- and the seeded station
+// would then have played by the enrichment's answer, not theirs.
+func TestFilterOverrideDecidesTheSeededPoolsToo(t *testing.T) {
+	ctx := context.Background()
+	s := filterStore(t,
+		filterTrack{tags: []string{"rock"}},
+		filterTrack{noDossier: true},
+	)
+	if err := s.SetTrackTags(ctx, 1, []string{"folk"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTrackTags(ctx, 2, []string{"folk"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := PoolForTag(ctx, s, "folk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []int64{1, 2}) {
+		t.Errorf("folk pool = %v, want both re-filed tracks", got)
+	}
+	if got, _ := PoolForTag(ctx, s, "rock"); len(got) != 0 {
+		t.Errorf("rock pool = %v, want the re-filed track gone", got)
+	}
+	// AND THE UNSORTED POOL LETS THEM GO. A track somebody has placed is not
+	// unsorted, however little the enrichment managed to say about it.
+	if got, _ := PoolForTag(ctx, s, UnsortedTag); len(got) != 0 {
+		t.Errorf("unsorted pool = %v, want the hand-placed tracks gone", got)
+	}
+}

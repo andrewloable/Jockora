@@ -54,11 +54,15 @@ func (s *Server) setTrackTags(w http.ResponseWriter, r *http.Request, trackID in
 	if !s.decode(w, r, &body) {
 		return
 	}
-	if field, msg := validateTrackTags(body.Genres, body.Moods); field != "" {
+	// DEDUPED FIRST, so the cap counts TAGS rather than copies and a row cannot
+	// read back "rock, rock". The console sends checkboxes and cannot repeat
+	// one, but the API is the API, and the dossier path has always deduped.
+	genres, moods := once(body.Genres), once(body.Moods)
+	if field, msg := validateTrackTags(genres, moods); field != "" {
 		s.writeFieldError(w, field, msg)
 		return
 	}
-	if err := s.playlists.SetTrackTags(r.Context(), trackID, body.Genres, body.Moods); err != nil {
+	if err := s.playlists.SetTrackTags(r.Context(), trackID, genres, moods); err != nil {
 		// A track the library does not have fails the foreign key, which is a
 		// bad request rather than a broken server: nothing here could have
 		// made it succeed.
@@ -92,6 +96,23 @@ func (s *Server) writeTrackTags(w http.ResponseWriter, r *http.Request, trackID 
 		return
 	}
 	s.writeJSON(w, http.StatusOK, tags)
+}
+
+// once keeps the first of each value, in the order it arrived.
+func once(in []string) []string {
+	if len(in) == 0 {
+		return in
+	}
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, v := range in {
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 // validateTrackTags refuses anything a dossier itself could not hold.

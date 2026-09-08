@@ -164,9 +164,7 @@ func TestEnrichPortAPIRefusesAFileTooBigToBeALibrary(t *testing.T) {
 	streamed.ContentLength = -1
 	streamed.AddCookie(adminCookie(t, s))
 	rec = httptest.NewRecorder()
-	small := MaxImportBytes
-	defer func() { setMaxImport(small) }()
-	setMaxImport(16)
+	s.importCap = 16
 	s.Handler().ServeHTTP(rec, streamed)
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("an undeclared oversize body = %d, want 413", rec.Code)

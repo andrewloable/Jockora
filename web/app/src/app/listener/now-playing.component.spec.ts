@@ -155,4 +155,30 @@ describe('NowPlayingView', () => {
     // And a server that does not report it at all is not a crash.
     expect(tuned({ now: null }).nativeElement.querySelector('[data-nextbreak]')).toBeNull();
   });
+
+  it('forgets the old station when the listener moves', () => {
+    // A stale transcript is a thumbs-down button offering to rate a break from
+    // the station they just left -- and a track name that is not playing.
+    const fixture = TestBed.createComponent(Host);
+    fixture.detectChanges();
+    fixture.componentInstance.station.set(3);
+    fixture.detectChanges();
+    ctrl.expectOne('/now.json?station=3').flush({
+      now: { artist: 'A', title: 'B' },
+      last_break: { text: 'Three in the morning.' },
+      enrichment: { done: 412, total: 4197, pct: 9.8 },
+    });
+    fixture.detectChanges();
+
+    fixture.componentInstance.station.set(1);
+    fixture.detectChanges();
+    // BEFORE the new station has answered.
+    const el = fixture.nativeElement;
+    expect(el.querySelector('[data-transcript]')).toBeNull();
+    expect(el.querySelector('[data-nowplaying]').textContent).not.toContain('B');
+    // The enrichment figure is LIBRARY-WIDE and identical on every station, so
+    // blanking it would flicker a true number off the screen for a whole poll.
+    expect(el.querySelector('[data-enrichment]').textContent).toContain('412 of 4197');
+    ctrl.expectOne('/now.json?station=1').flush({});
+  });
 });

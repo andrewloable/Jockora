@@ -14,6 +14,7 @@ import (
 
 	"github.com/andrewloable/jockora/internal/clock"
 	"github.com/andrewloable/jockora/internal/dj"
+	"github.com/andrewloable/jockora/internal/mix"
 	"github.com/andrewloable/jockora/internal/presence"
 	"github.com/andrewloable/jockora/internal/station"
 	"github.com/andrewloable/jockora/internal/store"
@@ -90,7 +91,9 @@ func TestPerStationWriterIsOnePerStation(t *testing.T) {
 	// A STATION THAT COMES UP LATER INHERITS THE OPERATOR'S CADENCE. It is one
 	// setting for the whole dial, and a station built after they changed it
 	// would otherwise run on the value the factory was compiled with.
-	a.cfg.BreakEveryNTracks = 1
+	if err := a.SetCadence(1); err != nil {
+		t.Fatal(err)
+	}
 	if got := a.breaksFor(9).pipeline.EveryN(); got != 1 {
 		t.Errorf("a station built later runs at cadence %d, want the operator's 1", got)
 	}
@@ -342,4 +345,141 @@ func TestPerStationWriterCountsNothingForAWriterWithNoValidator(t *testing.T) {
 	if got := a.breakStats(); got != nil {
 		t.Errorf("break stats = %v with no writer", got)
 	}
+}
+
+// TestPerStationWriterAiredClearsTheRightColdOpen: the break machinery was made
+// per station and this was left pointing at the SHARED writer, so every
+// station's break cleared a cold open belonging to nobody -- and every station
+// stayed cold for ever, writing every break as the first thing a listener
+// hears.
+func TestPerStationWriterAiredClearsTheRightColdOpen(t *testing.T) {
+	a, _ := perStationApp(t, map[int64]string{1: "sunny", 2: "dutch"})
+	one, two := a.breaksFor(1), a.breaksFor(2)
+
+	a.recordBreakOn(1, "that was a record", mix.PlacementBetween)
+
+	if one.writer.Session.IsColdOpen() {
+		t.Error("station 1 is still cold after airing a break")
+	}
+	if !two.writer.Session.IsColdOpen() {
+		t.Error("station 2 lost its cold open to a break on station 1")
+	}
+}
+
+// TestPerStationWriterLastBreakIsPerStation: /now.json carries the last thing
+// the DJ said, and it is what the thumbs-down rates. One global copy meant a
+// listener on station 1 was shown -- and invited to rate -- a break that aired
+// on station 2, in another jock's voice, about records they never heard.
+func TestPerStationWriterLastBreakIsPerStation(t *testing.T) {
+	a, _ := perStationApp(t, map[int64]string{1: "sunny", 2: "dutch"})
+	a.recordBreakOn(1, "here is the news from station one", mix.PlacementBetween)
+	a.recordBreakOn(2, "and something else entirely", mix.PlacementBetween)
+
+	first := a.StatusForStation(1)
+	if first.LastBreak == nil || first.LastBreak.Text != "here is the news from station one" {
+		t.Errorf("station 1 last break = %+v", first.LastBreak)
+	}
+	second := a.StatusForStation(2)
+	if second.LastBreak == nil || second.LastBreak.Text != "and something else entirely" {
+		t.Errorf("station 2 last break = %+v", second.LastBreak)
+	}
+	// A station that has said nothing has said nothing.
+	if quiet := a.StatusForStation(9); quiet.LastBreak != nil {
+		t.Errorf("a station with no breaks reports %+v", quiet.LastBreak)
+	}
+}
+
+// TestPerStationWriterCadenceUnderRace: SetCadence is an HTTP handler and
+// breaksFor runs on a feed goroutine when a station comes up. Both touched
+// cfg.BreakEveryNTracks, which is the race the comment inside SetCadence
+// already described from the last time it happened -- and the line that caused
+// it was added three lines above that comment.
+func TestPerStationWriterCadenceUnderRace(t *testing.T) {
+	a, _ := perStationApp(t, map[int64]string{1: "sunny"})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			if err := a.SetCadence(i%9 + 1); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			// A station coming up reads the operator's cadence to build with.
+			a.breaksFor(int64(100 + i))
+			_ = a.liveCadence()
+		}
+	}()
+	wg.Wait()
+}
+
+// TestPerStationWriterStatusDoesNotBuildADJ: a listener polls the status page
+// every few seconds. Reading it must not allocate a writer, a session and a row
+// in the break stats for a station nobody has tuned to.
+func TestPerStationWriterStatusDoesNotBuildADJ(t *testing.T) {
+	a, _ := perStationApp(t, map[int64]string{1: "sunny"})
+
+	_ = a.Status()
+	_ = a.StatusForStation(1)
+
+	if got := a.breakStats(); got != nil {
+		t.Errorf("break stats = %v after nothing but status reads", got)
+	}
+	a.breaksMu.Lock()
+	n := len(a.breaks)
+	a.breaksMu.Unlock()
+	if n != 0 {
+		t.Errorf("%d stations acquired break machinery from a status poll", n)
+	}
+}
+
+// TestPerStationWriterOutlookPicksTheMostInteresting: the summary line over the
+// whole dial. Testing for an empty string only worked on the first station,
+// because an outlook is never empty -- so a station holding a finished break
+// could never displace another station's "nothing coming".
+func TestPerStationWriterOutlookPicksTheMostInteresting(t *testing.T) {
+	for _, tc := range []struct{ a, b, want string }{
+		{"", "none", "none"},
+		{"none", "ready", "ready"},
+		{"ready", "none", "ready"},
+		{"ready", "writing", "writing"},
+		{"writing", "ready", "writing"},
+		{"writing", "none", "writing"},
+	} {
+		if got := moreInteresting(tc.a, tc.b); got != tc.want {
+			t.Errorf("moreInteresting(%q, %q) = %q, want %q", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+// TestPerStationWriterLastBreakUnderRace: the per-station map is written on the
+// goroutine that airs a break and read by every status poll. Run under -race or
+// it proves nothing.
+func TestPerStationWriterLastBreakUnderRace(t *testing.T) {
+	a, _ := perStationApp(t, map[int64]string{1: "sunny", 2: "dutch"})
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	for _, id := range []int64{1, 2} {
+		go func(id int64) {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				a.recordBreakOn(id, "a line", mix.PlacementBetween)
+			}
+		}(id)
+	}
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			_ = a.StatusForStation(1)
+			_ = a.StatusForStation(2)
+		}
+	}()
+	wg.Wait()
 }

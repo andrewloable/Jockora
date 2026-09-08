@@ -500,6 +500,7 @@ describe('Overview', () => {
     expect(text).toContain('unmatched');
     expect(text).toContain('31');
     expect(text).toContain('already had a dossier');
+    expect(text).toContain('kept your own tag edits');
   });
 
   it('enrichment import says so when the file is refused', () => {

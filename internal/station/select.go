@@ -266,11 +266,15 @@ func PoolForTag(ctx context.Context, s *store.Store, tag string) ([]int64, error
 		return PlayablePool(ctx, s)
 
 	case UnsortedTag:
+		// NOTHING SAYS WHAT IT IS, through the view rather than "has no
+		// dossier": a track an operator filed by hand is placed, even if the
+		// enrichment never reached it.
 		rows, err := s.DB().QueryContext(ctx, `
-			SELECT id FROM tracks
-			 WHERE playable = 1 AND missing_at IS NULL
-			   AND id NOT IN (SELECT track_id FROM dossiers)
-			 ORDER BY id`)
+			SELECT t.id FROM tracks t
+			  JOIN effective_tags e ON e.track_id = t.id
+			 WHERE t.playable = 1 AND t.missing_at IS NULL
+			   AND json_array_length(e.station_tags) = 0
+			 ORDER BY t.id`)
 		if err != nil {
 			return nil, fmt.Errorf("station: reading the unsorted pool: %w", err)
 		}
@@ -278,11 +282,13 @@ func PoolForTag(ctx context.Context, s *store.Store, tag string) ([]int64, error
 
 	default:
 		// json_each rather than LIKE: matching '%rock%' in raw JSON would also
-		// match a mood, a theme, or the word inside a subject summary.
+		// match a mood, a theme, or the word inside a subject summary. And
+		// through effective_tags, so an operator's own filing decides this the
+		// way it decides everything else about what a station contains.
 		rows, err := s.DB().QueryContext(ctx, `
 			SELECT t.id FROM tracks t
-			  JOIN dossiers d ON d.track_id = t.id
-			  JOIN json_each(json_extract(d.json, '$.station_tags')) tag
+			  JOIN effective_tags e ON e.track_id = t.id
+			  JOIN json_each(e.station_tags) tag
 			 WHERE t.playable = 1 AND t.missing_at IS NULL AND lower(tag.value) = lower(?)
 			 ORDER BY t.id`, tag)
 		if err != nil {

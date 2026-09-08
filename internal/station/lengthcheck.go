@@ -5,6 +5,7 @@ package station
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -131,13 +132,33 @@ func (lc LengthCheck) Enforce(ctx context.Context, placement mix.Placement, wind
 	}, nil
 }
 
+// ErrNoWriter means the pipeline was built without a DJ to write with.
+//
+// SAID, NOT DEREFERENCED, for the same reason the missing queue is: this runs
+// on the break goroutine, and a panic there is caught by a recover that stops
+// break generation for the life of the process. The station would keep playing
+// music and never speak again, with one line in the log to explain it.
+var ErrNoWriter = errors.New("station: break pipeline has no writer")
+
+// ErrNoRenderer means there is nothing to turn the break into audio.
+var ErrNoRenderer = errors.New("station: break pipeline has no renderer")
+
 // attempt writes and renders once.
 func (lc LengthCheck) attempt(ctx context.Context, target int, placement mix.Placement, n int) (string, string, float64, int, error) {
+	if lc.Writer == nil {
+		return "", "", 0, 0, ErrNoWriter
+	}
 	text, err := lc.Writer.Write(ctx, target, placement)
 	if err != nil {
 		return "", "", 0, 1, fmt.Errorf("writing break: %w", err)
 	}
 	path := filepath.Join(lc.Dir, fmt.Sprintf("break-%s-%d.wav", placement, n))
+	// CHECKED AFTER THE WRITE, not before it: the break's track context is
+	// applied as the write happens, and a pipeline with no renderer must still
+	// get that far or a test of the context would be testing this guard.
+	if lc.Renderer == nil {
+		return "", "", 0, 1, ErrNoRenderer
+	}
 	seconds, err := lc.Renderer.Render(ctx, text, lc.voice(), path)
 	if err != nil {
 		return "", "", 0, 1, fmt.Errorf("rendering break: %w", err)

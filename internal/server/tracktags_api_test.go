@@ -206,3 +206,30 @@ func TestMoodTempoReachesTheConsole(t *testing.T) {
 		t.Errorf("tempos = %v, want the measured one and zero for unmeasured", body.Tracks)
 	}
 }
+
+// TestTrackTagsAPIDedupes: the console sends checkboxes and cannot repeat one,
+// but the API is the API. A duplicate reads back as "rock, rock" on the
+// playlist row, and worse, it fills the cap -- five copies of one tag is a
+// track with one tag that cannot be given another.
+func TestTrackTagsAPIDedupes(t *testing.T) {
+	s, st, _ := playlistServer(t, 3)
+	admin := adminCookie(t, s)
+
+	body := `{"genres":["rock","rock","pop"],"moods":["raw","raw"]}`
+	if rec := as(t, s, http.MethodPut, tagPath(1), body, admin); rec.Code != http.StatusOK {
+		t.Fatalf("= %d: %s", rec.Code, rec.Body)
+	}
+	got, err := st.TrackTags(t.Context(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Genres) != 2 || len(got.Moods) != 1 {
+		t.Errorf("stored %+v, want each tag once", got)
+	}
+
+	// And the cap counts TAGS, not copies.
+	many := `{"genres":["rock","rock","rock","rock","rock","rock"],"moods":[]}`
+	if rec := as(t, s, http.MethodPut, tagPath(1), many, admin); rec.Code != http.StatusOK {
+		t.Errorf("six copies of one genre = %d, want it accepted as one", rec.Code)
+	}
+}

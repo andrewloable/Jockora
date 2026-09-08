@@ -127,7 +127,12 @@ func Taste(ctx context.Context, s *store.Store, top int) (StationTaste, error) {
 	}
 	var out StationTaste
 
-	rows, err := s.DB().QueryContext(ctx, `SELECT json FROM dossiers`)
+	// THROUGH effective_tags, so an operator's own filing counts. What the
+	// library sounds like decides which jock is put on air, and a hand edit
+	// outranks the enrichment everywhere else -- including here, where it can
+	// pre-exist the first station if the enrichment was imported.
+	rows, err := s.DB().QueryContext(ctx,
+		`SELECT station_tags, mood FROM effective_tags WHERE station_tags != '[]'`)
 	if err != nil {
 		return out, fmt.Errorf("enrich: reading dossiers for taste: %w", err)
 	}
@@ -135,18 +140,19 @@ func Taste(ctx context.Context, s *store.Store, top int) (StationTaste, error) {
 
 	genres, moods := map[string]int{}, map[string]int{}
 	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
+		var rawTags, rawMood string
+		if err := rows.Scan(&rawTags, &rawMood); err != nil {
 			return out, err
 		}
-		var d Dossier
-		if err := json.Unmarshal([]byte(raw), &d); err != nil {
+		var tags, mood []string
+		if json.Unmarshal([]byte(rawTags), &tags) != nil {
 			continue // one unreadable row must not cost the whole answer
 		}
-		for _, g := range d.StationTags {
+		_ = json.Unmarshal([]byte(rawMood), &mood) //nolint:errcheck // a bad mood list is no moods
+		for _, g := range tags {
 			genres[g]++
 		}
-		for _, m := range d.Mood {
+		for _, m := range mood {
 			moods[m]++
 		}
 	}

@@ -27,7 +27,10 @@ describe('Listener', () => {
     fixture.detectChanges();
     ctrl.expectOne('/me').flush(me);
     ctrl.expectOne('/stations.json').flush({
-      stations: [{ id: 3, name: 'AMBIENT', genre: 'ambient', tracks: 96, listeners: 0 }],
+      stations: [
+        { id: 3, name: 'AMBIENT', genre: 'ambient', tracks: 96, listeners: 0 },
+        { id: 7, name: 'NIGHT ROCK', genre: 'rock', tracks: 515, listeners: 0 },
+      ],
     });
     fixture.detectChanges();
     return fixture;
@@ -102,5 +105,26 @@ describe('Listener', () => {
     const req = ctrl.expectOne('/feedback');
     expect(req.request.body).toEqual({ station_id: 3, verdict: 'down' });
     req.flush(null);
+  });
+
+  it('rating a break stops offering the old one after a station change', () => {
+    // The thumbs-down is what makes this matter: rating what looks like the
+    // previous station's break records it against the NEW station, because the
+    // server attributes it by station id.
+    const fixture = tuned();
+    ctrl.expectOne('/now.json?station=3').flush({
+      now: { artist: 'A', title: 'B' },
+      last_break: { text: 'Three in the morning.' },
+    });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-thumbsdown]')).toBeTruthy();
+
+    // Tune ELSEWHERE -- a different station, which is the case that matters;
+    // re-picking the same one is not a change and correctly resets nothing.
+    fixture.nativeElement.querySelectorAll('[data-station]')[1].click();
+    ctrl.expectOne('/tune').flush({ hls: '/hls/7/stream.m3u8', station_id: 7 });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-thumbsdown]')).toBeNull();
+    ctrl.expectOne('/now.json?station=7').flush({});
   });
 });
