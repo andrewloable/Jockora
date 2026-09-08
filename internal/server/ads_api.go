@@ -32,6 +32,7 @@ type Ads interface {
 	GetAd(ctx context.Context, id int64) (store.Ad, error)
 	CreateAd(ctx context.Context, a store.Ad) (int64, error)
 	UpdateAd(ctx context.Context, a store.Ad) error
+	SetAdEnabled(ctx context.Context, id int64, enabled bool) error
 	DeleteAd(ctx context.Context, id int64) error
 	WriteAd(ctx context.Context, in dj.AdBrief) (dj.Ad, error)
 }
@@ -66,6 +67,9 @@ type adView struct {
 	Delivery    string `json:"delivery"`
 	Script      string `json:"script"`
 	LastAiredAt string `json:"last_aired_at,omitempty"`
+	// NOT omitempty: false is the interesting value, and a flag that vanishes
+	// from the JSON when it is off is a flag the console cannot draw.
+	Enabled bool `json:"enabled"`
 }
 
 // serveAds handles every /admin/ads route.
@@ -101,18 +105,43 @@ func (s *Server) serveAds(w http.ResponseWriter, r *http.Request, path string) {
 	}
 
 	id, action, ok := userTarget(rest)
-	if !ok || action != "" {
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
-	switch r.Method {
-	case http.MethodPut:
+	// The same shape sources, stations and accounts already use, down to the
+	// words: POST /enable and POST /disable, no body.
+	switch {
+	case action == "" && r.Method == http.MethodPut:
 		s.updateAd(w, r, id)
-	case http.MethodDelete:
+	case action == "" && r.Method == http.MethodDelete:
 		s.deleteAd(w, r, id)
-	default:
+	case action == "enable" && r.Method == http.MethodPost:
+		s.setAdEnabled(w, r, id, true)
+	case action == "disable" && r.Method == http.MethodPost:
+		s.setAdEnabled(w, r, id, false)
+	case action == "enable" || action == "disable" || action == "":
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	default:
+		http.NotFound(w, r)
 	}
+}
+
+// setAdEnabled pauses an advert or puts it back on air.
+//
+// NO CONFIRMATION, here or in the console: Jockora-e9a.48 is explicit that a
+// reversible action does not get a prompt. Delete asks; this does not.
+func (s *Server) setAdEnabled(w http.ResponseWriter, r *http.Request, id int64, enabled bool) {
+	err := s.ads.SetAdEnabled(r.Context(), id, enabled)
+	if errors.Is(err, store.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		s.writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) listAds(w http.ResponseWriter, r *http.Request) {
@@ -124,7 +153,7 @@ func (s *Server) listAds(w http.ResponseWriter, r *http.Request) {
 	out := make([]adView, 0, len(rows))
 	for _, a := range rows {
 		v := adView{ID: a.ID, Brand: a.Brand, Brief: a.Brief,
-			Delivery: a.Delivery, Script: a.Script}
+			Delivery: a.Delivery, Script: a.Script, Enabled: a.Enabled}
 		// NEVER AIRED IS AN EMPTY STRING, not 1970. The console shows this
 		// beside an advert and "aired 1 January 1970" is a bug report.
 		if !a.LastAiredAt.IsZero() {

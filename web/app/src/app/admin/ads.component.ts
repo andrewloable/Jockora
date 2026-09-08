@@ -32,6 +32,7 @@ const maxDelivery = 200;
           <th scope="col">Brand</th>
           <th scope="col">Advert</th>
           <th scope="col">Last aired</th>
+          <th scope="col">On air</th>
           <th scope="col">Actions</th>
         </tr>
       </thead>
@@ -43,8 +44,14 @@ const maxDelivery = 200;
             <!-- NEVER, not the epoch. An advert written this morning and one
                  aired in 1970 must not read alike. -->
             <td data-label="Last aired">{{ aired(ad.last_aired_at) }}</td>
+            <td data-label="On air" data-ad-state>{{ ad.enabled ? 'On' : 'Off' }}</td>
             <td data-label="Actions">
               <button type="button" data-edit (click)="edit(ad)">Edit</button>
+              <!-- REVERSIBLE, so no confirmation. Jockora-e9a.48 is explicit
+                   about that, and the same word the other sections use. -->
+              <button type="button" data-toggle (click)="toggle(ad)">
+                {{ ad.enabled ? 'Disable' : 'Enable' }}
+              </button>
               <button type="button" data-remove data-danger (click)="remove(ad)">Delete</button>
             </td>
           </tr>
@@ -53,7 +60,7 @@ const maxDelivery = 200;
                failed read wearing the empty state's words told an operator
                whose server was down that they had nothing. -->
           <tr>
-            <td colspan="4">
+            <td colspan="5">
               @if (!loaded()) {
                 <span data-loading>Loading…</span>
               } @else if (!failed()) {
@@ -68,7 +75,11 @@ const maxDelivery = 200;
       </tbody>
     </table>
 
-    <fieldset>
+    <!-- ONE FIELD PER ROW, each label above its control and each explanation
+         below it. The fieldset is a wrapping flex row, which suited a row of
+         short inputs and put all four of these on one line with their helper
+         text flowing between them. -->
+    <fieldset data-ad-form>
       <legend>{{ editing() ? 'Edit ' + editing()!.brand : 'New advert' }}</legend>
 
       <label>
@@ -104,6 +115,7 @@ const maxDelivery = 200;
           [value]="delivery()"
           (input)="delivery.set($any($event.target).value)"
         />
+        <small>How the DJ should read it. The advert never says this word itself.</small>
       </label>
 
       <!-- DISABLED WHILE BLANK AND WHILE IN FLIGHT, and it says which. A live
@@ -137,13 +149,15 @@ const maxDelivery = 200;
           [value]="script()"
           (input)="script.set($any($event.target).value)"
         ></textarea>
+        <!-- INSIDE THE LABEL, because it describes THIS box. It used to sit
+             loose in the fieldset between the textarea and Save, at the same
+             baseline as both. CODE POINTS, NOT .length: JavaScript counts
+             UTF-16 units, so an emoji counts two and the console would say 340
+             of 360 while the server refused. Jockora-9jo, one field over. -->
+        <small data-count [attr.data-over]="over() ? 'true' : null">
+          {{ length() }} of {{ maxScript }} characters{{ over() ? ' — too long for one slot' : '' }}
+        </small>
       </label>
-      <!-- CODE POINTS, NOT .length. JavaScript counts UTF-16 units, so an emoji
-           counts two and the console would say 340 of 360 while the server
-           refused. Jockora-9jo, one field over. -->
-      <small data-count [attr.data-over]="over() ? 'true' : null">
-        {{ length() }} of {{ maxScript }} characters{{ over() ? ' — too long for one slot' : '' }}
-      </small>
 
       @if (warning(); as w) {
         <!-- AN ADVISORY, NOT AN ERROR, and deliberately not role="alert". An
@@ -286,6 +300,17 @@ export class Ads {
       },
       error: (e: { error?: { error?: string } }) =>
         this.said.set(String(e.error?.error ?? 'Could not save that advert.')),
+    });
+  }
+
+  /** Pause an advert or put it back on air. NO CONFIRMATION: it is reversible. */
+  toggle(ad: Ad): void {
+    this.api.setAdEnabled(ad.id, !ad.enabled).subscribe({
+      next: () => {
+        this.said.set(ad.enabled ? `${ad.brand} is off air.` : `${ad.brand} is back on air.`);
+        this.load();
+      },
+      error: () => this.said.set('Could not change that advert.'),
     });
   }
 

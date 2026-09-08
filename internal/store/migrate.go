@@ -15,7 +15,7 @@ import (
 // It exists from the very first migration, not from the first time the schema
 // changes. Retrofitting versioning after dossiers exist means either discarding
 // hours of enrichment or hand-writing a recovery script.
-const CurrentSchemaVersion = 12
+const CurrentSchemaVersion = 13
 
 // migrations are applied in order; index i brings the schema to version i+1.
 var migrations = []string{
@@ -368,6 +368,21 @@ var migrations = []string{
 	);
 
 	CREATE INDEX idx_log_records_at ON log_records(at);
+	`,
+
+	// 13. AN ADVERT CAN BE PAUSED.
+	//
+	// Delete was the only off switch, so a seasonal advertiser cost the
+	// operator the hand-written copy and a retype when they came back. Every
+	// other manageable thing here already turns off without being lost:
+	// sources, stations and accounts all have Disable.
+	//
+	// DEFAULT 1 AND NOT NULL, so every advert that predates the column is on
+	// air exactly as it was. A nullable flag read as false would take a working
+	// rotation off the air on upgrade, which is the worst possible way to
+	// deliver a pause button.
+	`
+	ALTER TABLE ads ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
 	`,
 }
 

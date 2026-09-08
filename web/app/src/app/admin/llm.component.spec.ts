@@ -325,6 +325,59 @@ describe('LLM', () => {
     );
   });
 
+  // ------------------------------------------------------- model choice --
+  //
+  // Jockora-e9a.56, measured on the running build: all three radios sat at
+  // x 113 with their bold label 14px BELOW them, so a lone blue circle floated
+  // above each heading. The label computes to display block, so the control and
+  // its text stacked as two block lines instead of sharing one.
+  //
+  // And the bold name ran straight into its own description with nothing
+  // between them -- "Local llama.cppA model running on your own hardware" --
+  // because Angular drops the whitespace-only text node between two inline
+  // siblings. That is the same defect as the Overview download link
+  // (Jockora-e9a.46) and the advert form (Jockora-e9a.55).
+  //
+  // Structure, not computed styles: the stylesheet is not loaded here. These
+  // pin the markup contract the sheet lays out; test/console_css_test.go pins
+  // the rules themselves.
+
+  it('model choice puts the control and its label on one row', () => {
+    const el = mounted().nativeElement;
+    const options = [...el.querySelectorAll('[data-llm-provider] [data-llm-option]')];
+    expect(options).toHaveLength(3);
+
+    for (const option of options) {
+      expect(option.tagName).toBe('LABEL');
+      // The radio and the name it belongs to are siblings on the row itself,
+      // and the radio comes first -- a tick that follows its own label is not
+      // a control anybody recognises.
+      const row = [...option.children].filter((c) => !c.matches('[data-llm-help]'));
+      expect(row[0].tagName).toBe('INPUT');
+      expect((row[0] as HTMLInputElement).type).toBe('radio');
+      expect(row[1].tagName).toBe('STRONG');
+    }
+  });
+
+  it('model choice separates a bold label from its description', () => {
+    const el = mounted().nativeElement;
+    const options = [...el.querySelectorAll('[data-llm-provider] [data-llm-option]')];
+    // COUNTED FIRST. Without this the loop below iterates nothing and the test
+    // passes against the very markup it was written to reject.
+    expect(options).toHaveLength(3);
+    for (const option of options) {
+      const name = option.querySelector('strong');
+      const help = option.querySelector('[data-llm-help]');
+      expect(help).not.toBeNull();
+      // A SMALL, which the sheet makes a block once for the whole console, so
+      // the description can never touch the name before it. The old markup had
+      // no way to tell one from the other.
+      expect(help.tagName).toBe('SMALL');
+      expect(help.contains(name)).toBe(false);
+      expect(help.previousElementSibling).toBe(name);
+    }
+  });
+
   it('keeps a model that is not in the list, so a saved one is not lost', () => {
     const fixture = mounted({ provider: 'openrouter', model: 'something/custom', has_key: true });
     const options = [...fixture.nativeElement.querySelectorAll('[data-llm-model] option')].map(

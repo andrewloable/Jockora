@@ -96,16 +96,22 @@ const REFRESH_MS = 10_000;
     <section>
       <h3>The DJ</h3>
       <p>
-        A break every
-        <input
-          data-cadence
-          type="number"
-          min="1"
-          max="100"
-          [value]="cadence()"
-          (input)="editCadence(+$any($event.target).value)"
-        />
-        tracks.
+        <!-- THE SENTENCE IS THE LABEL. "A break every 4 tracks" says more than
+             the word Cadence over a box would, and unlike a placeholder it does
+             not vanish the moment there is a value. data-inline-field keeps the
+             field inside the sentence rather than on a line of its own. -->
+        <label data-inline-field>
+          A break every
+          <input
+            data-cadence
+            type="number"
+            min="1"
+            max="100"
+            [value]="cadence()"
+            (input)="editCadence(+$any($event.target).value)"
+          />
+          tracks.
+        </label>
         <button type="button" data-set-cadence (click)="saveCadence()">Set</button>
       </p>
       <p data-dj-line>
@@ -121,7 +127,7 @@ const REFRESH_MS = 10_000;
           <ul>
             @for (f of feedback(); track f.at) {
               <li>
-                {{ f.text }} <small>{{ f.jock }}</small>
+                {{ f.text }} <small data-inline>{{ f.jock }}</small>
               </li>
             }
           </ul>

@@ -38,9 +38,13 @@ type Ad struct {
 	// rotation.
 	LastAiredAt time.Time `json:"last_aired_at,omitempty"`
 	CreatedAt   time.Time `json:"created_at,omitempty"`
+	// Enabled is the pause switch. NOT omitempty and NOT a pointer: false is
+	// the interesting value here, and a flag that disappears from the JSON when
+	// it is off is a flag the console cannot render.
+	Enabled bool `json:"enabled"`
 }
 
-const adColumns = `id, brand, brief, delivery, text, last_aired_at, created_at`
+const adColumns = `id, brand, brief, delivery, text, last_aired_at, created_at, enabled`
 
 // CreateAd stores an advert and returns its id.
 func (s *Store) CreateAd(ctx context.Context, ad Ad) (int64, error) {
@@ -112,9 +116,25 @@ func (s *Store) UpdateAd(ctx context.Context, ad Ad) error {
 	return requireOneRow(res, ad.ID)
 }
 
-// DeleteAd removes an advert. DELETE IS THE OFF SWITCH: there is no enabled or
-// paused flag, and adding one waits for an operator asking to pause a campaign
-// rather than end it.
+// SetAdEnabled pauses an advert or puts it back on air.
+//
+// SEPARATE FROM UpdateAd, for the reason MarkAdAired is separate: the console
+// edits by writing the whole card back, so a flag carried on that form would
+// re-enable a paused advert the moment somebody fixed a typo in it. One column,
+// and only that column.
+//
+// DISABLING IS NOT DELETING. The copy is hand-written prose, which is exactly
+// why an operator with a seasonal advertiser should not have to destroy it.
+func (s *Store) SetAdEnabled(ctx context.Context, id int64, enabled bool) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE ads SET enabled = ? WHERE id = ?`, enabled, id)
+	if err != nil {
+		return fmt.Errorf("store: enabling advert %d: %w", id, err)
+	}
+	return requireOneRow(res, id)
+}
+
+// DeleteAd removes an advert, copy and all. SetAdEnabled is the reversible one.
 func (s *Store) DeleteAd(ctx context.Context, id int64) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM ads WHERE id = ?`, id)
 	if err != nil {
@@ -143,7 +163,8 @@ func scanAd(sc interface{ Scan(...any) error }) (Ad, error) {
 	var ad Ad
 	var brand, brief, delivery sql.NullString
 	var aired, created sql.NullInt64
-	if err := sc.Scan(&ad.ID, &brand, &brief, &delivery, &ad.Script, &aired, &created); err != nil {
+	if err := sc.Scan(&ad.ID, &brand, &brief, &delivery, &ad.Script,
+		&aired, &created, &ad.Enabled); err != nil {
 		return Ad{}, err
 	}
 	ad.Brand, ad.Brief, ad.Delivery = brand.String, brief.String, delivery.String

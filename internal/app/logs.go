@@ -29,10 +29,27 @@ import (
 // LogLevelSetting is where the operator's choice is stored.
 const LogLevelSetting = "log_level"
 
+// DefaultLogLevel is what a fresh install records, before an operator has
+// chosen anything.
+//
+// WARN, because info on a scanning library is more than twenty consecutive
+// "scanning elapsed=Ns files=N" lines plus break scheduled, break slot offered
+// and station refilled every few minutes -- and the one line that matters,
+// SERVING WITHOUT AUTHENTICATION ON A NON-LOOPBACK ADDRESS, was one row in
+// forty of it. It was never a decision anybody made: slog.LevelVar's zero value
+// is Info, so this was the default of the type.
+//
+// A DEFAULT IS NOT A RESTRICTION. The stored setting still wins, every level is
+// still offered, and an operator chasing something drops to info or debug from
+// the console with no restart. The cost is that the informational lines are not
+// there to read AFTERWARDS -- so anybody about to reproduce an intermittent
+// fault should turn it down first.
+const DefaultLogLevel = slog.LevelWarn
+
 // LogLevel is the level in force right now.
 func (a *App) LogLevel() slog.Level {
 	if a.level == nil {
-		return slog.LevelInfo
+		return DefaultLogLevel
 	}
 	return a.level.Level()
 }

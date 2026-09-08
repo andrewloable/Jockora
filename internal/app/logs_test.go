@@ -168,8 +168,9 @@ func TestLogLevelNoStore(t *testing.T) {
 	if err := spike.SetLogLevel(context.Background(), slog.LevelDebug); err == nil {
 		t.Error("an App with no level var reported success")
 	}
-	if got := spike.LogLevel(); got != slog.LevelInfo {
-		t.Errorf("LogLevel = %v with no level var, want the info default", got)
+	if got := spike.LogLevel(); got != DefaultLogLevel {
+		t.Errorf("LogLevel = %v with no level var, want the compiled default %v",
+			got, DefaultLogLevel)
 	}
 	// Restoring one is a no-op rather than a nil dereference at startup.
 	spike.RestoreLogLevel(context.Background())
@@ -242,6 +243,48 @@ func TestLogLevelPersistsWarningsToTheStore(t *testing.T) {
 	// A spike-path App has neither and must not panic.
 	(&App{log: quietLogger()}).persistLogs(ctx)
 	(&App{log: quietLogger(), opts: Options{LogSink: sink}}).persistLogs(ctx)
+}
+
+// TestLogLevelPersistsStartupWarningsToTheStore is Jockora-69n.9 at the only
+// boundary that can prove it: a warning logged BEFORE the store opened, read
+// back out of log_records afterwards. obs proves the sink drains its ring;
+// this proves the drained records survive the adapter and land in the table.
+//
+// The order here is the real one. main builds the sink, app.New logs the
+// non-loopback warning through it, and only then does Run reach persistLogs.
+func TestLogLevelPersistsStartupWarningsToTheStore(t *testing.T) {
+	a, st := llmApp(t)
+	a.level = new(slog.LevelVar)
+	sink := obs.NewSink(slog.NewJSONHandler(&bytes.Buffer{},
+		&slog.HandlerOptions{Level: a.level}), 100)
+	a.opts.LogSink = sink
+
+	// Startup: the store is not persisting yet.
+	log := slog.New(sink)
+	log.Info("migrating", "to", 12)
+	log.Warn("SERVING WITHOUT AUTHENTICATION ON A NON-LOOPBACK ADDRESS",
+		"detail", "anyone who can reach this address can listen")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a.persistLogs(ctx)
+
+	var got []store.LogRecord
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		got, _ = st.RecentLogs(ctx, "WARN", 10)
+		if len(got) == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if len(got) != 1 {
+		t.Fatalf("%d records persisted, want the startup warning", len(got))
+	}
+	if got[0].Message != "SERVING WITHOUT AUTHENTICATION ON A NON-LOOPBACK ADDRESS" {
+		t.Errorf("persisted %q, want the warning logged before the store opened",
+			got[0].Message)
+	}
 }
 
 // TestLogsAppMergesTheRingAndTheTable: the ring is the live view and the table

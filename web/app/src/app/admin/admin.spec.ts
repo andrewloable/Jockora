@@ -65,6 +65,98 @@ describe('Admin', () => {
     return fixture;
   }
 
+  // ------------------------------------------------------- Jockora-e9a.58 --
+  //
+  // Eleven form controls across five tabs had NO accessible name at all, and
+  // three of them were selects with not even a placeholder to fall back on --
+  // one being the accounts role picker, which chooses between listener and
+  // admin. A privilege decision announced as an unlabelled combo box.
+  //
+  // A PLACEHOLDER IS NOT A LABEL. It disappears the moment there is a value, so
+  // an operator filling a form cannot check what they typed against what was
+  // asked, and returning to a half-filled form gives no field names at all. It
+  // also renders in --ink-faint, the lowest-contrast ink in the palette, doing
+  // the most important job on the screen.
+  //
+  // AN AUDIT, not one assertion per field, so a control added tomorrow with no
+  // label fails this automatically rather than waiting for the next review.
+
+  /** Every control on screen that a screen reader would announce as unnamed. */
+  function unnamed(root: HTMLElement) {
+    return [...root.querySelectorAll('input, select, textarea')].filter((c) => {
+      const wrapping = c.closest('label')?.textContent?.trim();
+      const forId = c.id && root.querySelector(`label[for="${c.id}"]`)?.textContent?.trim();
+      const aria = c.getAttribute('aria-label');
+      const by = c.getAttribute('aria-labelledby');
+      const referenced = by && root.querySelector(`#${by}`)?.textContent?.trim();
+      return !(wrapping || forId || aria || referenced);
+    });
+  }
+
+  /** How a failure names the offender, since an unlabelled control has no name. */
+  const describeControl = (c: Element) =>
+    `<${c.tagName.toLowerCase()} ${[...c.attributes]
+      .map((a) => a.name)
+      .filter((n) => n.startsWith('data-'))
+      .join(' ')}>`;
+
+  it('labelled control gives every input in the console an accessible name', () => {
+    const fixture = mounted();
+    const sections = [
+      'overview',
+      'sources',
+      'stations',
+      'playlist',
+      'jocks',
+      'ads',
+      'accounts',
+      'model',
+      'logs',
+    ];
+    const offenders: string[] = [];
+    let counted = 0;
+
+    for (const section of sections) {
+      fixture.nativeElement.querySelector(`[data-section="${section}"]`).click();
+      fixture.detectChanges();
+      settle(fixture);
+      // The playlist editor needs a station picked before it mounts at all.
+      settle(fixture);
+      const controls = [...fixture.nativeElement.querySelectorAll('input, select, textarea')];
+      counted += controls.length;
+      offenders.push(...unnamed(fixture.nativeElement).map((c) => `${section}: ${describeControl(c)}`));
+    }
+
+    // COUNTED, so an audit that walked nine empty screens cannot pass. The
+    // console has dozens of controls; a number this low means the sections did
+    // not render and the loop above proved nothing.
+    expect(counted).toBeGreaterThan(20);
+    expect(offenders).toEqual([]);
+  });
+
+  it('labelled control gives every select an accessible name', () => {
+    // The three worst had no placeholder either, so there was nothing at all to
+    // announce or to read. Asserted separately because a select cannot fall
+    // back on placeholder text the way an input can.
+    const fixture = mounted();
+    let selects = 0;
+    const offenders: string[] = [];
+    for (const section of ['sources', 'stations', 'playlist', 'jocks', 'accounts', 'model', 'logs']) {
+      fixture.nativeElement.querySelector(`[data-section="${section}"]`).click();
+      fixture.detectChanges();
+      settle(fixture);
+      settle(fixture);
+      selects += fixture.nativeElement.querySelectorAll('select').length;
+      offenders.push(
+        ...unnamed(fixture.nativeElement)
+          .filter((c) => c.tagName === 'SELECT')
+          .map((c) => `${section}: ${describeControl(c)}`),
+      );
+    }
+    expect(selects).toBeGreaterThan(4);
+    expect(offenders).toEqual([]);
+  });
+
   it('opens on the overview', () => {
     const fixture = mounted();
     expect(fixture.componentInstance.showing()).toBe('overview');

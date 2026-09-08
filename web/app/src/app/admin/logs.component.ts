@@ -138,8 +138,13 @@ export class Logs implements OnDestroy {
   readonly records = signal<LogRecord[]>([]);
   /** Held back while paused, newest first. */
   readonly pending = signal<LogRecord[]>([]);
-  readonly showing = signal('INFO');
-  readonly recorded = signal('INFO');
+  // WARNINGS AND ERRORS, both of them, before anybody chooses.
+  // Reported by the operator: at info the list is more than twenty consecutive
+  // "scanning elapsed=Ns files=N" lines and the one WARN that matters --
+  // SERVING WITHOUT AUTHENTICATION ON A NON-LOOPBACK ADDRESS -- is one row in
+  // forty of it. app.DefaultLogLevel is the server's half of the same default.
+  readonly showing = signal('WARN');
+  readonly recorded = signal('WARN');
   readonly dropped = signal(0);
   readonly paused = signal(false);
   readonly connection = signal('connecting…');
@@ -173,7 +178,7 @@ export class Logs implements OnDestroy {
         }
         this.records.set(r.records ?? []);
         this.dropped.set(r.dropped ?? 0);
-        this.recorded.set(r.level ?? 'INFO');
+        this.recorded.set(r.level ?? 'WARN');
         this.loaded.set(true);
         this.failed.set(false);
         this.stream();

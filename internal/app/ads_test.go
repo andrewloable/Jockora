@@ -6,6 +6,7 @@ package app
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -311,5 +312,55 @@ func TestAppWriteAdIsWiredToTheConsole(t *testing.T) {
 	if _, err := iface.WriteAd(ctx, dj.AdBrief{Brand: "Stillwater", About: "mugs"}); !errors.Is(
 		err, enrich.ErrNoModel) {
 		t.Errorf("WriteAd through the console adapter = %v, want ErrNoModel", err)
+	}
+}
+
+// TestAdRotationLiveSkipsDisabled is Jockora-e9a.55's real requirement: the
+// task asks for the pool exclusion PROVED, not just the flag stored. A flag
+// nothing reads is a switch wired to nothing, and the operator would go on
+// hearing the advert they had just paused.
+func TestAdRotationLiveSkipsDisabled(t *testing.T) {
+	_, st := llmApp(t)
+	ctx := context.Background()
+	source := AdSource(st)
+
+	on, err := st.CreateAd(ctx, store.Ad{
+		Brand: "Stillwater Ceramics", Script: "Stillwater Ceramics. One mug, still."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	off, err := st.CreateAd(ctx, store.Ad{
+		Brand: "Harrow Books", Script: "Harrow Books. A cat, and no computer at all."})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// BOTH ARE IN THE POOL FIRST, so this cannot pass against a source that
+	// only ever returns one advert.
+	if got, err := source(ctx); err != nil || len(got) != 2 {
+		t.Fatalf("AdSource = %+v, %v -- want both before either is disabled", got, err)
+	}
+
+	if err := st.SetAdEnabled(ctx, off, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := source(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("the pool has %d adverts, want only the enabled one: %+v", len(got), got)
+	}
+	if got[0].ID != strconv.FormatInt(on, 10) {
+		t.Errorf("the pool kept the disabled advert: %+v", got[0])
+	}
+
+	// AND IT COMES BACK. Disable is reversible; that is the whole point of it
+	// not being Delete.
+	if err := st.SetAdEnabled(ctx, off, true); err != nil {
+		t.Fatal(err)
+	}
+	if back, err := source(ctx); err != nil || len(back) != 2 {
+		t.Fatalf("AdSource = %+v, %v -- an enabled advert did not come back", back, err)
 	}
 }

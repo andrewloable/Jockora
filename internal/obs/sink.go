@@ -333,9 +333,34 @@ func (s *Sink) Persist(ctx context.Context, store LogStore, buffer int) {
 	}
 	queue := make(chan Record, buffer)
 	s.r.durable = queue
+	// UNDER THE SAME LOCK THE FAN-OUT USES, which is what makes this exact
+	// rather than approximate: a record already in the ring is in this
+	// snapshot, a record logged after this unlock goes to the queue, and
+	// nothing can be both.
+	backlog := s.r.backlogLocked(PersistLevel)
 	s.r.mu.Unlock()
 
-	go s.drain(ctx, store, queue)
+	go s.drain(ctx, store, queue, backlog)
+}
+
+// backlogLocked returns every held record at or above min, OLDEST FIRST.
+//
+// Oldest first because this is the durable log, which is read forwards -- the
+// opposite of Recent, which answers "what just happened" for a browser.
+//
+// The caller must hold r.mu.
+func (r *ring) backlogLocked(min slog.Level) []Record {
+	held := r.n
+	if held > len(r.records) {
+		held = len(r.records)
+	}
+	var out []Record
+	for i := held; i >= 1; i-- {
+		if rec := r.records[(r.n-i)%len(r.records)]; rec.Level >= min {
+			out = append(out, rec)
+		}
+	}
+	return out
 }
 
 // persisting reports whether the writer is still running. Test-facing, and the
@@ -351,12 +376,18 @@ func (s *Sink) persisting() bool {
 // BATCHED because SQLite must not be asked for a write per line and a station
 // under load produces them in bursts: it takes one record, then sweeps up
 // everything already queued behind it before writing.
-func (s *Sink) drain(ctx context.Context, store LogStore, queue chan Record) {
+func (s *Sink) drain(ctx context.Context, store LogStore, queue chan Record, backlog []Record) {
 	defer func() {
 		s.r.mu.Lock()
 		s.r.durable = nil
 		s.r.mu.Unlock()
 	}()
+	// Whatever was logged before the store existed goes first, so the table
+	// reads in the order things happened. Skipped when empty rather than
+	// written as a batch of nothing.
+	if len(backlog) > 0 {
+		s.write(ctx, store, backlog)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -371,14 +402,19 @@ func (s *Sink) drain(ctx context.Context, store LogStore, queue chan Record) {
 					more = false
 				}
 			}
-			if err := store.AppendLogs(ctx, batch); err != nil && ctx.Err() == nil {
-				// THE WRAPPED HANDLER ONLY, never back through the Sink. A
-				// failed write reported through here would become a record,
-				// which would be queued, which would fail -- and the console
-				// would show the log complaining about the log.
-				s.next.Handle(ctx, failureRecord(err)) //nolint:errcheck // nothing left to tell
-			}
+			s.write(ctx, store, batch)
 		}
+	}
+}
+
+// write persists one batch and reports a failure to stderr only.
+func (s *Sink) write(ctx context.Context, store LogStore, batch []Record) {
+	if err := store.AppendLogs(ctx, batch); err != nil && ctx.Err() == nil {
+		// THE WRAPPED HANDLER ONLY, never back through the Sink. A failed write
+		// reported through here would become a record, which would be queued,
+		// which would fail -- and the console would show the log complaining
+		// about the log.
+		s.next.Handle(ctx, failureRecord(err)) //nolint:errcheck // nothing left to tell
 	}
 }
 

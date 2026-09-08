@@ -73,30 +73,46 @@ import { AdminApi, User } from '../api/api';
 
     <fieldset>
       <legend>New account</legend>
-      <input data-name placeholder="name" [value]="name()" (input)="name.set(value($event))" />
-      <input
-        data-password
-        type="password"
-        placeholder="password"
-        [value]="password()"
-        (input)="password.set(value($event))"
-      />
-      <select data-role [value]="role()" (change)="role.set(value($event))">
-        <option value="listener">listener</option>
-        <option value="admin">admin</option>
-      </select>
-      <button type="button" data-add (click)="add()">Create</button>
+      <label>
+        Name
+        <input data-name [value]="name()" (input)="name.set(value($event))" />
+      </label>
+      <label>
+        Password
+        <input
+          data-password
+          type="password"
+          [value]="password()"
+          (input)="password.set(value($event))"
+        />
+      </label>
+      <!-- THE PRIVILEGE DECISION ON THIS FORM, and it was an unlabelled combo
+           box with no placeholder to fall back on either -- so a screen reader
+           announced the choice between listener and admin as nothing at all. -->
+      <label>
+        Role
+        <select data-role [value]="role()" (change)="role.set(value($event))">
+          <option value="listener">listener</option>
+          <option value="admin">admin</option>
+        </select>
+      </label>
+      <div data-form-actions>
+        <button type="button" data-add (click)="add()">Create</button>
+      </div>
     </fieldset>
 
     @if (resetting(); as user) {
       <fieldset data-reset-form>
         <legend>New password for {{ user.name }}</legend>
-        <input
-          data-new-password
-          type="password"
-          [value]="password()"
-          (input)="password.set(value($event))"
-        />
+        <label>
+          New password
+          <input
+            data-new-password
+            type="password"
+            [value]="password()"
+            (input)="password.set(value($event))"
+          />
+        </label>
         <button type="button" data-save-password (click)="savePassword(user)">Set</button>
         <button type="button" data-cancel-reset (click)="resetting.set(null)">Cancel</button>
       </fieldset>

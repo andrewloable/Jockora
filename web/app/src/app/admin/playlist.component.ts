@@ -29,7 +29,6 @@ export const PAGE = 50;
           <th scope="col">Tempo</th>
           <th scope="col">Genre</th>
           <th scope="col">Mood</th>
-          <th scope="col">Status</th>
           <th scope="col"><span data-sr-only>Actions</span></th>
         </tr>
       </thead>
@@ -37,7 +36,24 @@ export const PAGE = 50;
         @for (track of tracks(); track track.track_id) {
           <tr [attr.data-missing]="track.missing ? '' : null">
             <td data-label="Artist">{{ track.artist }}</td>
-            <td data-label="Title">{{ track.title }}</td>
+            <!-- PINNED, EXCLUDED AND MISSING ARE STATES OF THE TRACK, so they
+                 read as markers on the track rather than as a column heading
+                 that is blank for everybody else. The Status column was empty
+                 on all 50 rows on the reported install -- correct, because the
+                 operator had pinned nothing -- while holding 73px on every row
+                 for ever. -->
+            <td data-label="Title">
+              {{ track.title }}
+              @if (track.pinned) {
+                <span data-flag>pinned</span>
+              }
+              @if (track.excluded) {
+                <span data-flag>excluded</span>
+              }
+              @if (track.missing) {
+                <span data-gone>missing</span>
+              }
+            </td>
             <td data-label="Album">{{ track.album }}</td>
             <td data-label="Year">{{ track.year || '' }}</td>
             <!-- ROUNDED, and BLANK when unmeasured. A tempo to one decimal is a
@@ -58,17 +74,6 @@ export const PAGE = 50;
               }
             </td>
             <td data-label="Mood">{{ track.moods.join(', ') || '' }}</td>
-            <td data-label="Status">
-              @if (track.pinned) {
-                <span data-flag>pinned</span>
-              }
-              @if (track.excluded) {
-                <span data-flag>excluded</span>
-              }
-              @if (track.missing) {
-                <span data-gone>missing</span>
-              }
-            </td>
             <!-- LABELLED like the rest, because below 48rem every row becomes
                  a card and these two were the rightmost of seven columns:
                  measured 654px into a 390px window, inside a table that
@@ -93,7 +98,7 @@ export const PAGE = 50;
           </tr>
           @if (editing() === track.track_id) {
             <tr data-tag-editor>
-              <td colspan="9">
+              <td colspan="8">
                 <!-- Checkboxes, not a multi-select: picking several
                    non-contiguous values with ctrl-click is a keyboard trick
                    nobody can see. The ticked boxes ARE the readout. -->
@@ -143,7 +148,7 @@ export const PAGE = 50;
                with no rows, so a slow first paint told a new operator their
                library was empty. Jockora-e9a.50. -->
           <tr>
-            <td colspan="9">
+            <td colspan="8">
               @if (!loaded()) {
                 <span data-loading>Loading…</span>
               } @else if (!failed()) {

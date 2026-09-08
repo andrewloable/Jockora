@@ -152,7 +152,25 @@ export interface Ad {
   script: string;
   /** RFC3339, or absent when it has never aired. Never the epoch. */
   last_aired_at?: string;
+  /**
+   * Whether it is in the rotation.
+   *
+   * NOT OPTIONAL: false is the interesting value, and a flag that can be
+   * undefined is a flag whose off state renders as "on" the first time
+   * somebody forgets a default.
+   */
+  enabled: boolean;
 }
+
+/**
+ * What the console posts to save an advert.
+ *
+ * NO enabled AND NO last_aired_at, and that is the point rather than an
+ * oversight: the form writes the whole card back, so a body carrying the flag
+ * would put a paused advert back on air the moment somebody fixed a typo in it.
+ * setAdEnabled owns that column, the way the server's SetAdEnabled does.
+ */
+export type AdBody = Omit<Ad, 'id' | 'enabled' | 'last_aired_at'>;
 
 /** What POST /admin/ads/write answers. It saves nothing. */
 export interface WrittenAd {
@@ -427,16 +445,27 @@ export class AdminApi {
     return this.http.post<WrittenAd>('/admin/ads/write', { brand, about, delivery });
   }
 
-  addAd(body: Omit<Ad, 'id'>): Observable<{ id: number }> {
+  addAd(body: AdBody): Observable<{ id: number }> {
     return this.http.post<{ id: number }>('/admin/ads', body);
   }
 
-  updateAd(id: number, body: Omit<Ad, 'id'>): Observable<void> {
+  updateAd(id: number, body: AdBody): Observable<void> {
     return this.http.put<void>(`/admin/ads/${id}`, body);
   }
 
   removeAd(id: number): Observable<void> {
     return this.http.delete<void>(`/admin/ads/${id}`);
+  }
+
+  /**
+   * Pause an advert, or put it back on air.
+   *
+   * The same shape sources, stations and accounts use. Disabling is NOT
+   * deleting: the copy is hand-written prose, and a seasonal advertiser should
+   * not cost the operator a retype.
+   */
+  setAdEnabled(id: number, on: boolean): Observable<void> {
+    return this.http.post<void>(`/admin/ads/${id}/${on ? 'enable' : 'disable'}`, {});
   }
 
   updateStation(id: number, body: StationBody): Observable<Diff> {

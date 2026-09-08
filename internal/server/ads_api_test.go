@@ -567,6 +567,8 @@ func TestAdsAPIStoreFails(t *testing.T) {
 		{http.MethodPost, "/admin/ads", good},
 		{http.MethodPut, "/admin/ads/1", good},
 		{http.MethodDelete, "/admin/ads/1", ""},
+		{http.MethodPost, "/admin/ads/1/disable", ""},
+		{http.MethodPost, "/admin/ads/1/enable", ""},
 	} {
 		rec := as(t, s, c.method, c.path, c.body, admin)
 		if rec.Code != http.StatusInternalServerError {
@@ -629,4 +631,118 @@ func TestAdsAPIUnwired(t *testing.T) {
 	if rec := as(t, s2, http.MethodPut, "/admin/ads/1/rewrite", "", a2); rec.Code != http.StatusNotFound {
 		t.Errorf("an unknown sub-path = %d, want 404", rec.Code)
 	}
+}
+
+// ------------------------------------------------------------ Jockora-e9a.55 --
+//
+// An advert could only be created or destroyed, never paused, while sources,
+// stations and accounts all disable. A seasonal advertiser cost the operator
+// hand-written copy and a retype.
+
+func TestAdsAPIDisableAndEnable(t *testing.T) {
+	s, st, _ := adsServer(t)
+	admin := adminCookie(t, s)
+	ctx := context.Background()
+
+	id, err := st.CreateAd(ctx, store.Ad{Brand: "Stillwater",
+		Script: "Stillwater. Mugs, thrown by hand, and still here tomorrow."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := "/admin/ads/" + strconv.FormatInt(id, 10)
+
+	// ON FIRST. Without this the assertion below is satisfied by a view that
+	// dropped the field altogether -- which is exactly what a mutation did, and
+	// it survived until this line existed.
+	if list := adsList(t, s, admin); len(list) != 1 || !list[0].Enabled {
+		t.Fatalf("a new advert reads as %+v, want it on air", list)
+	}
+
+	if rec := as(t, s, http.MethodPost, at+"/disable", "", admin); rec.Code != http.StatusNoContent {
+		t.Fatalf("disable = %d: %s", rec.Code, rec.Body)
+	}
+	off, err := st.GetAd(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off.Enabled {
+		t.Error("the row is still enabled")
+	}
+	// STILL IN THE LIST. Disabling is not deleting, and an advert the operator
+	// cannot see is an advert they cannot enable again.
+	if list := adsList(t, s, admin); len(list) != 1 || list[0].Enabled {
+		t.Errorf("the list is %+v, want the disabled advert still on it", list)
+	}
+
+	if rec := as(t, s, http.MethodPost, at+"/enable", "", admin); rec.Code != http.StatusNoContent {
+		t.Fatalf("enable = %d: %s", rec.Code, rec.Body)
+	}
+	if on, err := st.GetAd(ctx, id); err != nil || !on.Enabled {
+		t.Errorf("the advert did not come back on: %+v %v", on, err)
+	}
+}
+
+// TestAdsAPIDisableIsNotADelete: an edit must not carry the flag. The console
+// saves by writing the whole card back, so an advert paused this morning would
+// come back on the moment somebody fixed a typo in it.
+func TestAdsAPIDisableIsNotADelete(t *testing.T) {
+	s, st, _ := adsServer(t)
+	admin := adminCookie(t, s)
+	ctx := context.Background()
+
+	id, err := st.CreateAd(ctx, store.Ad{Brand: "Stillwater",
+		Script: "Stillwater. Mugs, thrown by hand, and still here tomorrow."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := "/admin/ads/" + strconv.FormatInt(id, 10)
+	if rec := as(t, s, http.MethodPost, at+"/disable", "", admin); rec.Code != http.StatusNoContent {
+		t.Fatalf("disable = %d", rec.Code)
+	}
+
+	rec := as(t, s, http.MethodPut, at, savePost("Stillwater", "mugs", "flat",
+		"Stillwater. Twelve years now, and still the one mug."), admin)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("update = %d: %s", rec.Code, rec.Body)
+	}
+	got, err := st.GetAd(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Enabled {
+		t.Error("saving an edit turned a paused advert back on")
+	}
+	if !strings.Contains(got.Script, "Twelve years") {
+		t.Errorf("the edit did not land: %q", got.Script)
+	}
+}
+
+func TestAdsAPIDisableMissing(t *testing.T) {
+	s, _, _ := adsServer(t)
+	admin := adminCookie(t, s)
+	if rec := as(t, s, http.MethodPost, "/admin/ads/9999/disable", "", admin); rec.Code != http.StatusNotFound {
+		t.Errorf("= %d, want 404", rec.Code)
+	}
+	// An action nobody defined is a 404, not a 405 and not a silent success.
+	if rec := as(t, s, http.MethodPost, "/admin/ads/1/incinerate", "", admin); rec.Code != http.StatusNotFound {
+		t.Errorf("an unknown action = %d, want 404", rec.Code)
+	}
+	// And enable is a POST like everywhere else in this console.
+	if rec := as(t, s, http.MethodGet, "/admin/ads/1/enable", "", admin); rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET enable = %d, want 405", rec.Code)
+	}
+}
+
+// adsList reads the console's own view of the list.
+func adsList(t *testing.T, s *Server, admin *http.Cookie) []adView {
+	t.Helper()
+	rec := as(t, s, http.MethodGet, "/admin/ads", "", admin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list = %d: %s", rec.Code, rec.Body)
+	}
+	var out []adView
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("list body: %v", err)
+	}
+	return out
 }

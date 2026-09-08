@@ -90,6 +90,7 @@ func v01Fixture(t *testing.T) string {
 		`ALTER TABLE ads DROP COLUMN brief`,
 		`ALTER TABLE ads DROP COLUMN delivery`,
 		`ALTER TABLE ads DROP COLUMN created_at`,
+		`ALTER TABLE ads DROP COLUMN enabled`,
 		`PRAGMA user_version = 5`,
 	} {
 		if _, err := s.DB().Exec(stmt); err != nil {

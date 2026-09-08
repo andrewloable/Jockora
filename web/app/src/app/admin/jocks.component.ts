@@ -1,6 +1,20 @@
 import { Component, inject, signal } from '@angular/core';
 import { AdminApi, Jock } from '../api/api';
 
+/**
+ * A name turned into the identifier the seeded jocks already use.
+ *
+ * "Sunny Marchetti" is sunny_marchetti, which is also the attribution string
+ * the listener feedback writes -- so this is the existing convention rather
+ * than a new one.
+ */
+export function slug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
 const blank = (): Jock => ({
   id: '',
   name: '',
@@ -27,6 +41,11 @@ const blank = (): Jock => ({
           <th>Name</th>
           <th>Voice</th>
           <th>Good for</th>
+          <!-- THE TWO FIELDS THAT DECIDE HOW A DJ SOUNDS, and the whole point
+               of a persona in this product. They were invisible here, so
+               telling two jocks apart meant opening Edit on each in turn. -->
+          <th>Speech style</th>
+          <th>Personality</th>
           <th>Actions</th>
         </tr>
       </thead>
@@ -36,6 +55,15 @@ const blank = (): Jock => ({
             <td data-label="Name">{{ jock.name }}</td>
             <td data-label="Voice">{{ jock.voice_id }}</td>
             <td data-label="Good for">{{ jock.good_for_genres.join(', ') }}</td>
+            <!-- TRUNCATED BY THE COLUMN, NEVER BY THE DATA. The full text is on
+                 the row, so the phone card shows all of it and a hover on the
+                 desktop table reveals the rest. -->
+            <td data-label="Speech style" data-style-cell [title]="jock.speech_style">
+              {{ jock.speech_style }}
+            </td>
+            <td data-label="Personality" data-personality-cell [title]="jock.personality">
+              {{ jock.personality }}
+            </td>
             <!-- LABELLED like the rest: below 48rem every row becomes a card,
                and these three buttons were drawn past the right edge of a
                390px phone with nothing to scroll. -->
@@ -57,7 +85,7 @@ const blank = (): Jock => ({
                with no rows, so a slow first paint told a new operator their
                library was empty. Jockora-e9a.50. -->
           <tr>
-            <td colspan="5">
+            <td colspan="6">
               @if (!loaded()) {
                 <span data-loading>Loading…</span>
               } @else if (!failed()) {
@@ -72,16 +100,42 @@ const blank = (): Jock => ({
       </tbody>
     </table>
 
-    <fieldset>
+    <fieldset data-jock-form>
       <legend>{{ editing() ? 'Edit ' + draft().id : 'New jock' }}</legend>
-      <input data-id placeholder="id" [value]="draft().id" (input)="set('id', $event)" />
-      <input data-name placeholder="name" [value]="draft().name" (input)="set('name', $event)" />
-      <select data-voice (change)="set('voice_id', $event)">
-        <option value="" [selected]="!draft().voice_id">— voice —</option>
-        @for (voice of voices(); track voice) {
-          <option [value]="voice" [selected]="voice === draft().voice_id">{{ voice }}</option>
-        }
-      </select>
+      <!-- THE NAME COMES FIRST, because it is the only thing on this form an
+           operator actually has in mind. The id follows FROM it. -->
+      <label>
+        Name
+        <input
+          data-name
+          placeholder="Sunny Marchetti"
+          [value]="draft().name"
+          (input)="setName($event)"
+        />
+      </label>
+      <!-- DERIVED, NOT DEMANDED. This used to be the first field, a free-text
+           box whose placeholder was the word "id", asking a person to invent a
+           stable machine key with no stated rules and no sign of what happens
+           if it collides. It is still editable -- somebody who cares can set
+           it -- but somebody who does not never has to look. -->
+      <label>
+        Identifier
+        <input data-id [value]="draft().id" (input)="setId($event)" [readOnly]="editing()" />
+        <small>{{
+          editing()
+            ? 'Fixed once a jock exists: stations and persona files refer to it.'
+            : 'Made from the name. Change it if you want a different one.'
+        }}</small>
+      </label>
+      <label>
+        Voice
+        <select data-voice (change)="set('voice_id', $event)">
+          <option value="" [selected]="!draft().voice_id">— voice —</option>
+          @for (voice of voices(); track voice) {
+            <option [value]="voice" [selected]="voice === draft().voice_id">{{ voice }}</option>
+          }
+        </select>
+      </label>
       <button
         type="button"
         data-preview
@@ -90,22 +144,32 @@ const blank = (): Jock => ({
       >
         {{ previewing() === draft().voice_id ? 'Speaking…' : 'Hear it' }}
       </button>
-      <input
-        data-style
-        placeholder="speech style"
-        [value]="draft().speech_style"
-        (input)="set('speech_style', $event)"
-      />
-      <input
-        data-personality
-        placeholder="personality"
-        [value]="draft().personality"
-        (input)="set('personality', $event)"
-      />
-      <button type="button" data-save (click)="save()">Save</button>
-      @if (editing()) {
-        <button type="button" data-cancel (click)="reset()">Cancel</button>
-      }
+      <label>
+        Speech style
+        <input
+          data-style
+          placeholder="clipped, no filler, never repeats a phrase"
+          [value]="draft().speech_style"
+          (input)="set('speech_style', $event)"
+        />
+        <small>How they talk. The listener hears this more than anything else here.</small>
+      </label>
+      <label>
+        Personality
+        <input
+          data-personality
+          placeholder="dry, fond of the records, unimpressed by everything else"
+          [value]="draft().personality"
+          (input)="set('personality', $event)"
+        />
+        <small>Who they are. The persona card is ground truth and never drifts.</small>
+      </label>
+      <div data-form-actions>
+        <button type="button" data-save (click)="save()">Save</button>
+        @if (editing()) {
+          <button type="button" data-cancel (click)="reset()">Cancel</button>
+        }
+      </div>
     </fieldset>
 
     <p data-said>{{ said() }}</p>
@@ -136,6 +200,8 @@ export class Jocks {
   readonly voices = signal<string[]>([]);
   readonly draft = signal<Jock>(blank());
   readonly editing = signal(false);
+  /** True once the operator has set an id by hand, so it stops being derived. */
+  readonly idTyped = signal(false);
   readonly said = signal('');
   readonly previewing = signal<string | null>(null);
 
@@ -212,15 +278,36 @@ export class Jocks {
     this.draft.set({ ...this.draft(), [field]: value });
   }
 
+  /**
+   * The name, and the id that follows from it.
+   *
+   * Only while the id is still the derived one: the moment an operator types
+   * their own, a later keystroke in the name box must not overwrite it. An
+   * existing jock never re-derives at all, because the id is the stable key
+   * that stations and persona files refer to and renaming must not move it.
+   */
+  setName(event: Event): void {
+    const name = (event.target as HTMLInputElement).value;
+    const derive = !this.editing() && !this.idTyped();
+    this.draft.set({ ...this.draft(), name, id: derive ? slug(name) : this.draft().id });
+  }
+
+  setId(event: Event): void {
+    this.idTyped.set(true);
+    this.set('id', event);
+  }
+
   edit(jock: Jock): void {
     this.draft.set({ ...jock });
     this.editing.set(true);
+    this.idTyped.set(true);
     this.said.set('');
   }
 
   reset(): void {
     this.draft.set(blank());
     this.editing.set(false);
+    this.idTyped.set(false);
   }
 
   save(): void {

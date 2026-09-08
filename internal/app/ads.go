@@ -39,6 +39,13 @@ func readAds(ctx context.Context, s *store.Store) ([]dj.Ad, error) {
 	}
 	out := make([]dj.Ad, 0, len(rows))
 	for _, r := range rows {
+		// PAUSED ADVERTS ARE NOT IN THE POOL. Filtered here rather than in the
+		// SQL because ListAds is also what the console renders, and an operator
+		// who disabled an advert still has to be able to see it in order to
+		// enable it again.
+		if !r.Enabled {
+			continue
+		}
 		out = append(out, dj.Ad{
 			// THE ROW ID, AS A STRING. dj.Ad.ID is a string and the row id is
 			// an integer, and a silent mismatch here means the cooldown never

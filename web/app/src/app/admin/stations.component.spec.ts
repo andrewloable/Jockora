@@ -638,6 +638,122 @@ describe('Stations', () => {
       expect(cell.getAttribute('data-label')).toBeTruthy();
     }
   });
+  // ------------------------------------------------------- Jockora-e9a.53 --
+  //
+  // Editing expanded a row IN PLACE, so the form inherited the TABLE's column
+  // grid: the name box and all six range fields were crammed into the Name
+  // column at x109-413, the pickers sat in Genre-mood, and Save and Cancel were
+  // stranded in Actions at y610 and y644, vertically adrift of every field they
+  // applied to, with 200px of dead column between. The add fieldset stayed on
+  // screen underneath, so two name boxes and two Describe it buttons were
+  // visible at once.
+  //
+  // And the Warning column has been empty in every screenshot across three
+  // review rounds: it holds one of two strings, both a pure function of the
+  // number in the cell beside it.
+
+  it('station form is not laid out by the table', () => {
+    const fixture = mounted();
+    (fixture.nativeElement.querySelector('[data-edit]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    const form = fixture.nativeElement.querySelector('[data-station-edit]');
+    expect(form).not.toBeNull();
+    // THE COLUMN GRID IS THE DEFECT, so the form must not be inside the table
+    // at all -- not merely restyled within it.
+    expect(form.closest('table')).toBeNull();
+    // Save and Cancel travel with the fields they apply to.
+    expect(form.querySelector('[data-save]')).not.toBeNull();
+    expect(form.querySelector('[data-cancel]')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('table [data-save]')).toBeNull();
+  });
+
+  it('station form gives every field a label in the same position', () => {
+    const fixture = mounted();
+    (fixture.nativeElement.querySelector('[data-edit]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    for (const form of ['[data-station-edit]', '[data-station-add]']) {
+      const el = fixture.nativeElement.querySelector(form);
+      // The add form is hidden while editing, so only assert on what is there.
+      if (!el) {
+        continue;
+      }
+      const controls = [...el.querySelectorAll(':scope > label input, :scope > label select')];
+      expect(controls.length).toBeGreaterThan(0);
+      for (const c of controls) {
+        const label = c.closest('label');
+        // LABEL TEXT FIRST, THEN THE CONTROL. One placement throughout, which
+        // is what the three different ones in a single fieldset cost.
+        expect(label!.firstChild!.textContent!.trim().length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it('station form labels each end of a range separately', () => {
+    const fixture = mounted();
+    (fixture.nativeElement.querySelector('[data-edit]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    // Each of the six range boxes has a label of its own. One label over a PAIR
+    // of stacked inputs said nothing about which box was which -- and the tempo
+    // one read "Fastest and slowest" over a min box, so it named them backwards.
+    for (const sel of [
+      '[data-edit-tempo-min]',
+      '[data-edit-tempo-max]',
+      '[data-edit-length-min]',
+      '[data-edit-length-max]',
+      '[data-edit-year-min]',
+      '[data-edit-year-max]',
+    ]) {
+      const box = fixture.nativeElement.querySelector(sel);
+      expect(box, sel).not.toBeNull();
+      const label = box.closest('label');
+      expect(label, sel).not.toBeNull();
+      expect(label.querySelectorAll('input').length, sel).toBe(1);
+    }
+    const slowest = fixture.nativeElement
+      .querySelector('[data-edit-tempo-min]')
+      .closest('label')
+      .textContent.toLowerCase();
+    expect(slowest).toContain('slowest');
+    expect(slowest).not.toContain('fastest');
+  });
+
+  it('station form hides the add fieldset while an edit is open', () => {
+    const fixture = mounted();
+    expect(fixture.nativeElement.querySelector('[data-station-add]')).not.toBeNull();
+
+    (fixture.nativeElement.querySelector('[data-edit]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    // Two name boxes and two Describe it buttons on screen at once is how an
+    // operator types into the wrong one.
+    expect(fixture.nativeElement.querySelector('[data-station-add]')).toBeNull();
+
+    (fixture.nativeElement.querySelector('[data-cancel]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-station-add]')).not.toBeNull();
+  });
+
+  it('station form puts the warning on the track count and keeps no warning column', () => {
+    const fixture = mounted();
+    const heads = [...fixture.nativeElement.querySelectorAll('[data-stations] thead th')].map((h) =>
+      h.textContent.trim().toLowerCase(),
+    );
+    // A PERMANENT COLUMN FOR A RARE DERIVED STRING costs width on every row
+    // for ever, and is an extra column to stack on a phone.
+    expect(heads).not.toContain('warning');
+
+    const rows = [...fixture.nativeElement.querySelectorAll('[data-stations] tbody tr')];
+    const thin = rows[1];
+    const warning = thin.querySelector('[data-warning]');
+    expect(warning).not.toBeNull();
+    expect(warning.textContent).toContain('fewer tracks');
+    // ON the count it is derived from, not in a column of its own.
+    expect(warning.closest('td').textContent).toContain('12');
+    // And a healthy station carries none at all.
+    expect(rows[0].querySelector('[data-warning]')).toBeNull();
+  });
 });
 
 // -------------------------------------------------------- stations brief --
@@ -1280,4 +1396,5 @@ describe('stations brief', () => {
     fixture.detectChanges();
     expect(fixture.nativeElement.textContent).toContain('tempo 900 is outside 30 to 250');
   });
+
 });

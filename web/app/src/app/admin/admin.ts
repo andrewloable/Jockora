@@ -75,13 +75,16 @@ type Section = (typeof sections)[number];
         <app-stations (playlist)="openPlaylistFor($event)" />
       }
       @case ('playlist') {
-        <select data-pick-station (change)="pick($event)">
-          @for (station of stations(); track station.id) {
-            <option [value]="station.id" [selected]="station.id === picked()">
-              {{ station.name }}
-            </option>
-          }
-        </select>
+        <label>
+          Station
+          <select data-pick-station (change)="pick($event)">
+            @for (station of stations(); track station.id) {
+              <option [value]="station.id" [selected]="station.id === picked()">
+                {{ station.name }}
+              </option>
+            }
+          </select>
+        </label>
         @if (picked(); as id) {
           <app-playlist [station]="id" />
         } @else {

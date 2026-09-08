@@ -168,13 +168,27 @@ func TestNoFDLeakOver100Decodes(t *testing.T) {
 // pacing -- so a watchdog measuring the whole loop would kill healthy decodes of
 // every long track. It must measure only time spent waiting on ffmpeg.
 func TestSlowConsumerIsNotAStall(t *testing.T) {
+	// TWO BLOCKS, 4096 frames of 8 bytes each, and it has to be two.
+	//
+	// With one block the consumer takes it the instant it is offered and the
+	// decoder's next read hits EOF, so the send NEVER BLOCKS and the property
+	// is not exercised at all -- the test passed in 0.41s while proving
+	// nothing. The second send is the one that waits on a sleeping consumer,
+	// which is the only place a whole-loop watchdog would fire.
 	useFake(t, "head -c 65536 /dev/zero")
 	old := StallTimeout
-	// A full second against a two-second consumer. The earlier 300ms/500ms pair
-	// held the property but had no margin, and it failed under the load of the
-	// rest of the suite -- a scheduling delay on a read is not a stalled
-	// decoder either, and a flaky guard is worse than none.
-	StallTimeout = time.Second
+	// THREE SECONDS AGAINST A FOUR-SECOND CONSUMER, and the margin is sized
+	// against a measured failure rather than guessed.
+	//
+	// This has now been widened twice. 300ms/500ms held the property with no
+	// margin; 1s/2s still failed roughly one full "make test-race" in three,
+	// and the failure was always at exactly 1.00s -- the timeout itself, on the
+	// FIRST read window. That window covers fork, exec and the fake's first
+	// write, so what it was measuring was process-start latency on a machine
+	// running 26 packages under the race detector, which is not a stalled
+	// decoder. It is the same thing StallTimeout is 30s for in production:
+	// ffmpeg has to probe a container before it emits a sample.
+	StallTimeout = 3 * time.Second
 	t.Cleanup(func() { StallTimeout = old })
 
 	out := make(chan []mix.Frame) // unbuffered: every send waits for the reader
@@ -184,9 +198,11 @@ func TestSlowConsumerIsNotAStall(t *testing.T) {
 		for {
 			select {
 			case <-out:
-				// Far slower than the stall timeout, exactly as a real-time
-				// consumer is.
-				time.Sleep(2 * time.Second)
+				// Longer than the stall timeout, exactly as a real-time
+				// consumer is. A watchdog around the whole loop fires here;
+				// one that measures only reads does not, and that difference
+				// is what this test exists to hold.
+				time.Sleep(4 * time.Second)
 			case <-stop:
 				return
 			}

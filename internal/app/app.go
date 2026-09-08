@@ -1632,14 +1632,41 @@ func (a *App) announceBoundary(ctx context.Context, rt *station.Runtime, boundar
 	// station has its own. Read from the primary runtime, a break on the second
 	// station was placed against the first station's position and landed
 	// wherever that happened to be.
+	//
+	// PLUS WHAT IS DECODED AND NOT YET HEARD, and leaving this out is what made
+	// the DJ announce one record over the end of another.
+	//
+	// This runs BEFORE Decode(cur), so the ring still holds the tail of the
+	// PREVIOUS track -- the decoder fills it a whole station.RingSeconds ahead
+	// of the mixer. So the mixer's position is not when cur starts; cur starts
+	// once that buffered audio has played out. Measured live on 2026-09-08:
+	// boundary 1 was placed at 479 and boundary 2 was announced at now_s 469,
+	// ten seconds -- one full ring -- before the track it followed had ended.
+	// The break then landed inside that track's tail, and because a ramp break
+	// introduces the NEXT record, a listener heard "Now Green Day 21 Guns" over
+	// the closing seconds of Nine Inch Nails.
+	//
+	// READ, NOT ASSUMED TO BE RingSeconds. The ring is only full while the
+	// decoder is keeping up; on a slow disk or a short track it holds less, and
+	// subtracting a constant would then be wrong in the other direction.
 	now := secondsOn(rt)
-	at := now + curTrack.DurationS
+	buffered := bufferedSeconds(rt)
+	at := now + buffered + curTrack.DurationS
 	took := br.pipeline.Announce(station.Boundary{
-		Index:           boundary,
-		Cur:             curTrack,
-		Next:            nextTrack,
+		Index: boundary,
+		Cur:   curTrack,
+		Next:  nextTrack,
+		// THE SAME INSTANT, TWICE, AND THE SECOND IS DERIVED FROM THE FIRST.
+		//
+		// The seconds go to the scheduler and the samples to the splice, and
+		// they used to be computed independently -- once from `now`, once from
+		// rt.SamplePos() -- which is two chances to be wrong and no way to see
+		// it: a correction applied to one and missed on the other reads right
+		// in the log and still sounds wrong, because the splice follows the
+		// samples. `now` IS SamplePos in seconds, so this is the same number
+		// and can no longer disagree with itself.
 		InsertionAt:     at,
-		InsertionSample: rt.SamplePos() + int64(curTrack.DurationS*mix.SampleRate),
+		InsertionSample: int64(at * mix.SampleRate),
 
 		// CARRIED, not stashed in the writer. Generation happens up to a
 		// minute later, by which time later boundaries have arrived; the
@@ -1660,6 +1687,9 @@ func (a *App) announceBoundary(ctx context.Context, rt *station.Runtime, boundar
 		"boundary", boundary, "taken", took,
 		"cadence", br.pipeline.EveryN(),
 		"now_s", math.Round(now),
+		// SAID OUT LOUD, because it is the term that was missing and the only
+		// way to see from a log that it is being counted.
+		"buffered_s", math.Round(buffered),
 		"insertion_at_s", math.Round(at),
 		"track_s", math.Round(curTrack.DurationS),
 		"pending", br.pipeline.Pending())
@@ -1668,6 +1698,19 @@ func (a *App) announceBoundary(ctx context.Context, rt *station.Runtime, boundar
 // secondsOn is one station's position on its own bus clock.
 func secondsOn(rt *station.Runtime) float64 {
 	return float64(rt.SamplePos()) / mix.SampleRate
+}
+
+// bufferedSeconds is audio already decoded and not yet heard.
+//
+// The gap between the mixer's position and what a listener is actually hearing
+// next. A runtime with no ring reports nothing rather than panicking: several
+// tests build one, and a nil check is cheaper than the crash.
+func bufferedSeconds(rt *station.Runtime) float64 {
+	ring := rt.Ring()
+	if ring == nil {
+		return 0
+	}
+	return ring.Occupancy().Seconds()
 }
 
 // trackFor reads the placement numbers a break needs about one track.

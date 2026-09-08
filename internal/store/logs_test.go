@@ -165,12 +165,12 @@ func TestLogStoreMigrates(t *testing.T) {
 	if _, err := old.CreateAd(ctx, Ad{Brand: "Stillwater", Script: "One mug, still."}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := old.DB().Exec(`DROP TABLE log_records`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := old.DB().Exec(`UPDATE schema_version SET version = ?`, logsSchemaVersion); err != nil {
-		t.Fatal(err)
-	}
+	// THROUGH rewindTo, not by hand. Undoing only this migration's own table
+	// left every LATER migration's columns in place, so the next one to add a
+	// column to a v0.1 table failed here on "duplicate column name" -- which is
+	// what Jockora-e9a.55's ads.enabled did. rewindTo knows every undo, so this
+	// keeps working as migrations land.
+	rewindTo(t, old, logsSchemaVersion)
 	old.Close() //nolint:errcheck // reopening to migrate
 
 	up := openAt(t, path)

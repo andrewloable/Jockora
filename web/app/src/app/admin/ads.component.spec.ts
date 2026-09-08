@@ -18,8 +18,16 @@ const rows = [
     delivery: 'deadpan',
     script,
     last_aired_at: '2026-09-08T14:30:00Z',
+    enabled: true,
   },
-  { id: 2, brand: 'Harrow & Fen', brief: '', delivery: '', script: 'Harrow and Fen. Books.' },
+  {
+    id: 2,
+    brand: 'Harrow & Fen',
+    brief: '',
+    delivery: '',
+    script: 'Harrow and Fen. Books.',
+    enabled: true,
+  },
 ];
 
 describe('ads', () => {
@@ -383,5 +391,122 @@ describe('ads', () => {
     // A FAILED READ IS NOT AN EMPTY LIBRARY. Jockora-e9a.50.
     expect(second.nativeElement.textContent).not.toContain('No adverts yet');
     expect(second.nativeElement.textContent).toContain('Could not read');
+  });
+
+  // ------------------------------------------------------- Jockora-e9a.55 --
+  //
+  // An advert could only be created or destroyed, never paused, while sources,
+  // stations and accounts all disable. The copy is hand-written prose, so
+  // Delete-as-the-only-off-switch cost an operator a retype every time an
+  // advertiser went quiet for a season. And the form ran labels, controls and
+  // helper text together into one line, because a textarea had no rule in the
+  // stylesheet at all and stayed inline beside its own label.
+
+  it('advert can be disabled without being deleted', () => {
+    const fixture = mounted();
+    const row = fixture.nativeElement.querySelectorAll('[data-ads] tbody tr')[0];
+    const toggle = row.querySelector('[data-toggle]') as HTMLButtonElement;
+    expect(toggle).not.toBeNull();
+    // THE SAME WORD sources, stations and accounts use.
+    expect(toggle.textContent!.trim()).toBe('Disable');
+
+    toggle.click();
+    ctrl.expectOne((r) => r.url === '/admin/ads/1/disable' && r.method === 'POST').flush(null);
+    // NOT A DELETE. The list is re-read, and nothing was destroyed.
+    ctrl.expectOne('/admin/ads').flush([{ ...rows[0], enabled: false }, rows[1]]);
+    fixture.detectChanges();
+
+    const after = fixture.nativeElement.querySelectorAll('[data-ads] tbody tr')[0];
+    const back = after.querySelector('[data-toggle]') as HTMLButtonElement;
+    expect(back.textContent!.trim()).toBe('Enable');
+    // Still on screen, still carrying its script: an advert an operator cannot
+    // see is an advert they cannot switch back on.
+    expect(after.textContent).toContain('Stillwater Ceramics');
+
+    // AND BACK ON. Reversible is the whole reason this is not Delete, so the
+    // return trip is asserted rather than assumed.
+    back.click();
+    ctrl.expectOne((r) => r.url === '/admin/ads/1/enable' && r.method === 'POST').flush(null);
+    ctrl.expectOne('/admin/ads').flush(rows);
+    fixture.detectChanges();
+    expect(
+      fixture.nativeElement.querySelector('[data-ads] tbody tr [data-toggle]')!.textContent!.trim(),
+    ).toBe('Disable');
+    expect(fixture.nativeElement.querySelector('[data-said]')!.textContent).toContain(
+      'back on air',
+    );
+  });
+
+  it('advert says so when a pause cannot be saved', () => {
+    const fixture = mounted();
+    (
+      fixture.nativeElement.querySelector('[data-ads] tbody tr [data-toggle]') as HTMLButtonElement
+    ).click();
+    ctrl.expectOne('/admin/ads/1/disable').error(new ProgressEvent('failed'));
+    fixture.detectChanges();
+    // A row that silently stays On after a failed disable is how an operator
+    // concludes the button does nothing.
+    expect(fixture.nativeElement.querySelector('[data-said]')!.textContent).toContain(
+      'Could not change',
+    );
+  });
+
+  it('advert that is disabled is marked as off in the list', () => {
+    const fixture = mounted([{ ...rows[0], enabled: false }, rows[1]]);
+    const [off, on] = fixture.nativeElement.querySelectorAll('[data-ads] tbody tr');
+    // The operator has to be able to tell at a glance which of these is on air;
+    // the Go side proves it is actually out of the pool.
+    expect(off.querySelector('[data-ad-state]')!.textContent).toContain('Off');
+    expect(on.querySelector('[data-ad-state]')!.textContent).toContain('On');
+  });
+
+  it('advert disable asks no question, because it can be undone', () => {
+    // Jockora-e9a.48: a reversible action gets no prompt. Delete asks; this
+    // must not, or the two read as equally serious.
+    let asked = 0;
+    vi.stubGlobal('confirm', () => {
+      asked++;
+      return true;
+    });
+    const fixture = mounted();
+    (
+      fixture.nativeElement.querySelector('[data-ads] tbody tr [data-toggle]') as HTMLButtonElement
+    ).click();
+    ctrl.expectOne('/admin/ads/1/disable').flush(null);
+    ctrl.expectOne('/admin/ads').flush(rows);
+    expect(asked).toBe(0);
+  });
+
+  it('advert form gives each control its own label above and its helper below', () => {
+    const fixture = mounted();
+    const form = fixture.nativeElement.querySelector('[data-ad-form]');
+    expect(form).not.toBeNull();
+
+    const labels = [...form.querySelectorAll('label')];
+    // COUNTED, so the loop cannot pass by iterating nothing.
+    expect(labels.length).toBe(4);
+    for (const label of labels) {
+      const control = label.querySelector('input, textarea, select');
+      expect(control).not.toBeNull();
+      // The label text comes FIRST, then the control, then its explanation.
+      // The old form interleaved all three at one baseline, so nothing said
+      // which text belonged to which box.
+      const kids = [...label.childNodes].filter(
+        (n) => n.nodeType !== 3 || n.textContent!.trim() !== '',
+      );
+      expect(kids.indexOf(control!)).toBeGreaterThan(0);
+      const help = label.querySelector('small');
+      if (help) {
+        expect(kids.indexOf(help)).toBeGreaterThan(kids.indexOf(control!));
+      }
+    }
+    // AND THE COUNTER KEEPS ITS HOME. Not merely that it still exists -- a
+    // mutation that moved it back out of the label passed that check, because
+    // "somewhere in the form" is where it was when it was the reported defect.
+    // It belongs to the script box, so it has to be INSIDE that box's label.
+    const count = form.querySelector('[data-count]');
+    expect(count).not.toBeNull();
+    const scriptLabel = form.querySelector('[data-script]')!.closest('label');
+    expect(scriptLabel!.contains(count)).toBe(true);
   });
 });

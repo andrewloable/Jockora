@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/andrewloable/jockora/internal/app"
 	"github.com/andrewloable/jockora/internal/config"
 	"github.com/andrewloable/jockora/internal/store"
 )
@@ -140,3 +142,37 @@ func TestDoctorReportsWithoutStartingAStream(t *testing.T) {
 }
 
 func TestMain(m *testing.M) { os.Exit(m.Run()) }
+
+// TestLogLevelDefaultIsWarn: Jockora-e9a.57. A fresh install recorded info and
+// above, so the server wrote down more than twenty "scanning" lines for every
+// warning worth reading, and the console -- which reads the same level --
+// opened on the same wall of noise.
+//
+// The LevelVar's zero value is Info, so this was never a decision anybody made;
+// it was the default of the type. The stored setting still wins, and an
+// operator can still drop to info or debug from the console without a restart.
+func TestLogLevelDefaultIsWarn(t *testing.T) {
+	if got := newLevelVar().Level(); got != app.DefaultLogLevel {
+		t.Errorf("the process starts at %v, want the compiled default %v", got, app.DefaultLogLevel)
+	}
+	if app.DefaultLogLevel != slog.LevelWarn {
+		t.Errorf("the compiled default is %v, want warnings and errors", app.DefaultLogLevel)
+	}
+
+	// AND THAT MAIN ACTUALLY USES IT. Falsification caught this: replacing
+	// newLevelVar() with new(slog.LevelVar) in runSubcommand killed no test at
+	// all, because everything above tests the helper rather than the wiring.
+	// runSubcommand parses flags, opens a store and starts a server, so it
+	// cannot be called from here -- reading the source is what is left, and it
+	// is the same trade test/console_css_test.go makes for the stylesheet.
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "level := newLevelVar()") {
+		t.Error("main builds its LevelVar directly, so the compiled default is the type's Info")
+	}
+	if strings.Contains(string(src), "level := new(slog.LevelVar)") {
+		t.Error("main still creates a bare LevelVar, whose zero value is info")
+	}
+}

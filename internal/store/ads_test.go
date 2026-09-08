@@ -282,6 +282,9 @@ func TestAdStoreReportsADatabaseThatWillNotAnswer(t *testing.T) {
 	if err := s.DeleteAd(ctx, id); err == nil {
 		t.Error("DeleteAd reported success against a read-only database")
 	}
+	if err := s.SetAdEnabled(ctx, id, false); err == nil {
+		t.Error("SetAdEnabled reported success against a read-only database")
+	}
 	if _, err := s.DB().Exec(`PRAGMA query_only = 0`); err != nil {
 		t.Fatal(err)
 	}

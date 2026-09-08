@@ -149,6 +149,16 @@ Run `+"`jockora <command> -h`"+` for a command's flags.
 `)
 }
 
+// newLevelVar is the process level before the store has been read.
+//
+// EXPLICIT, because slog.LevelVar's zero value is Info and that is a default
+// nobody chose. See app.DefaultLogLevel for why it is warnings and errors.
+func newLevelVar() *slog.LevelVar {
+	l := new(slog.LevelVar)
+	l.Set(app.DefaultLogLevel)
+	return l
+}
+
 // newHandler picks the log format.
 //
 // JSON when stderr is not a terminal, text when it is. That is not a style
@@ -232,7 +242,7 @@ func runSubcommand(ctx context.Context, name string, args []string, out io.Write
 	// ONE LevelVar FOR THE PROCESS, and the ring the console reads wrapped
 	// around the real handler rather than replacing it: stderr and Seq keep
 	// receiving every record exactly as they did.
-	level := new(slog.LevelVar)
+	level := newLevelVar()
 	sink := obs.NewSink(newHandler(os.Stderr, cfg.LogFormat, level), obs.RingCapacity)
 	log := slog.New(sink)
 

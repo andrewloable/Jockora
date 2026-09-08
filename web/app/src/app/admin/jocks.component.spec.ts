@@ -401,4 +401,91 @@ describe('Jocks', () => {
       fixture.nativeElement.querySelector('[data-edit]').getAttribute('data-danger'),
     ).toBeNull();
   });
+
+  // ------------------------------------------------------- Jockora-e9a.54 --
+  //
+  // The list showed Name, Voice and Good for -- so SPEECH STYLE and
+  // PERSONALITY, the two fields that decide how a DJ actually sounds and the
+  // whole point of a persona in this product, were invisible. Telling two jocks
+  // apart meant opening Edit on each in turn.
+  //
+  // And the first thing the form asked for was an id: a free-text box whose
+  // placeholder was the word "id", asking a person to invent a stable machine
+  // key by hand with no stated rules and no sign of what happens on a clash.
+
+  it('jock list shows speech style and personality without opening an editor', () => {
+    const fixture = mounted();
+    const row = fixture.nativeElement.querySelector('[data-jocks] tbody tr');
+    expect(row.textContent).toContain('LOUD');
+    expect(row.textContent).toContain('Shouts about rock.');
+    // And the FULL text is on the row even where the column truncates it, so a
+    // phone card and a hover both have it.
+    const personality = row.querySelector('[data-personality-cell]');
+    expect(personality.getAttribute('title')).toBe('Shouts about rock.');
+    // Read without opening anything: the editor is still closed.
+    expect(fixture.componentInstance.editing()).toBe(false);
+  });
+
+  it('jock list derives an id from the name for a new jock', () => {
+    const fixture = mounted();
+    type(fixture, '[data-name]', 'Sunny Marchetti');
+
+    const id = fixture.nativeElement.querySelector('[data-id]') as HTMLInputElement;
+    // The convention the seeded jocks already follow, and the same string the
+    // listener feedback writes as an attribution.
+    expect(id.value).toBe('sunny_marchetti');
+
+    (fixture.nativeElement.querySelector('[data-save]') as HTMLButtonElement).click();
+    const req = ctrl.expectOne('/admin/jocks');
+    expect(req.request.body.id).toBe('sunny_marchetti');
+    req.flush({});
+    // Saving re-reads the list. Voices are read once, on mount.
+    ctrl.expectOne('/admin/jocks').flush(jocks);
+  });
+
+  it('jock list keeps a hand-set id when one is given', () => {
+    const fixture = mounted();
+    type(fixture, '[data-id]', 'the_captain');
+    // Typed FIRST, then the name changes. An operator who set an id must not
+    // have it overwritten by a later keystroke in another box.
+    type(fixture, '[data-name]', 'Sunny Marchetti');
+
+    const id = fixture.nativeElement.querySelector('[data-id]') as HTMLInputElement;
+    expect(id.value).toBe('the_captain');
+
+    (fixture.nativeElement.querySelector('[data-save]') as HTMLButtonElement).click();
+    const req = ctrl.expectOne('/admin/jocks');
+    expect(req.request.body.id).toBe('the_captain');
+    req.flush({});
+    ctrl.expectOne('/admin/jocks').flush(jocks);
+  });
+
+  it('jock list never re-derives the id of a jock that already exists', () => {
+    // The id is the stable key that persona files and station assignments refer
+    // to. Renaming a jock must not silently move it.
+    const fixture = mounted();
+    (fixture.nativeElement.querySelector('[data-edit]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    type(fixture, '[data-name]', 'Dutch Van Der Linde');
+
+    const id = fixture.nativeElement.querySelector('[data-id]') as HTMLInputElement;
+    expect(id.value).toBe('dutch');
+  });
+
+  it('jock list labels every control in its form', () => {
+    // Jockora-e9a.58 counts five unlabelled controls on this tab. A placeholder
+    // is not a label: it disappears the moment there is a value, so a
+    // half-filled form gives no field names at all.
+    const fixture = mounted();
+    const form = fixture.nativeElement.querySelector('fieldset');
+    const controls = [...form.querySelectorAll('input, select, textarea')];
+    expect(controls.length).toBeGreaterThan(4);
+    for (const c of controls) {
+      const name =
+        c.closest('label')?.textContent?.trim() ||
+        c.getAttribute('aria-label') ||
+        (c.id && form.querySelector(`label[for="${c.id}"]`)?.textContent?.trim());
+      expect(name, c.getAttribute('data-name') ?? c.outerHTML.slice(0, 60)).toBeTruthy();
+    }
+  });
 });

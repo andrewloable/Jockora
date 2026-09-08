@@ -290,9 +290,25 @@ section > :last-child {
   margin-bottom: 0;
 }
 
+/* A DESCRIPTION IS ITS OWN LINE.
+ * Angular drops the whitespace-only text node between two inline siblings, so
+ * <strong>Local llama.cpp</strong> <small>A model running on your own
+ * hardware</small> renders as "Local llama.cppA model running on your own
+ * hardware". That has now been reported on three separate screens -- the
+ * Overview download link (Jockora-e9a.46), the advert form (Jockora-e9a.55) and
+ * the model page (Jockora-e9a.56) -- so the sheet owes it to every screen once
+ * rather than three markup fixes and a fourth report next month. */
 small {
+  display: block;
   font-size: var(--t-sm);
   color: var(--ink-faint);
+}
+
+/* The one place a description belongs ON the line it follows: a feedback entry
+ * names its jock at the end of the sentence. MARKED, not guessed -- an
+ * exception the sheet can see is an exception somebody can find. */
+small[data-inline] {
+  display: inline;
 }
 
 /* Numbers line up. A column of counts that jitters is unreadable at a glance,
@@ -388,6 +404,11 @@ select {
 /* Intrinsic size, and it never shrinks to make room for its own label. */
 input[type='checkbox'],
 input[type='radio'] {
+  /* The console's own ember, not the browser's default blue. The vocabulary
+     pickers were given this when they were built and every other tick in the
+     console was left on the default -- so the selected provider on the model
+     page drew in rgb(0, 95, 204) in an app of warm rust and cream. */
+  accent-color: var(--ember);
   flex: none;
   width: auto;
   min-height: 0;
@@ -403,12 +424,14 @@ input::placeholder {
  * checkbox would take its native one away. The :focus-visible rule below is
  * what keyboard users get either way. */
 input:not([type='checkbox']):not([type='radio']):hover,
-select:hover {
+select:hover,
+textarea:hover {
   border-color: color-mix(in oklab, var(--ember) 40%, var(--line));
 }
 
 input:not([type='checkbox']):not([type='radio']):focus,
-select:focus {
+select:focus,
+textarea:focus {
   outline: none;
   border-color: var(--ember);
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--ember) 25%, transparent);
@@ -452,14 +475,77 @@ label {
   color: var(--ink-dim);
 }
 
-/* A visible label above the field, never a placeholder standing in for one. */
+/* A visible label above the field, never a placeholder standing in for one.
+ *
+ * TEXTAREA BELONGS HERE and was missing, which is why the ads form put "What it
+ * is about" at x472 y455 with its box at x580 on the SAME baseline while the
+ * inputs beside it had their labels above. One omission, two reported screens:
+ * Jockora-e9a.55 for Ads and Jockora-e9a.53 for Stations. */
 label input,
-label select {
+label select,
+label textarea {
   display: block;
   width: 100%;
   margin-top: var(--s1);
   font-weight: 400;
   color: var(--ink);
+}
+
+/* A TEXTAREA IS A FIELD, and the stylesheet had not one rule for it in 1386
+ * lines -- so it drew in the browser's monospace default in a console that is
+ * Avenir Next everywhere else, and clipped the sentence it was sized for.
+ *
+ * Vertical resize only: horizontal resize breaks the form's own grid, and the
+ * operator's actual need is room for a longer paragraph. */
+textarea {
+  font: inherit;
+  min-height: 5.5rem;
+  padding: var(--s2) var(--s3);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--r-control);
+  background: var(--surface);
+  color: var(--ink);
+  resize: vertical;
+  transition:
+    border-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease);
+}
+
+textarea::placeholder {
+  color: var(--ink-faint);
+}
+
+/* A TICK SITS BESIDE ITS LABEL, NEVER UNDER IT.
+ * The two rules above are right for a text field and exactly wrong for a
+ * checkbox or a radio: on the model page all three radios rendered at x 113
+ * with their bold label 14px BELOW them, so a lone circle floated above each
+ * heading. The vocabulary pickers were given a flex row when they were built;
+ * this is the general case, so a tick added tomorrow is right without anybody
+ * remembering. */
+label:has(> input[type='radio']),
+label:has(> input[type='checkbox']) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--s2);
+  cursor: pointer;
+}
+
+/* width:100% from the text-field rule is what took the whole line. Undoing
+   display alone leaves the radio stretched across the form. */
+label:has(> input[type='radio']) > input,
+label:has(> input[type='checkbox']) > input {
+  display: inline-block;
+  width: auto;
+  margin-top: 0;
+}
+
+/* The description belongs under the whole row, not wedged between the tick and
+   the name it describes. */
+label:has(> input[type='radio']) > small,
+label:has(> input[type='checkbox']) > small {
+  flex: 1 0 100%;
+  margin-top: var(--s1);
 }
 
 fieldset {
@@ -496,9 +582,67 @@ fieldset fieldset {
 }
 
 fieldset input:not([type='checkbox']):not([type='radio']),
-fieldset select {
+fieldset select,
+fieldset textarea {
   flex: 1 1 12rem;
   min-width: 0;
+}
+
+/* SPEECH STYLE AND PERSONALITY ARE LONG, and they are the two fields that
+ * decide how a DJ sounds -- so they belong in the list rather than behind an
+ * Edit button. Truncated by the COLUMN, never by the data: the full string is
+ * on the row's title attribute, and the phone card below drops the clamp
+ * entirely because a card has the room a table row does not. */
+[data-style-cell],
+[data-personality-cell] {
+  max-width: 18ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A LABEL WHOSE TEXT IS THE SENTENCE THE FIELD SITS INSIDE.
+ * "A break every 4 tracks" says more than the word Cadence over a box would,
+ * and unlike a placeholder it does not vanish the moment there is a value --
+ * but the two block rules above would break that sentence into three lines. */
+label[data-inline-field] {
+  display: inline;
+}
+
+label[data-inline-field] input {
+  display: inline-block;
+  width: auto;
+  margin-top: 0;
+}
+
+/* THE PRIMARY INPUT GETS THE ROW.
+ * The station description is the sentence the whole station is derived from,
+ * and as an ordinary flex item it was the SMALLEST field on the form: 182px
+ * wide, beside two year boxes that had 173px each for four digits. */
+[data-brief-label] {
+  flex: 1 0 100%;
+}
+
+/* THE ACTIONS END THE FORM, on a row of their own rather than landing wherever
+ * the wrap happens to leave room. Jockora-e9a.53: Save and Cancel used to be
+ * stranded in the table's Actions column at y610 and y644, vertically adrift of
+ * every field they applied to. */
+[data-form-actions] {
+  flex: 1 0 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-top: var(--s2);
+}
+
+/* ONE FIELD PER ROW.
+ * The fieldset is a wrapping flex row, which suits a row of short inputs and
+ * is wrong for a form whose fields carry sentences: on the ads form all four
+ * landed on one line at x113, x472 and x862 with their helper text flowing
+ * between them, so nothing said which explanation belonged to which box. */
+[data-ad-form] > label {
+  flex: 1 0 100%;
+  margin-bottom: var(--s4);
 }
 
 /* ----------------------------------------------------------------- tables -- */
@@ -567,6 +711,17 @@ table {
   [data-overview] td {
     display: block;
     width: auto;
+  }
+
+  /* A CARD HAS THE ROOM A TABLE ROW DOES NOT, so the desktop clamp comes off
+     and a personality reads in full. Truncating hard enough on a phone that
+     two jocks read alike would defeat the point of showing them at all. */
+  [data-style-cell],
+  [data-personality-cell] {
+    max-width: none;
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
   }
 
   [data-playlist] tr,
@@ -660,9 +815,15 @@ tr > th[scope='row'] {
   white-space: nowrap;
 }
 
-/* Pinned and excluded, said in words rather than left to a button's label. */
-[data-flag] {
+/* Pinned and excluded, said in words rather than left to a button's label.
+ *
+ * A MARKER ON THE TRACK, since Jockora-e9a.59 -- not a column heading that is
+ * blank for everybody else. margin-left separates it from the title it follows;
+ * it used to be alone in a cell and needed neither. */
+[data-flag],
+[data-gone] {
   display: inline-block;
+  margin-left: var(--s2);
   margin-right: var(--s1);
   padding: 0.1em 0.5em;
   border-radius: var(--r-pill);

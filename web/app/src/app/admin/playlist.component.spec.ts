@@ -37,6 +37,12 @@ const tracks = [
     missing: false,
     genres: [],
     moods: [],
+    // ZERO, NOT ABSENT. The store selects coalesce(t.bpm, 0), so an unmeasured
+    // track arrives as 0 and never as undefined -- and a fixture that omitted
+    // the key could not tell a working blank from "0", which is the thing the
+    // component's ternary exists to prevent. Found by mutation: dropping that
+    // ternary killed no test at all while the fixture said undefined.
+    bpm: 0,
   },
   {
     track_id: 3,
@@ -240,7 +246,9 @@ describe('Playlist', () => {
       'Tempo',
       'Genre',
       'Mood',
-      'Status',
+      // No Status: Jockora-e9a.59 moved pinned, excluded and missing onto the
+      // track they describe, because a column costs its width on every row
+      // whether or not anything is ever in it.
       'Actions',
     ]);
   });
@@ -257,6 +265,58 @@ describe('Playlist', () => {
     const text = fixture.nativeElement.querySelector('[data-playlist]').textContent;
     expect(text).toContain('pinned');
     expect(text).toContain('excluded');
+  });
+  // ------------------------------------------------------- Jockora-e9a.59 --
+  //
+  // Measured on the running build, 1280px, 50 rows: Artist, Title, Album, Year,
+  // Genre, Mood and Actions were filled 50 of 50, and TEMPO and STATUS were 0
+  // of 50 -- 100 percent empty -- while holding 72px and 73px on every row.
+  // Album meanwhile wrapped "100 Greatest Rock Songs of the 90s" four lines
+  // deep in 213px, on every single row.
+  //
+  // Both empty columns were CORRECT BY DESIGN, which is the point: a column is
+  // the wrong container for an occasional flag, because it costs its width on
+  // every row for ever whether or not anything is in it.
+
+  it('playlist columns shows a pinned track as pinned without a dedicated column', () => {
+    const fixture = mounted();
+    const heads = [...fixture.nativeElement.querySelectorAll('[data-playlist] thead th')].map((h) =>
+      h.textContent.trim().toLowerCase(),
+    );
+    expect(heads).not.toContain('status');
+
+    const rows = [...fixture.nativeElement.querySelectorAll('[data-playlist] tbody tr')];
+    const flag = rows[1].querySelector('[data-flag]');
+    expect(flag).not.toBeNull();
+    expect(flag.textContent).toContain('pinned');
+    // ON the track it describes. The title is what an operator is reading when
+    // they want to know whether this row is pinned.
+    expect(flag.closest('td').textContent).toContain('Two');
+    // And an ordinary track carries nothing at all -- which is the whole
+    // argument against a column: nothing to draw, nothing reserved.
+    expect(rows[0].querySelector('[data-flag]')).toBeNull();
+    expect(rows[0].querySelector('[data-gone]')).toBeNull();
+  });
+
+  it('playlist columns shows an excluded and a missing track the same way', () => {
+    const fixture = mounted();
+    const rows = [...fixture.nativeElement.querySelectorAll('[data-playlist] tbody tr')];
+    expect(rows[2].querySelector('[data-flag]').textContent).toContain('excluded');
+    expect(rows[2].querySelector('[data-flag]').closest('td').textContent).toContain('Three');
+    expect(rows[3].querySelector('[data-gone]').textContent).toContain('missing');
+    expect(rows[3].querySelector('[data-gone]').closest('td').textContent).toContain('Four');
+
+    // TEMPO STAYS A COLUMN. It is measured by the analysis pass through the
+    // sidecar's BPM source, so it is sparse until that runs and full after --
+    // genuinely a value OF the track, unlike a flag, and the station tempo
+    // filter is meaningless without it.
+    const heads = [...fixture.nativeElement.querySelectorAll('[data-playlist] thead th')].map((h) =>
+      h.textContent.trim().toLowerCase(),
+    );
+    expect(heads).toContain('tempo');
+    expect(rows[0].querySelector('[data-bpm]').textContent.trim()).toBe('128');
+    // And unmeasured stays BLANK rather than reading as a tempo of zero.
+    expect(rows[1].querySelector('[data-bpm]').textContent.trim()).toBe('');
   });
 });
 
@@ -493,4 +553,5 @@ describe('Playlist narrow', () => {
       expect(row.querySelector('[data-exclude]')).toBeTruthy();
     }
   });
+
 });

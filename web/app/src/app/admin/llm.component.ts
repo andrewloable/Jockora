@@ -35,7 +35,10 @@ import { AdminApi, LLMCurrent, LLMForm, LLMProvider } from '../api/api';
     <fieldset data-llm-provider>
       <legend>Where the model runs</legend>
       @for (p of providers(); track p.id) {
-        <label>
+        <!-- THE ROW IS THE MARKUP CONTRACT: tick, then name, then the
+             description on its own line under both. The sheet lays it out;
+             this decides the order. -->
+        <label data-llm-option>
           <input
             type="radio"
             name="provider"
@@ -44,7 +47,7 @@ import { AdminApi, LLMCurrent, LLMForm, LLMProvider } from '../api/api';
             (change)="choose(p.id)"
           />
           <strong>{{ p.name }}</strong>
-          <small>{{ p.help }}</small>
+          <small data-llm-help>{{ p.help }}</small>
         </label>
       }
     </fieldset>
@@ -101,12 +104,15 @@ import { AdminApi, LLMCurrent, LLMForm, LLMProvider } from '../api/api';
                 <option [value]="model()" selected>{{ model() }}</option>
               }
             </select>
-            <button type="button" data-llm-list [disabled]="busy()" (click)="list()">
-              List models
-            </button>
+            <!-- THE NOTE BELONGS TO THE SELECT, so it comes before the
+                 button rather than being wedged between two actions on one
+                 line. Same interleaving filed against the advert form. -->
             @if (p.suggested) {
               <small>Known to work here: {{ p.suggested }}</small>
             }
+            <button type="button" data-llm-list [disabled]="busy()" (click)="list()">
+              List models
+            </button>
           </label>
         }
 

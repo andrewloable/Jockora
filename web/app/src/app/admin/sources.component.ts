@@ -44,32 +44,47 @@ import { Api, AdminApi, Source } from '../api/api';
 
     <fieldset>
       <legend>Add a source</legend>
-      <select data-kind [value]="kind()" (change)="kind.set($any($event.target).value)">
-        <option value="folder">folder</option>
-        <option value="subsonic">subsonic</option>
-      </select>
-      <input
-        data-locator
-        placeholder="path or URL"
-        [value]="locator()"
-        (input)="locator.set($any($event.target).value)"
-      />
+      <label>
+        Kind
+        <select data-kind [value]="kind()" (change)="kind.set($any($event.target).value)">
+          <option value="folder">folder</option>
+          <option value="subsonic">subsonic</option>
+        </select>
+      </label>
+      <label>
+        Where it is
+        <!-- THE PLACEHOLDER SURVIVES because it is an EXAMPLE rather than a
+             repeat of the label -- which is the whole distinction this task
+             turns on. -->
+        <input
+          data-locator
+          placeholder="path or URL"
+          [value]="locator()"
+          (input)="locator.set($any($event.target).value)"
+        />
+      </label>
       @if (kind() === 'subsonic') {
-        <input
-          data-username
-          placeholder="username"
-          [value]="username()"
-          (input)="username.set($any($event.target).value)"
-        />
-        <input
-          data-password
-          type="password"
-          placeholder="password"
-          [value]="password()"
-          (input)="password.set($any($event.target).value)"
-        />
+        <label>
+          Username
+          <input
+            data-username
+            [value]="username()"
+            (input)="username.set($any($event.target).value)"
+          />
+        </label>
+        <label>
+          Password
+          <input
+            data-password
+            type="password"
+            [value]="password()"
+            (input)="password.set($any($event.target).value)"
+          />
+        </label>
       }
-      <button type="button" data-add (click)="add()">Add</button>
+      <div data-form-actions>
+        <button type="button" data-add (click)="add()">Add</button>
+      </div>
     </fieldset>
 
     <button type="button" data-rescan (click)="rescan()">Rescan</button>

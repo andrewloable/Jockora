@@ -43,6 +43,7 @@ var migrationUndo = map[int][]string{
 	11: {`ALTER TABLE ads DROP COLUMN brand`, `ALTER TABLE ads DROP COLUMN brief`,
 		`ALTER TABLE ads DROP COLUMN delivery`, `ALTER TABLE ads DROP COLUMN created_at`},
 	12: {`DROP TABLE log_records`},
+	13: {`ALTER TABLE ads DROP COLUMN enabled`},
 }
 
 // rewindTo puts a database back to an older schema version, undoing every

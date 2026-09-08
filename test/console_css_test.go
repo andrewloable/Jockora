@@ -216,6 +216,99 @@ func selectorsSetting(css, decl string) []string {
 // background -- a preview, an edit and an irreversible delete were byte
 // identical and sat flush against each other. --bad was defined and used on
 // nothing.
+// TestConsoleCSSPutsATickBesideItsLabel: Jockora-e9a.56. "label {display:
+// block}" plus "label input {display: block; width: 100%}" is right for a text
+// field and exactly wrong for a tick. On the model page all three radios
+// rendered at x 113 with their bold label 14px BELOW, so a lone circle floated
+// above each heading -- most obvious at 390px.
+//
+// The vocabulary pickers were given a flex row when they were built; every
+// other tick in the console was left on the block rule. This is the general
+// case of that fix, so a checkbox added tomorrow is right without anybody
+// remembering.
+func TestConsoleCSSPutsATickBesideItsLabel(t *testing.T) {
+	css := styles(t)
+	rule := ruleFor(t, css, `label:has(> input[type='radio'])`)
+	if !strings.Contains(rule, "display: flex") {
+		t.Error("a label holding a tick is still a block, so the control stacks above its text")
+	}
+	// The width:100% from the text-field rule is what made the radio take a
+	// line of its own. Undoing display alone is not enough.
+	back := ruleFor(t, css, `label:has(> input[type='radio']) > input`)
+	if !strings.Contains(back, "width: auto") {
+		t.Error("a tick still stretches to the full width of its label")
+	}
+}
+
+// TestConsoleCSSDrawsATickInTheConsolePalette: the radio computed to
+// accent-color auto, so the selected Cloudflare option drew in the browser's
+// default blue in a console whose palette is warm rust and cream. Same family
+// as the Overview file input and the checkboxes before Jockora-e9a.44.
+func TestConsoleCSSDrawsATickInTheConsolePalette(t *testing.T) {
+	rule := ruleFor(t, styles(t), "input[type='radio']")
+	if !strings.Contains(rule, "accent-color: var(--ember)") {
+		t.Error("a tick draws in the browser default blue, not the console's own ember")
+	}
+}
+
+// TestConsoleCSSKeepsADescriptionOffItsLabel: Angular drops the whitespace-only
+// text node between two inline siblings, so <strong>Name</strong>
+// <small>what it is</small> renders as one run of text. Reported on three
+// separate screens -- the Overview download link (Jockora-e9a.46), the advert
+// form (Jockora-e9a.55) and the model page (Jockora-e9a.56) -- which makes it
+// one rule the sheet owes every screen rather than three markup fixes.
+//
+// The page read "Local llama.cppA model running on your own hardware".
+func TestConsoleCSSKeepsADescriptionOffItsLabel(t *testing.T) {
+	css := styles(t)
+	rule := ruleFor(t, css, "small")
+	if !strings.Contains(rule, "display: block") {
+		t.Error("a description is still inline, so it touches whatever element precedes it")
+	}
+	// One deliberate exception, MARKED rather than guessed: the feedback line
+	// names its jock on the same line as the sentence it belongs to.
+	if !strings.Contains(css, "small[data-inline]") {
+		t.Error("there is no way to opt a description back onto its line")
+	}
+}
+
+// TestConsoleCSSStylesATextarea: THE STYLESHEET HAD NO TEXTAREA RULE AT ALL,
+// in 1386 lines. That single omission is three reported defects.
+//
+// "label input, label select {display: block}" is what puts a label above its
+// field, and a textarea was in neither list -- so it stayed inline and sat
+// BESIDE its own label while the inputs beside it had theirs above. Measured on
+// the ads form: "What it is about" label at x472 y455 and its box at x580 y455,
+// the same baseline, while "Delivery" had its label at y466 and its box at
+// y492. Three label placements in one fieldset, which is what Jockora-e9a.53
+// reports for Stations and Jockora-e9a.55 for Ads -- one cause, two screens.
+//
+// It also left the textarea on the browser's monospace default, in a console
+// that is Avenir Next everywhere else.
+func TestConsoleCSSStylesATextarea(t *testing.T) {
+	css := styles(t)
+
+	block := ruleFor(t, css, "label textarea")
+	if !strings.Contains(block, "display: block") {
+		t.Error("a textarea is still inline, so its label sits beside it and not above it")
+	}
+
+	// It has to LOOK like the field beside it, or a form reads as two designs.
+	// Newline before and space after, so this is the BARE textarea rule and not
+	// "label textarea", "textarea:hover" or "fieldset textarea" -- ruleFor
+	// matches anywhere in a selector list and returns the first rule that hits,
+	// and the hover rule sits earlier in the sheet.
+	field := ruleFor(t, css, "\ntextarea ")
+	if !strings.Contains(field, "font: inherit") && !strings.Contains(field, "font-family") {
+		t.Error("a textarea still draws in the browser's monospace default")
+	}
+	// Room for the sentence it holds. The about box was 36px tall around
+	// content whose scrollHeight was 49.
+	if !strings.Contains(field, "min-height") {
+		t.Error("a textarea has no minimum height, so it clips the sentence it was sized for")
+	}
+}
+
 func TestConsoleCSSMarksDestructiveActions(t *testing.T) {
 	rule := ruleFor(t, styles(t), "button[data-danger]")
 	if !strings.Contains(rule, "var(--bad)") {

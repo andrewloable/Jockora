@@ -81,8 +81,76 @@ describe('logs', () => {
   const rows = (f: { nativeElement: HTMLElement }) =>
     Array.from(f.nativeElement.querySelectorAll('[data-log-row]'));
 
-  it('renders records newest first with time, level and message', () => {
+  /**
+   * Show every level.
+   *
+   * Jockora-e9a.57 made the console open on warnings and errors, so a test
+   * about what a RECORD renders as had quietly become a test about the default
+   * level too. These say which level they mean instead of inheriting it.
+   */
+  function showingEverything<T extends { nativeElement: HTMLElement; detectChanges(): void }>(
+    fixture: T,
+  ): T {
+    const show = fixture.nativeElement.querySelector('[data-log-show]') as HTMLSelectElement;
+    show.value = 'DEBUG';
+    show.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    return fixture;
+  }
+
+  // ------------------------------------------------------------ log level --
+  //
+  // Jockora-e9a.57, reported by the operator. Both selectors opened on "info
+  // and above", which on a scanning library is more than twenty consecutive
+  // "scanning elapsed=Ns files=N" lines plus break scheduled, break slot
+  // offered and station refilled every few minutes. Buried one row in forty was
+  // the single WARN that matters: SERVING WITHOUT AUTHENTICATION ON A
+  // NON-LOOPBACK ADDRESS.
+  //
+  // A security-relevant warning at the same visual weight as a progress tick.
+
+  it('log level shows warnings and errors before anything is chosen', () => {
+    const show = mounted().nativeElement.querySelector('[data-log-show]') as HTMLSelectElement;
+    expect(show.value).toBe('WARN');
+  });
+
+  it('log level records warnings and errors before anything is chosen', () => {
+    // A server that says nothing about its level must not be read as info.
+    const fixture = mounted({ records, dropped: 0 });
+    const record = fixture.nativeElement.querySelector('[data-log-record]') as HTMLSelectElement;
+    expect(record.value).toBe('WARN');
+    expect(fixture.componentInstance.recorded()).toBe('WARN');
+
+    // AND BEFORE THE SERVER HAS ANSWERED AT ALL, which is the only time the
+    // signal's own initial value is on screen -- and the state a failed first
+    // read leaves the page in for good. Falsification found this: setting the
+    // signal back to INFO killed no test, because every other one flushes a
+    // response first and the response overwrites it.
+    const fresh = TestBed.createComponent(Logs);
+    fresh.detectChanges();
+    expect(fresh.componentInstance.recorded()).toBe('WARN');
+    expect(fresh.componentInstance.showing()).toBe('WARN');
+    ctrl.expectOne((r) => r.url === '/admin/logs').error(new ProgressEvent('failed'));
+    fresh.detectChanges();
+    expect(fresh.componentInstance.recorded()).toBe('WARN');
+  });
+
+  it('log level still offers info when an operator asks for it', () => {
+    // NOTHING IS REMOVED. A default is not a restriction: an operator chasing
+    // something drops to info or debug deliberately, and the list still says so.
     const fixture = mounted();
+    const show = fixture.nativeElement.querySelector('[data-log-show]') as HTMLSelectElement;
+    expect([...show.options].map((o) => o.value)).toEqual(['DEBUG', 'INFO', 'WARN', 'ERROR']);
+
+    show.value = 'INFO';
+    show.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    expect(fixture.componentInstance.showing()).toBe('INFO');
+    expect(rows(fixture).length).toBe(3);
+  });
+
+  it('renders records newest first with time, level and message', () => {
+    const fixture = showingEverything(mounted());
     const got = rows(fixture);
     expect(got.length).toBe(3);
     expect(got[0].textContent).toContain('enrichment stopped');
@@ -135,7 +203,7 @@ describe('logs', () => {
   });
 
   it('paused, the list holds still and new records are counted', () => {
-    const fixture = mounted();
+    const fixture = showingEverything(mounted());
     fixture.nativeElement.querySelector('[data-log-pause]').click();
     fixture.detectChanges();
 
@@ -172,7 +240,7 @@ describe('logs', () => {
   });
 
   it('clear asks first and does nothing if declined', () => {
-    const fixture = mounted();
+    const fixture = showingEverything(mounted());
     vi.stubGlobal('confirm', () => false);
     fixture.nativeElement.querySelector('[data-log-clear]').click();
     ctrl.expectNone((r) => r.method === 'DELETE');
@@ -237,6 +305,16 @@ describe('logs', () => {
     // The attributes go too -- "rejected the API key" is the half that says
     // what to do about it.
     expect(written[0]).toContain('rejected the API key');
+
+    // AND A RECORD WITH NO ATTRIBUTES copies as its own line with nothing
+    // trailing. Most records have none. This used to be covered by accident,
+    // because the console opened on info and the attr-less line was on screen;
+    // at the warnings-and-errors default of Jockora-e9a.57 it has to be asked
+    // for, so it is asked for here rather than left to another test's default.
+    showingEverything(fixture);
+    fixture.nativeElement.querySelector('[data-log-copy]').click();
+    await Promise.resolve();
+    expect(written[1].endsWith('break slot offered')).toBe(true);
   });
 
   it('says whether the connection is up, so a quiet station is not a dead one', () => {
@@ -258,7 +336,7 @@ describe('logs', () => {
   });
 
   it('a failed stream leaves the records already on screen', () => {
-    const fixture = mounted();
+    const fixture = showingEverything(mounted());
     FakeSource.last!.fail(2);
     fixture.detectChanges();
     // Blanking the list on a dropped connection throws away the very thing the
@@ -339,7 +417,7 @@ describe('logs', () => {
   });
 
   it('renders the odd record without falling over', () => {
-    const fixture = mounted({
+    const fixture = showingEverything(mounted({
       records: [
         // No attrs at all, which is most records.
         { time: '2026-09-08T03:31:06Z', level: 'WARN', message: 'plain' },
@@ -351,7 +429,7 @@ describe('logs', () => {
       ],
       dropped: 0,
       level: 'INFO',
-    });
+    }));
     const got = rows(fixture);
     expect(got.length).toBe(3);
     expect(got[0].querySelector('[data-log-attrs]')).toBeNull();
@@ -372,7 +450,9 @@ describe('logs', () => {
     ctrl.expectOne((r) => r.url === '/admin/logs').flush({});
     fixture.detectChanges();
     expect(fixture.componentInstance.records()).toEqual([]);
-    expect(fixture.componentInstance.recorded()).toBe('INFO');
+    // Jockora-e9a.57: a server that says nothing about its level must not be
+    // read as info.
+    expect(fixture.componentInstance.recorded()).toBe('WARN');
   });
 
   it('closes the stream when the section is left', () => {
