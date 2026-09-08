@@ -27,6 +27,22 @@ const (
 	// MaxBriefName is a dial label, not a sentence. Runes, not bytes: an
 	// accented name cut mid-rune is a replacement character on the dial.
 	MaxBriefName = 40
+	// THE BOUNDS A DERIVED RANGE MUST LAND INSIDE, defined here and used by
+	// station.Filter rather than the other way round.
+	//
+	// station imports enrich, so this is the only direction that is not an
+	// import cycle -- and one definition is the point: the schema bounds the
+	// sampler, the clamps repair what a hosted model returns anyway, and
+	// Filter.Validate refuses a hand-edited database. Three checks, one pair of
+	// numbers, or they drift and the sampler starts producing values the filter
+	// then refuses.
+	//
+	// The sidecar refuses a tempo outside 30 to 250, so a station asking for
+	// one would be asking for tracks that cannot exist. Half a minute is
+	// shorter than some breaks; an hour is an album side.
+	SlowestBPM, FastestBPM        = 30.0, 250.0
+	ShortestTrackS, LongestTrackS = 30.0, 3600.0
+
 	// EarliestBriefYear is the floor a year is clamped to, matching the range
 	// SpeakableText treats as a year at all.
 	EarliestBriefYear = 1900
@@ -43,6 +59,18 @@ type StationParams struct {
 	// Zero means UNBOUNDED, the same rule the stations table follows.
 	YearMin int `json:"year_min"`
 	YearMax int `json:"year_max"`
+
+	// TempoMin and TempoMax are BPM, and they REPLACE the range a mood implies
+	// rather than intersecting with it -- calm plus 120 to 180 intersects to an
+	// empty station. See station.tempoBounds.
+	TempoMin float64 `json:"tempo_min"`
+	TempoMax float64 `json:"tempo_max"`
+
+	// DurationMinS and DurationMaxS are SECONDS. The scanner fills
+	// tracks.duration_s for everything, so unlike tempo this bound bites from
+	// the first scan rather than waiting on the analyser.
+	DurationMinS float64 `json:"duration_min_s"`
+	DurationMaxS float64 `json:"duration_max_s"`
 }
 
 // StationParamsSchema is the json_schema sent to the sampler.
@@ -61,6 +89,11 @@ func StationParamsSchema() map[string]any {
 		return map[string]any{"type": "string", "enum": items}
 	}
 	year := map[string]any{"type": "integer"}
+	// ZERO IS LEGAL AND MEANS UNBOUNDED, so the minimum is 0 rather than the
+	// floor -- a schema that forbade 0 would force the model to invent a bound
+	// for every brief that mentions neither.
+	tempo := map[string]any{"type": "number", "minimum": SlowestBPM, "maximum": FastestBPM}
+	length := map[string]any{"type": "number", "minimum": ShortestTrackS, "maximum": LongestTrackS}
 
 	return map[string]any{
 		"type": "object",
@@ -74,8 +107,17 @@ func StationParamsSchema() map[string]any {
 			},
 			"year_min": year,
 			"year_max": year,
+			// BOUNDED AT THE SAMPLER. The clamps below are the second line;
+			// a value that cannot be generated is the first.
+			"tempo_min":      tempo,
+			"tempo_max":      tempo,
+			"duration_min_s": length,
+			"duration_max_s": length,
 		},
-		"required":             []any{"name", "genres", "moods", "year_min", "year_max"},
+		// ALL REQUIRED. A model that MAY omit a field omits it, and an absent
+		// tempo and an unbounded one then look identical to the parser.
+		"required": []any{"name", "genres", "moods", "year_min", "year_max",
+			"tempo_min", "tempo_max", "duration_min_s", "duration_max_s"},
 		"additionalProperties": false,
 	}
 }
@@ -123,6 +165,39 @@ func BuildStationBriefPrompt(brief string) string {
 	b.WriteString("\"anything from 1994 on\" -- use 0 for the side it leaves open.\n")
 	b.WriteString("  * IF IT SAYS NOTHING ABOUT WHEN THE MUSIC IS FROM, BOTH ARE 0. ")
 	b.WriteString("Do not invent a period. Most descriptions mention no dates at all, ")
+	b.WriteString("and 0 and 0 is the correct answer for every one of them.\n")
+	// TEMPO AND LENGTH. THE DEFAULT COMES FIRST AND LAST, and the examples are
+	// deliberately not a usable pair of numbers.
+	//
+	// MEASURED LIVE 2026-09-08, and the first version failed the way the dj
+	// prompt already has a test against: an example in a prompt is followed far
+	// more reliably than an instruction. The rule read "nothing over four
+	// minutes is 0 and 240" and SEVEN BRIEFS OUT OF SEVEN came back with
+	// length 0..240 -- including "angry guitars" and "chiptune and vaporwave".
+	// The model had been handed a ready-made pair and used it every time. Five
+	// of seven invented a tempo the same way. And the one brief that WAS about
+	// length -- "long ambient pieces, nothing short" -- came back 0..0, because
+	// nothing in the rule was about recognising that case.
+	//
+	// So: each field states its own default before anything else, the words
+	// that are NOT about pace or length are named -- loud, angry, eighties are
+	// the ones it reached for -- and the examples give a shape rather than a
+	// number to copy.
+	b.WriteString("- tempo_min and tempo_max: BOTH 0, unless the description is ")
+	b.WriteString("ABOUT how fast the music is.\n")
+	b.WriteString("  * It almost never is. Loud, angry, sad, heavy, eighties, ")
+	b.WriteString("late-night and driving are NOT about speed. Leave both 0.\n")
+	b.WriteString("  * Only when it actually names a pace -- music to run to, ")
+	b.WriteString("something slow -- give the BPM range that fits it.\n")
+	b.WriteString("- duration_min_s and duration_max_s: BOTH 0, unless the description is ")
+	b.WriteString("ABOUT how long the tracks are.\n")
+	b.WriteString("  * It almost never is. A genre, a mood, a decade and a volume ")
+	b.WriteString("say nothing about length. Leave both 0.\n")
+	b.WriteString("  * Only when it actually names a length -- long pieces, ")
+	b.WriteString("nothing over a few minutes -- give the range IN SECONDS, ")
+	b.WriteString("counting sixty seconds to the minute.\n")
+	b.WriteString("  * IF THE DESCRIPTION MENTIONS NEITHER PACE NOR LENGTH, ALL FOUR ARE 0. ")
+	b.WriteString("Do not invent a tempo or a length. Most descriptions mention neither, ")
 	b.WriteString("and 0 and 0 is the correct answer for every one of them.\n")
 	b.WriteString("- name: what a listener would read on a dial. ")
 	b.WriteString("Two or three words, no punctuation, and not a restatement of the description.\n")
@@ -183,6 +258,8 @@ func parseStationParams(content string) (StationParams, bool) {
 		Moods:  filterVocab(raw.Moods, moodSet, MaxBriefMoods),
 	}
 	out.YearMin, out.YearMax = clampYears(raw.YearMin, raw.YearMax)
+	out.TempoMin, out.TempoMax = clampTempo(raw.TempoMin, raw.TempoMax)
+	out.DurationMinS, out.DurationMaxS = clampLength(raw.DurationMinS, raw.DurationMaxS)
 
 	// NO GENRES, NO MOODS AND NO YEARS is the whole library. Legal as a filter
 	// and never what a brief meant, so it is a failed parse rather than a
@@ -212,6 +289,39 @@ func cleanName(name string) string {
 //
 // Swapped rather than refused, because "1989 to 1985" is a model getting the
 // order wrong, not an operator asking for an empty station.
+// clampTempo and clampLength repair what the model returns, the way clampYears
+// does: the operator is looking at the form, and a refusal costs them a round
+// trip for something we can simply fix.
+//
+// ZERO IS UNBOUNDED on that side and is never touched.
+func clampTempo(min, max float64) (float64, float64) {
+	return clampRange(min, max, SlowestBPM, FastestBPM)
+}
+
+func clampLength(min, max float64) (float64, float64) {
+	return clampRange(min, max, ShortestTrackS, LongestTrackS)
+}
+
+func clampRange(min, max, lo, hi float64) (float64, float64) {
+	clamp := func(v float64) float64 {
+		switch {
+		case v == 0:
+			return 0
+		case v < lo:
+			return lo
+		case v > hi:
+			return hi
+		default:
+			return v
+		}
+	}
+	min, max = clamp(min), clamp(max)
+	if min != 0 && max != 0 && min > max {
+		min, max = max, min
+	}
+	return min, max
+}
+
 func clampYears(min, max int) (int, int) {
 	latest := time.Now().Year() + 1
 	clamp := func(y int) int {

@@ -769,3 +769,193 @@ func TestStationsAPIAssignJockSurvivesAnUnreadableRoster(t *testing.T) {
 		t.Errorf("pushed %+v with no roster to read", seen.seen)
 	}
 }
+
+// Jockora-g1t.12. The stations table has carried tempo_min, tempo_max,
+// duration_min_s and duration_max_s since migration 10 and NOTHING could write
+// them: the API stopped at the years, so four columns and the whole duration
+// filter path were unreachable.
+
+// rangeBody is a station described by every parameter a song can be selected on.
+func rangeBody(name string, tempoMin, tempoMax, lenMin, lenMax float64) string {
+	b, _ := json.Marshal(map[string]any{
+		"name": name, "genres": []string{"rock"}, "brief": "loud and quick",
+		"year_min": 1980, "year_max": 1989,
+		"tempo_min": tempoMin, "tempo_max": tempoMax,
+		"duration_min_s": lenMin, "duration_max_s": lenMax,
+	})
+	return string(b)
+}
+
+func TestStationsAPIRangesRoundTrip(t *testing.T) {
+	s, _, _ := stationsServer(t, 60, 0)
+	admin := adminCookie(t, s)
+
+	rec := as(t, s, http.MethodPost, "/admin/stations", rangeBody("QUICK", 150, 180, 90, 240), admin)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("= %d: %s", rec.Code, rec.Body)
+	}
+	// ONE TAG PER FIELD. A grouped declaration shares its tag, and an untagged
+	// DurationMinS does not match duration_min_s -- encoding/json folds case
+	// but not underscores.
+	var got []struct {
+		Name         string  `json:"name"`
+		TempoMin     float64 `json:"tempo_min"`
+		TempoMax     float64 `json:"tempo_max"`
+		DurationMinS float64 `json:"duration_min_s"`
+		DurationMaxS float64 `json:"duration_max_s"`
+	}
+	list := as(t, s, http.MethodGet, "/admin/stations", "", admin)
+	if err := json.Unmarshal(list.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, v := range got {
+		if v.Name != "QUICK" {
+			continue
+		}
+		found = true
+		if v.TempoMin != 150 || v.DurationMinS != 90 || v.DurationMaxS != 240 {
+			t.Errorf("stored %+v", v)
+		}
+	}
+	if !found {
+		t.Fatalf("the station is not in the list: %s", list.Body)
+	}
+}
+
+// TestStationsAPIRangesSurviveAnEdit is the regression that matters. A PUT body
+// missing a field writes the zero over it, and zero means UNBOUNDED -- so an
+// operator renaming a station would silently widen it back to the whole
+// library, with nothing on screen to say the ranges had gone.
+func TestStationsAPIRangesSurviveAnEdit(t *testing.T) {
+	s, st, _ := stationsServer(t, 60, 0)
+	admin := adminCookie(t, s)
+	if rec := as(t, s, http.MethodPost, "/admin/stations",
+		rangeBody("QUICK", 150, 180, 90, 240), admin); rec.Code != http.StatusCreated {
+		t.Fatalf("= %d: %s", rec.Code, rec.Body)
+	}
+	rows, err := st.ListStations(context.Background())
+	if err != nil || len(rows) == 0 {
+		t.Fatal(err)
+	}
+	id := rows[len(rows)-1].ID
+
+	// The console sends back what it was shown, ranges included.
+	if rec := as(t, s, http.MethodPut, fmt.Sprintf("/admin/stations/%d", id),
+		rangeBody("QUICKER", 150, 180, 90, 240), admin); rec.Code != http.StatusOK {
+		t.Fatalf("edit = %d: %s", rec.Code, rec.Body)
+	}
+	back, err := st.GetStation(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.Name != "QUICKER" {
+		t.Errorf("name = %q", back.Name)
+	}
+	if back.TempoMin != 150 || back.TempoMax != 180 ||
+		back.DurationMinS != 90 || back.DurationMaxS != 240 {
+		t.Errorf("the ranges did not survive the edit: %+v", back)
+	}
+}
+
+func TestStationsAPIRangesDeriveReturnsThem(t *testing.T) {
+	s, _ := gateLibrary(t, `{"name":"Runners","genres":["rock"],"moods":["propulsive"],
+		"year_min":0,"year_max":0,"tempo_min":150,"tempo_max":180,
+		"duration_min_s":0,"duration_max_s":240}`)
+	admin := adminCookie(t, s)
+
+	rec := as(t, s, http.MethodPost, "/admin/stations/derive",
+		`{"brief":"something to run to, nothing over four minutes"}`, admin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("= %d: %s", rec.Code, rec.Body)
+	}
+	var got struct {
+		TempoMin     float64 `json:"tempo_min"`
+		TempoMax     float64 `json:"tempo_max"`
+		DurationMinS float64 `json:"duration_min_s"`
+		DurationMaxS float64 `json:"duration_max_s"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.TempoMin != 150 || got.TempoMax != 180 {
+		t.Errorf("tempo = %v..%v", got.TempoMin, got.TempoMax)
+	}
+	if got.DurationMaxS != 240 {
+		t.Errorf("length ceiling = %v", got.DurationMaxS)
+	}
+}
+
+// TestStationsAPIRangesCountUsesThem: THE COUNT IS THE HALF THAT MATTERS. A
+// preview showing a tempo range and a track count computed without it is a
+// number the operator will not get, which is worse than no number at all.
+func TestStationsAPIRangesCountUsesThem(t *testing.T) {
+	s, st := gateLibrary(t, `{"name":"Short","genres":["rock"],"moods":["raw"],
+		"year_min":0,"year_max":0,"tempo_min":0,"tempo_max":0,
+		"duration_min_s":0,"duration_max_s":200}`)
+	admin := adminCookie(t, s)
+	// Two of the four rock tracks are longer than the ceiling the brief asks
+	// for, so a count that ignores the range would be too big.
+	if _, err := st.DB().ExecContext(context.Background(),
+		`UPDATE tracks SET duration_s = 600 WHERE id IN (1, 2)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB().ExecContext(context.Background(),
+		`UPDATE tracks SET duration_s = 180 WHERE id NOT IN (1, 2)`); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := as(t, s, http.MethodPost, "/admin/stations/derive",
+		`{"brief":"short rock songs only"}`, admin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("= %d: %s", rec.Code, rec.Body)
+	}
+	var got struct {
+		Tracks int
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Tracks != 1 {
+		t.Errorf("previewed %d tracks; the length range was not applied to the count", got.Tracks)
+	}
+}
+
+// TestStationsAPIRangesBadRangeNamesItsField: with three ranges, saying
+// "year_min" for every one of them sends the operator to fix a box they did not
+// touch.
+func TestStationsAPIRangesBadRangeNamesItsField(t *testing.T) {
+	s, _, _ := stationsServer(t, 60, 0)
+	admin := adminCookie(t, s)
+
+	for _, c := range []struct{ name, body, field string }{
+		{"tempo out of range", rangeBody("A", 900, 0, 0, 0), "tempo_min"},
+		{"tempo inverted", rangeBody("A", 180, 150, 0, 0), "tempo_min"},
+		{"length out of range", rangeBody("A", 0, 0, 0, 99999), "duration_min_s"},
+		{"length inverted", rangeBody("A", 0, 0, 600, 300), "duration_min_s"},
+	} {
+		rec := as(t, s, http.MethodPost, "/admin/stations", c.body, admin)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s = %d, want 400: %s", c.name, rec.Code, rec.Body)
+			continue
+		}
+		var e struct{ Field, Error string }
+		if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+			t.Fatal(err)
+		}
+		if e.Field != c.field {
+			t.Errorf("%s named %q, want %q", c.name, e.Field, c.field)
+		}
+	}
+	// A BAD YEAR STILL NAMES year_min, which is what it did before.
+	bad, _ := json.Marshal(map[string]any{
+		"name": "A", "genres": []string{"rock"}, "year_min": 1990, "year_max": 1980})
+	rec := as(t, s, http.MethodPost, "/admin/stations", string(bad), admin)
+	var e struct{ Field string }
+	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+		t.Fatal(err)
+	}
+	if e.Field != "year_min" {
+		t.Errorf("an inverted year named %q", e.Field)
+	}
+}

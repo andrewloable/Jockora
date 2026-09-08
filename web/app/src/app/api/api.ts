@@ -48,6 +48,11 @@ export interface Station {
   brief?: string;
   year_min?: number;
   year_max?: number;
+  /** ABSENT means unbounded. Never send a zero: that is the console deciding. */
+  tempo_min?: number;
+  tempo_max?: number;
+  duration_min_s?: number;
+  duration_max_s?: number;
 }
 
 export interface Jock {
@@ -106,6 +111,12 @@ export interface StationBody {
   brief?: string;
   year_min?: number;
   year_max?: number;
+  /** ABSENT means unbounded. Never send a zero: that is the console deciding. */
+  tempo_min?: number;
+  tempo_max?: number;
+  /** SECONDS on the wire. The form shows minutes. */
+  duration_min_s?: number;
+  duration_max_s?: number;
 }
 
 /** What the model made of a description, plus how much music it selects. */
@@ -115,6 +126,12 @@ export interface Derived {
   moods: string[];
   year_min: number;
   year_max: number;
+  /** BPM. Zero means the brief said nothing about pace. */
+  tempo_min: number;
+  tempo_max: number;
+  /** SECONDS, always. The console shows minutes; the wire is seconds. */
+  duration_min_s: number;
+  duration_max_s: number;
   tracks: number;
   /**
    * The verdict on that count, in the same words a saved station gets. Empty

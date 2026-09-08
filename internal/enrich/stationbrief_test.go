@@ -79,9 +79,27 @@ func TestStationParamsSchemaEnums(t *testing.T) {
 		}
 	}
 
+	// EVERY PROPERTY IS REQUIRED, asserted against the properties map rather
+	// than a count. This said "want all five properties" and broke the moment
+	// tempo and length were added, which is a golden number pretending to be a
+	// claim: what it guards is that a model cannot simply omit a field, and
+	// that survives the set growing.
 	req, ok := schema["required"].([]any)
-	if !ok || len(req) != 5 {
-		t.Fatalf("required = %#v, want all five properties", schema["required"])
+	if !ok {
+		t.Fatalf("required = %#v", schema["required"])
+	}
+	required := map[string]bool{}
+	for _, r := range req {
+		required[r.(string)] = true
+	}
+	for field := range props {
+		if !required[field] {
+			t.Errorf("%s is a property but is not required, so the model may not answer it "+
+				"-- and an absent bound and an unbounded one then look identical", field)
+		}
+	}
+	if len(req) != len(props) {
+		t.Errorf("required lists %d fields and there are %d properties", len(req), len(props))
 	}
 	if schema["additionalProperties"] != false {
 		t.Error("additionalProperties is not false, so the model may invent a field")
@@ -312,5 +330,213 @@ func TestStationParamsRespectsCancellation(t *testing.T) {
 	}
 	if errors.Is(err, ErrLLMUnavailable) {
 		t.Error("a cancelled request was blamed on the model")
+	}
+}
+
+// Jockora-g1t.11. Jockora-g1t.2 was specced to derive tempo and length as well
+// and was closed without them: its twelve listed tests never mentioned either,
+// so the task graded green with two parameters missing. The stations table has
+// carried tempo_min, tempo_max, duration_min_s and duration_max_s since
+// migration 10, station.Filter selects on all four, and NOTHING could write
+// them. These are the tests that were never written.
+
+func TestStationParamsTempoSchemaBounds(t *testing.T) {
+	props := StationParamsSchema()["properties"].(map[string]any)
+	for _, c := range []struct {
+		field   string
+		lo, hi  float64
+		whatFor string
+	}{
+		{"tempo_min", SlowestBPM, FastestBPM, "the sidecar refuses a tempo outside this"},
+		{"tempo_max", SlowestBPM, FastestBPM, "the sidecar refuses a tempo outside this"},
+		{"duration_min_s", ShortestTrackS, LongestTrackS, "half a minute to an album side"},
+		{"duration_max_s", ShortestTrackS, LongestTrackS, "half a minute to an album side"},
+	} {
+		spec, ok := props[c.field].(map[string]any)
+		if !ok {
+			t.Errorf("the schema has no %s, so the sampler can return anything", c.field)
+			continue
+		}
+		// BOUNDED AT THE SAMPLER, not merely repaired afterwards. The clamps
+		// are the second line; a value that cannot be generated is the first.
+		if spec["minimum"] != c.lo || spec["maximum"] != c.hi {
+			t.Errorf("%s bounds = %v..%v, want %v..%v (%s)",
+				c.field, spec["minimum"], spec["maximum"], c.lo, c.hi, c.whatFor)
+		}
+	}
+	// REQUIRED, like the years. A model that may omit a field omits it, and an
+	// absent tempo and an unbounded one then look identical.
+	req := StationParamsSchema()["required"].([]any)
+	for _, want := range []string{"tempo_min", "tempo_max", "duration_min_s", "duration_max_s"} {
+		var found bool
+		for _, r := range req {
+			if r == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s is not required, so the model may simply not answer it", want)
+		}
+	}
+}
+
+func TestStationParamsTempoFromBrief(t *testing.T) {
+	got, err, _ := derive(t, `{"name":"Runners","genres":["electronic"],"moods":["propulsive"],
+		"year_min":0,"year_max":0,"tempo_min":150,"tempo_max":180,
+		"duration_min_s":0,"duration_max_s":0}`)
+	if err != nil {
+		t.Fatalf("DeriveStationParams: %v", err)
+	}
+	if got.TempoMin != 150 || got.TempoMax != 180 {
+		t.Errorf("tempo = %v..%v, want 150..180", got.TempoMin, got.TempoMax)
+	}
+}
+
+func TestStationParamsLengthFromBrief(t *testing.T) {
+	got, err, _ := derive(t, `{"name":"Long Form","genres":["ambient"],"moods":["calm"],
+		"year_min":0,"year_max":0,"tempo_min":0,"tempo_max":0,
+		"duration_min_s":420,"duration_max_s":1800}`)
+	if err != nil {
+		t.Fatalf("DeriveStationParams: %v", err)
+	}
+	if got.DurationMinS != 420 || got.DurationMaxS != 1800 {
+		t.Errorf("length = %v..%v, want 420..1800", got.DurationMinS, got.DurationMaxS)
+	}
+}
+
+// TestStationParamsTempoSilentBriefHasNoBound is the one that matters.
+//
+// An UNBIDDEN range silently shrinks a playlist, which is worse than a missing
+// one because nothing on screen explains it. The year rule needed exactly this
+// fix live, twice: "mostly nineties" came back as 0 to 1999, and then, once
+// told to give both ends, the model started inventing decades for briefs that
+// mentioned no dates at all.
+func TestStationParamsTempoSilentBriefHasNoBound(t *testing.T) {
+	got, err, _ := derive(t, `{"name":"Angry Guitars","genres":["rock"],"moods":["aggressive"],
+		"year_min":0,"year_max":0,"tempo_min":0,"tempo_max":0,
+		"duration_min_s":0,"duration_max_s":0}`)
+	if err != nil {
+		t.Fatalf("DeriveStationParams: %v", err)
+	}
+	if got.TempoMin != 0 || got.TempoMax != 0 {
+		t.Errorf("a brief about nothing but feel came back bounded at %v..%v",
+			got.TempoMin, got.TempoMax)
+	}
+	if got.DurationMinS != 0 || got.DurationMaxS != 0 {
+		t.Errorf("a brief saying nothing about length came back bounded at %v..%v",
+			got.DurationMinS, got.DurationMaxS)
+	}
+}
+
+// TestStationParamsTempoDeriveClamps: the clamps are WIRED, not merely written.
+//
+// clampTempo has its own table test, and unwiring it from parseStationParams
+// broke nothing else -- the same gap the advert brief check had. A hosted model
+// treats a schema as advisory, so this is the path that actually runs.
+func TestStationParamsTempoDeriveClamps(t *testing.T) {
+	got, err, _ := derive(t, `{"name":"Runners","genres":["electronic"],"moods":["propulsive"],
+		"year_min":0,"year_max":0,"tempo_min":900,"tempo_max":5,
+		"duration_min_s":99999,"duration_max_s":2}`)
+	if err != nil {
+		t.Fatalf("DeriveStationParams: %v", err)
+	}
+	// Out of range on both sides AND inverted, which is what a model ignoring
+	// the schema actually produces.
+	if got.TempoMin != SlowestBPM || got.TempoMax != FastestBPM {
+		t.Errorf("tempo = %v..%v, want it clamped and ordered to %v..%v",
+			got.TempoMin, got.TempoMax, SlowestBPM, FastestBPM)
+	}
+	if got.DurationMinS != ShortestTrackS || got.DurationMaxS != LongestTrackS {
+		t.Errorf("length = %v..%v, want it clamped and ordered to %v..%v",
+			got.DurationMinS, got.DurationMaxS, ShortestTrackS, LongestTrackS)
+	}
+}
+
+func TestStationParamsTempoClamps(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		inMin, inMax     float64
+		wantMin, wantMax float64
+	}{
+		{"unbounded stays unbounded", 0, 0, 0, 0},
+		{"a real range is kept", 150, 180, 150, 180},
+		{"too slow is pulled to the floor", 5, 180, SlowestBPM, 180},
+		{"too fast is pulled to the ceiling", 150, 900, 150, FastestBPM},
+		{"an inverted pair is swapped", 180, 150, 150, 180},
+		{"a negative is clamped", -20, 150, SlowestBPM, 150},
+		{"only a floor", 150, 0, 150, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			min, max := clampTempo(tc.inMin, tc.inMax)
+			if min != tc.wantMin || max != tc.wantMax {
+				t.Errorf("clampTempo(%v, %v) = %v, %v; want %v, %v",
+					tc.inMin, tc.inMax, min, max, tc.wantMin, tc.wantMax)
+			}
+		})
+	}
+}
+
+func TestStationParamsLengthClamps(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		inMin, inMax     float64
+		wantMin, wantMax float64
+	}{
+		{"unbounded stays unbounded", 0, 0, 0, 0},
+		{"a real range is kept", 420, 1800, 420, 1800},
+		{"too short is pulled to the floor", 5, 600, ShortestTrackS, 600},
+		{"longer than an album side is pulled in", 600, 99999, 600, LongestTrackS},
+		{"an inverted pair is swapped", 600, 300, 300, 600},
+		{"only a ceiling", 0, 240, 0, 240},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			min, max := clampLength(tc.inMin, tc.inMax)
+			if min != tc.wantMin || max != tc.wantMax {
+				t.Errorf("clampLength(%v, %v) = %v, %v; want %v, %v",
+					tc.inMin, tc.inMax, min, max, tc.wantMin, tc.wantMax)
+			}
+		})
+	}
+}
+
+// TestStationParamsTempoPromptStatesTheDefault: the LAST instruction is the one
+// a small model remembers, which is why the year rule ends on its default.
+func TestStationParamsTempoPromptStatesTheDefault(t *testing.T) {
+	p := BuildStationBriefPrompt("something to run to")
+	for _, want := range []string{"tempo_min", "tempo_max", "duration_min_s", "duration_max_s"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("the prompt never names %s:\n%s", want, p)
+		}
+	}
+	// SECONDS, said out loud. A model given "nothing over four minutes" and no
+	// unit will answer 4.
+	if !strings.Contains(strings.ToLower(p), "seconds") {
+		t.Errorf("the prompt does not say the length is in seconds:\n%s", p)
+	}
+	// BPM, likewise: a tempo with no unit invites a word.
+	if !strings.Contains(strings.ToUpper(p), "BPM") {
+		t.Errorf("the prompt does not say the tempo is in BPM:\n%s", p)
+	}
+	// AND THE DEFAULT IS STATED LAST for both, after the conditional rule, in
+	// the shape the years had to be rewritten into after a live run.
+	//
+	// MATCHED ON ITS OWN SENTENCE, not on "0 and 0": the YEAR rule ends on
+	// those same three words, so a looser check passed against a prompt whose
+	// tempo rule had no default at all -- which is the exact defect that put an
+	// invented decade on a date-free brief.
+	const mustSay = "MENTIONS NEITHER PACE NOR LENGTH, ALL FOUR ARE 0"
+	if !strings.Contains(p, mustSay) {
+		t.Errorf("the tempo and length rules do not state their own default:\n%s", p)
+	}
+	if strings.Index(p, mustSay) < strings.Index(p, "tempo_min") {
+		t.Errorf("the default comes before the rule it is the default for:\n%s", p)
+	}
+	// It is also the LAST thing said about the ranges, which is the whole point
+	// of the ordering: the last instruction is the one a small model remembers.
+	if strings.Index(p, mustSay) < strings.LastIndex(p, "duration_max_s") {
+		t.Errorf("something about the ranges comes after their default:\n%s", p)
+	}
+	if !strings.Contains(p, "Do not invent a tempo or a length") {
+		t.Errorf("the prompt does not forbid inventing one:\n%s", p)
 	}
 }

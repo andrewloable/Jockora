@@ -67,6 +67,27 @@ type stationBody struct {
 	Brief   string `json:"brief"`
 	YearMin int    `json:"year_min"`
 	YearMax int    `json:"year_max"`
+	// BPM and SECONDS. Zero is unbounded on that side, the same rule the
+	// stations table and the filter follow.
+	TempoMin     float64 `json:"tempo_min"`
+	TempoMax     float64 `json:"tempo_max"`
+	DurationMinS float64 `json:"duration_min_s"`
+	DurationMaxS float64 `json:"duration_max_s"`
+}
+
+// filter is what this body selects on, in one place.
+//
+// Built once and used for validation, for storage and for the count, because
+// three hand-copied constructions of the same thing is how one of them ends up
+// missing a field -- which is exactly how tempo and length came to have columns
+// nothing could write.
+func (b stationBody) filter() station.Filter {
+	return station.Filter{
+		Genres: b.genres(), Moods: b.moods(),
+		YearMin: b.YearMin, YearMax: b.YearMax,
+		TempoMin: b.TempoMin, TempoMax: b.TempoMax,
+		DurationMinS: b.DurationMinS, DurationMaxS: b.DurationMaxS,
+	}
 }
 
 func (b stationBody) genres() []string {
@@ -103,6 +124,13 @@ type stationView struct {
 	Brief   string `json:"brief,omitempty"`
 	YearMin int    `json:"year_min,omitempty"`
 	YearMax int    `json:"year_max,omitempty"`
+	// omitempty on all four, so an unbounded side is ABSENT rather than 0 --
+	// the console binds a number input to these, and an input bound to 0
+	// renders "0", which an operator reads as a bound they did not set.
+	TempoMin     float64 `json:"tempo_min,omitempty"`
+	TempoMax     float64 `json:"tempo_max,omitempty"`
+	DurationMinS float64 `json:"duration_min_s,omitempty"`
+	DurationMaxS float64 `json:"duration_max_s,omitempty"`
 	// Warning is set when a station is legal but thinner than most people
 	// want, so the console can say so without refusing.
 	Warning string `json:"warning,omitempty"`
@@ -212,7 +240,9 @@ func (s *Server) viewOfStation(ctx context.Context, st store.Station) (stationVi
 	view := stationView{ID: st.ID, Name: st.Name, Genre: st.Genre, Mood: st.Mood,
 		Genres: station.SplitList(st.Genre), Moods: station.SplitList(st.Mood),
 		JockID: st.JockID, Enabled: st.Enabled, Tracks: len(ids),
-		Brief: st.Brief, YearMin: st.YearMin, YearMax: st.YearMax}
+		Brief: st.Brief, YearMin: st.YearMin, YearMax: st.YearMax,
+		TempoMin: st.TempoMin, TempoMax: st.TempoMax,
+		DurationMinS: st.DurationMinS, DurationMaxS: st.DurationMaxS}
 	if ok, warn := station.CheckThreshold(len(ids)); !ok {
 		view.Warning = "too few tracks to run"
 	} else if warn {
@@ -229,8 +259,7 @@ func (s *Server) createStation(w http.ResponseWriter, r *http.Request) {
 	if !s.decode(w, r, &body) {
 		return
 	}
-	if field, msg := validateStation(body.Name, body.genres(), body.moods(),
-		body.YearMin, body.YearMax); field != "" {
+	if field, msg := validateStation(body.Name, body.filter()); field != "" {
 		s.writeFieldError(w, field, msg)
 		return
 	}
@@ -242,6 +271,12 @@ func (s *Server) createStation(w http.ResponseWriter, r *http.Request) {
 		Brief:   strings.TrimSpace(body.Brief),
 		YearMin: body.YearMin,
 		YearMax: body.YearMax,
+		// EVERY parameter the brief became. These had columns and a filter and
+		// no writer at all, so a derived tempo reached the console and stopped.
+		TempoMin:     body.TempoMin,
+		TempoMax:     body.TempoMax,
+		DurationMinS: body.DurationMinS,
+		DurationMaxS: body.DurationMaxS,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -263,8 +298,7 @@ func (s *Server) updateStation(w http.ResponseWriter, r *http.Request, id int64)
 	if !s.decode(w, r, &body) {
 		return
 	}
-	if field, msg := validateStation(body.Name, body.genres(), body.moods(),
-		body.YearMin, body.YearMax); field != "" {
+	if field, msg := validateStation(body.Name, body.filter()); field != "" {
 		s.writeFieldError(w, field, msg)
 		return
 	}
@@ -285,6 +319,8 @@ func (s *Server) updateStation(w http.ResponseWriter, r *http.Request, id int64)
 	// exactly as a genre change already does.
 	st.Brief = strings.TrimSpace(body.Brief)
 	st.YearMin, st.YearMax = body.YearMin, body.YearMax
+	st.TempoMin, st.TempoMax = body.TempoMin, body.TempoMax
+	st.DurationMinS, st.DurationMaxS = body.DurationMinS, body.DurationMaxS
 	if err := s.stations.UpdateStation(r.Context(), st); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -445,24 +481,49 @@ func (s *Server) jockToAir(ctx context.Context, jockID string) {
 }
 
 // validateStation refuses a station the filter could never satisfy.
-func validateStation(name string, genres, moods []string, yearMin, yearMax int) (field, msg string) {
+//
+// TAKES THE WHOLE FILTER rather than a list of fields. It used to take five
+// arguments and grew two ranges; a signature that has to be extended for every
+// new parameter is a signature one of them will be left out of, which is how
+// tempo and length ended up with columns nothing wrote.
+func validateStation(name string, f station.Filter) (field, msg string) {
 	if strings.TrimSpace(name) == "" {
 		return "name", "a name is required"
 	}
 	// Against the CLOSED vocabularies, so a station cannot be made
 	// unsatisfiable by a typo -- which produces not an empty station but one
 	// that will never fill, with nothing on screen to say why.
-	f := station.Filter{Genres: genres, Moods: moods, YearMin: yearMin, YearMax: yearMax}
 	if err := f.Validate(); err != nil {
-		// A RANGE is its own box, so say so rather than blaming a picker the
-		// operator did not touch.
+		// A RANGE IS ITS OWN BOX, and with three of them saying "year_min" for
+		// all three sends the operator to fix one they did not touch. Each is
+		// re-checked alone to find which; a filter carrying only one range can
+		// fail no other way.
 		if errors.Is(err, station.ErrBadRange) {
-			return "year_min", err.Error()
+			// ONE RETURN, and the default is the year. A separate fall-through
+			// after the loop would be unreachable -- a range error is always
+			// one of these three -- and unreachable code is a line no test can
+			// cover honestly.
+			field := "year_min"
+			for _, probe := range []struct {
+				name string
+				only station.Filter
+			}{
+				{"year_min", station.Filter{YearMin: f.YearMin, YearMax: f.YearMax}},
+				{"tempo_min", station.Filter{TempoMin: f.TempoMin, TempoMax: f.TempoMax}},
+				{"duration_min_s", station.Filter{
+					DurationMinS: f.DurationMinS, DurationMaxS: f.DurationMaxS}},
+			} {
+				if errors.Is(probe.only.Validate(), station.ErrBadRange) {
+					field = probe.name
+					break
+				}
+			}
+			return field, err.Error()
 		}
 		// WHICH BOX TO HIGHLIGHT. The filter reports one error for two fields,
 		// so the offending value decides: a genre the vocabulary does not hold
 		// blames the genre picker, and anything else is the mood.
-		for _, g := range genres {
+		for _, g := range f.Genres {
 			if !containsString(enrich.StationTags, g) {
 				return "genre", err.Error()
 			}
@@ -591,9 +652,14 @@ func (s *Server) deriveStation(w http.ResponseWriter, r *http.Request) {
 	// THE COUNT IS HALF THE ANSWER. Four tags and no number does not tell the
 	// operator the thing they actually need to know, which is whether the
 	// station has any music in it.
+	// EVERY PARAMETER, or the count is for a station the operator will not get.
+	// A preview showing a tempo range beside a number computed without it is
+	// worse than showing no number at all.
 	n, err := s.briefs.CountMatching(r.Context(), station.Filter{
 		Genres: params.Genres, Moods: params.Moods,
 		YearMin: params.YearMin, YearMax: params.YearMax,
+		TempoMin: params.TempoMin, TempoMax: params.TempoMax,
+		DurationMinS: params.DurationMinS, DurationMaxS: params.DurationMaxS,
 	})
 	if err != nil {
 		s.writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -615,6 +681,8 @@ func (s *Server) deriveStation(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"name": params.Name, "genres": params.Genres, "moods": params.Moods,
 		"year_min": params.YearMin, "year_max": params.YearMax,
+		"tempo_min": params.TempoMin, "tempo_max": params.TempoMax,
+		"duration_min_s": params.DurationMinS, "duration_max_s": params.DurationMaxS,
 		"tracks": n, "warning": warning,
 	})
 }

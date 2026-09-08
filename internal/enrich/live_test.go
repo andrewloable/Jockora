@@ -210,14 +210,63 @@ func TestBriefGateLive(t *testing.T) {
 			"and nothing that sounds like a party.",
 		// Terse, which is the other way it arrives.
 		"angry guitars",
+		// Jockora-g1t.14: A PACE AND NOTHING ELSE. The same brief the human
+		// gate uses, so the two are testing the same claim.
+		"something to run to",
+		// AND A LENGTH AND NOTHING ELSE.
+		"long ambient pieces, nothing short",
 	} {
 		t.Run(brief[:min(len(brief), 30)], func(t *testing.T) {
 			p, err := DeriveStationParams(ctx, llm, brief)
 			if err != nil {
 				t.Fatalf("DeriveStationParams(%q): %v", brief, err)
 			}
-			t.Logf("%q ->\n  name   %q\n  genres %v\n  moods  %v\n  years  %d..%d",
-				brief, p.Name, p.Genres, p.Moods, p.YearMin, p.YearMax)
+			t.Logf("%q ->\n  name   %q\n  genres %v\n  moods  %v\n  years  %d..%d"+
+				"\n  tempo  %g..%g BPM\n  length %g..%g s",
+				brief, p.Name, p.Genres, p.Moods, p.YearMin, p.YearMax,
+				p.TempoMin, p.TempoMax, p.DurationMinS, p.DurationMaxS)
+			// READ THESE. A model that answers "something to run to" with a
+			// plausible-looking 60 to 200 has answered nothing, and no
+			// assertion catches that -- the same way an invented decade on a
+			// date-free brief passed every check it had.
+			if strings.Contains(brief, "run to") &&
+				p.TempoMin == 0 && p.TempoMax == 0 {
+				t.Error("a brief that is ABOUT pace came back with no tempo at all")
+			}
+			if strings.Contains(brief, "long ambient") &&
+				p.DurationMinS == 0 && p.DurationMaxS == 0 {
+				t.Error("a brief that is ABOUT length came back with no length at all")
+			}
+			// AND THE ONES THAT MENTION NEITHER MUST COME BACK UNBOUNDED. An
+			// unbidden range silently shrinks a playlist, which is worse than a
+			// missing one because nothing on screen explains it.
+			if brief == "angry guitars" || strings.HasPrefix(brief, "Loud eighties") {
+				if p.TempoMin != 0 || p.TempoMax != 0 {
+					t.Errorf("%q says nothing about pace and came back bounded at %g..%g",
+						brief, p.TempoMin, p.TempoMax)
+				}
+				if p.DurationMinS != 0 || p.DurationMaxS != 0 {
+					t.Errorf("%q says nothing about length and came back bounded at %g..%g",
+						brief, p.DurationMinS, p.DurationMaxS)
+				}
+			}
+			for _, r := range []struct {
+				what     string
+				min, max float64
+				lo, hi   float64
+			}{
+				{"tempo", p.TempoMin, p.TempoMax, SlowestBPM, FastestBPM},
+				{"length", p.DurationMinS, p.DurationMaxS, ShortestTrackS, LongestTrackS},
+			} {
+				for _, v := range []float64{r.min, r.max} {
+					if v != 0 && (v < r.lo || v > r.hi) {
+						t.Errorf("%s %g is outside %g..%g", r.what, v, r.lo, r.hi)
+					}
+				}
+				if r.min != 0 && r.max != 0 && r.min > r.max {
+					t.Errorf("%s %g..%g selects nothing", r.what, r.min, r.max)
+				}
+			}
 
 			for _, g := range p.Genres {
 				if !slices.Contains(StationTags, g) {

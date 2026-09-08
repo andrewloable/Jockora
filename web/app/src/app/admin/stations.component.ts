@@ -67,6 +67,45 @@ import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api'
                     (input)="editYearMax.set(+$any($event.target).value)"
                   />
                 </label>
+                <!-- The same four, in the same units. An operator who opens
+                     an edit and finds them blank has lost them, and saving
+                     would widen the station with nothing on screen to say so. -->
+                <label>
+                  Fastest and slowest (BPM)
+                  <input
+                    data-edit-tempo-min
+                    type="number"
+                    placeholder="any"
+                    [value]="editTempoMin() || ''"
+                    (input)="editTempoMin.set(+$any($event.target).value)"
+                  />
+                  <input
+                    data-edit-tempo-max
+                    type="number"
+                    placeholder="any"
+                    [value]="editTempoMax() || ''"
+                    (input)="editTempoMax.set(+$any($event.target).value)"
+                  />
+                </label>
+                <label>
+                  Shortest and longest (minutes)
+                  <input
+                    data-edit-length-min
+                    type="number"
+                    step="0.5"
+                    placeholder="any"
+                    [value]="editLengthMin() || ''"
+                    (input)="editLengthMin.set(+$any($event.target).value)"
+                  />
+                  <input
+                    data-edit-length-max
+                    type="number"
+                    step="0.5"
+                    placeholder="any"
+                    [value]="editLengthMax() || ''"
+                    (input)="editLengthMax.set(+$any($event.target).value)"
+                  />
+                </label>
               </td>
               <td data-label="Genre · mood">
                 <!-- CHECKBOXES, not a multiple select. A multiple select needs
@@ -244,6 +283,49 @@ import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api'
           (input)="yearMax.set(+$any($event.target).value)"
         />
       </label>
+      <!-- THE UNIT IS IN THE LABEL, not left to be guessed. Tempo is BPM
+           because that is what tracks.bpm holds; length is MINUTES because
+           nobody describes a song as 240 seconds, and the conversion to
+           seconds happens in exactly one place on the way out.
+
+           EMPTY MEANS UNBOUNDED and must stay empty: an input bound to a zero
+           renders "0", which an operator reads as a bound they did not set. -->
+      <label>
+        Fastest and slowest (BPM)
+        <input
+          data-tempo-min
+          type="number"
+          placeholder="any"
+          [value]="tempoMin() || ''"
+          (input)="tempoMin.set(+$any($event.target).value)"
+        />
+        <input
+          data-tempo-max
+          type="number"
+          placeholder="any"
+          [value]="tempoMax() || ''"
+          (input)="tempoMax.set(+$any($event.target).value)"
+        />
+      </label>
+      <label>
+        Shortest and longest (minutes)
+        <input
+          data-length-min
+          type="number"
+          step="0.5"
+          placeholder="any"
+          [value]="lengthMin() || ''"
+          (input)="lengthMin.set(+$any($event.target).value)"
+        />
+        <input
+          data-length-max
+          type="number"
+          step="0.5"
+          placeholder="any"
+          [value]="lengthMax() || ''"
+          (input)="lengthMax.set(+$any($event.target).value)"
+        />
+      </label>
       <!-- [selected] per option, never [value] on the select: these options
            come from the vocabulary, which arrives over HTTP, and a select whose
            value is bound before its options exist silently falls back to the
@@ -325,6 +407,13 @@ export class Stations {
   readonly brief = signal('');
   readonly yearMin = signal(0);
   readonly yearMax = signal(0);
+  // BPM as typed. Zero is unbounded and renders as an empty box.
+  readonly tempoMin = signal(0);
+  readonly tempoMax = signal(0);
+  // MINUTES, because nobody describes a song as 240 seconds. Converted on the
+  // way out; the wire is always seconds.
+  readonly lengthMin = signal(0);
+  readonly lengthMax = signal(0);
   readonly derived = signal<Derived | null>(null);
   readonly describing = signal(false);
   /**
@@ -340,6 +429,10 @@ export class Stations {
   readonly editBrief = signal('');
   readonly editYearMin = signal(0);
   readonly editYearMax = signal(0);
+  readonly editTempoMin = signal(0);
+  readonly editTempoMax = signal(0);
+  readonly editLengthMin = signal(0);
+  readonly editLengthMax = signal(0);
   readonly editDescribing = signal(false);
   readonly said = signal('');
 
@@ -421,6 +514,10 @@ export class Stations {
     this.editBrief.set(st.brief ?? '');
     this.editYearMin.set(st.year_min ?? 0);
     this.editYearMax.set(st.year_max ?? 0);
+    this.editTempoMin.set(st.tempo_min ?? 0);
+    this.editTempoMax.set(st.tempo_max ?? 0);
+    this.editLengthMin.set(this.toMinutes(st.duration_min_s));
+    this.editLengthMax.set(this.toMinutes(st.duration_max_s));
   }
 
   /** The jock's NAME, for a row that is not being edited. */
@@ -444,14 +541,18 @@ export class Stations {
     this.api
       .updateStation(
         st.id,
-        this.stationBody(
-          this.editName(),
-          this.editGenres(),
-          this.editMoods(),
-          this.editBrief(),
-          this.editYearMin(),
-          this.editYearMax(),
-        ),
+        this.stationBody({
+          name: this.editName(),
+          genres: this.editGenres(),
+          moods: this.editMoods(),
+          brief: this.editBrief(),
+          yearMin: this.editYearMin(),
+          yearMax: this.editYearMax(),
+          tempoMin: this.editTempoMin(),
+          tempoMax: this.editTempoMax(),
+          lengthMin: this.editLengthMin(),
+          lengthMax: this.editLengthMax(),
+        }),
       )
       .subscribe({
         next: (d) => this.saveJock(st, d),
@@ -529,6 +630,10 @@ export class Stations {
         this.moods.set(d.moods ?? []);
         this.yearMin.set(d.year_min ?? 0);
         this.yearMax.set(d.year_max ?? 0);
+        this.tempoMin.set(d.tempo_min ?? 0);
+        this.tempoMax.set(d.tempo_max ?? 0);
+        this.lengthMin.set(this.toMinutes(d.duration_min_s));
+        this.lengthMax.set(this.toMinutes(d.duration_max_s));
       },
       error: (e: { status?: number; error?: { error?: string } }) => {
         this.describing.set(false);
@@ -556,6 +661,10 @@ export class Stations {
         this.editMoods.set(d.moods ?? []);
         this.editYearMin.set(d.year_min ?? 0);
         this.editYearMax.set(d.year_max ?? 0);
+        this.editTempoMin.set(d.tempo_min ?? 0);
+        this.editTempoMax.set(d.tempo_max ?? 0);
+        this.editLengthMin.set(this.toMinutes(d.duration_min_s));
+        this.editLengthMax.set(this.toMinutes(d.duration_max_s));
       },
       error: (e: { error?: { error?: string } }) => {
         this.editDescribing.set(false);
@@ -570,39 +679,68 @@ export class Stations {
    * A zero is a year the server would have to guess the meaning of, and the
    * schema on the other side already treats absent as unbounded.
    */
-  private stationBody(
-    name: string,
-    genres: string[],
-    moods: string[],
-    brief: string,
-    yearMin: number,
-    yearMax: number,
-  ): StationBody {
-    const body: StationBody = { name, genres, moods };
-    if (brief.trim()) {
-      body.brief = brief.trim();
+  private stationBody(in_: {
+    name: string;
+    genres: string[];
+    moods: string[];
+    brief: string;
+    yearMin: number;
+    yearMax: number;
+    tempoMin: number;
+    tempoMax: number;
+    /** MINUTES. Converted to seconds here, which is the only place it happens. */
+    lengthMin: number;
+    lengthMax: number;
+  }): StationBody {
+    const body: StationBody = { name: in_.name, genres: in_.genres, moods: in_.moods };
+    if (in_.brief.trim()) {
+      body.brief = in_.brief.trim();
     }
-    if (yearMin) {
-      body.year_min = yearMin;
+    // ABSENT, NOT ZERO, for every bound. The server reads a zero as unbounded
+    // too, but sending one is the console deciding rather than the operator --
+    // and a cleared box has to stay cleared.
+    if (in_.yearMin) {
+      body.year_min = in_.yearMin;
     }
-    if (yearMax) {
-      body.year_max = yearMax;
+    if (in_.yearMax) {
+      body.year_max = in_.yearMax;
+    }
+    if (in_.tempoMin) {
+      body.tempo_min = in_.tempoMin;
+    }
+    if (in_.tempoMax) {
+      body.tempo_max = in_.tempoMax;
+    }
+    if (in_.lengthMin) {
+      body.duration_min_s = Math.round(in_.lengthMin * 60);
+    }
+    if (in_.lengthMax) {
+      body.duration_max_s = Math.round(in_.lengthMax * 60);
     }
     return body;
+  }
+
+  /** Seconds off the wire, minutes for the box. */
+  private toMinutes(seconds: number | undefined): number {
+    return seconds ? seconds / 60 : 0;
   }
 
   add(): void {
     this.said.set('');
     this.api
       .addStation(
-        this.stationBody(
-          this.name(),
-          this.genres(),
-          this.moods(),
-          this.brief(),
-          this.yearMin(),
-          this.yearMax(),
-        ),
+        this.stationBody({
+          name: this.name(),
+          genres: this.genres(),
+          moods: this.moods(),
+          brief: this.brief(),
+          yearMin: this.yearMin(),
+          yearMax: this.yearMax(),
+          tempoMin: this.tempoMin(),
+          tempoMax: this.tempoMax(),
+          lengthMin: this.lengthMin(),
+          lengthMax: this.lengthMax(),
+        }),
       )
       .subscribe({
         next: (made) => {

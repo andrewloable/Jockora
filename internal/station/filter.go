@@ -60,13 +60,18 @@ type Filter struct {
 // The bounds a value is refused outside. REFUSED HERE, REPAIRED IN enrich:
 // DeriveStationParams already fixes what a model returns, and this is the
 // boundary that catches a hand-edited database or a direct API call.
+// ONE DEFINITION, IN enrich. These were four numbers written out twice --
+// once here and once as the range the derive clamps to -- and the year pair had
+// already drifted into two constants with a comment on one saying it matched
+// the other. The schema bounds the sampler, the clamps repair what a hosted
+// model returns anyway, and Validate below refuses a hand-edited database:
+// three checks over one pair of numbers, or the sampler starts producing values
+// this then refuses. station imports enrich, so this is the direction that is
+// not an import cycle.
 const (
-	earliestYear = 1900
-	// The sidecar refuses a tempo outside this, so a station asking for one
-	// would be asking for tracks that cannot exist.
-	slowestBPM, fastestBPM = 30.0, 250.0
-	// Half a minute is shorter than some breaks; an hour is an album side.
-	shortestTrackS, longestTrackS = 30.0, 3600.0
+	earliestYear                  = enrich.EarliestBriefYear
+	slowestBPM, fastestBPM        = enrich.SlowestBPM, enrich.FastestBPM
+	shortestTrackS, longestTrackS = enrich.ShortestTrackS, enrich.LongestTrackS
 )
 
 // ErrBadRange refuses a bound nothing could satisfy.

@@ -304,3 +304,38 @@ func TestFilterSurfacesFailures(t *testing.T) {
 		t.Error("the catch-all succeeded on a closed store")
 	}
 }
+
+// TestFilterRangeBoundsComeFromEnrich: the filter refuses outside exactly what
+// the derive is allowed to produce.
+//
+// They were four numbers written out twice, and the year pair had already
+// drifted into two constants with a comment on one saying it matched the other.
+// A sampler bounded at 30 to 250 feeding a validator that refuses outside 40 to
+// 200 is a machine for rejecting your own output -- the same failure the advert
+// character cap already had once.
+func TestFilterRangeBoundsComeFromEnrich(t *testing.T) {
+	if slowestBPM != enrich.SlowestBPM || fastestBPM != enrich.FastestBPM {
+		t.Errorf("tempo bounds %v..%v do not match the derive's %v..%v",
+			slowestBPM, fastestBPM, enrich.SlowestBPM, enrich.FastestBPM)
+	}
+	if shortestTrackS != enrich.ShortestTrackS || longestTrackS != enrich.LongestTrackS {
+		t.Errorf("length bounds %v..%v do not match the derive's %v..%v",
+			shortestTrackS, longestTrackS, enrich.ShortestTrackS, enrich.LongestTrackS)
+	}
+	if earliestYear != enrich.EarliestBriefYear {
+		t.Errorf("year floor %v does not match the derive's %v",
+			earliestYear, enrich.EarliestBriefYear)
+	}
+	// AND A VALUE AT EACH BOUND IS ACCEPTED, not merely equal to a constant:
+	// an off-by-one in Validate would pass every check above.
+	for _, f := range []Filter{
+		{Genres: []string{"rock"}, TempoMin: enrich.SlowestBPM, TempoMax: enrich.FastestBPM},
+		{Genres: []string{"rock"}, DurationMinS: enrich.ShortestTrackS,
+			DurationMaxS: enrich.LongestTrackS},
+		{Genres: []string{"rock"}, YearMin: enrich.EarliestBriefYear},
+	} {
+		if err := f.Validate(); err != nil {
+			t.Errorf("a filter exactly on the bounds was refused: %v", err)
+		}
+	}
+}

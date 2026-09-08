@@ -679,6 +679,13 @@ describe('stations brief', () => {
     moods: ['raw'],
     year_min: 1975,
     year_max: 2005,
+    // The server always answers all four -- they are required in the schema, so
+    // an absent bound and an unbounded one cannot be confused. Zero is
+    // unbounded.
+    tempo_min: 0,
+    tempo_max: 0,
+    duration_min_s: 0,
+    duration_max_s: 0,
     tracks: 412,
   };
 
@@ -1127,5 +1134,150 @@ describe('stations brief', () => {
     expect(
       (edit.nativeElement.querySelector('[data-edit-brief]') as HTMLTextAreaElement).maxLength,
     ).toBe(edit.componentInstance.maxBrief);
+  });
+
+  // Jockora-g1t.13. The stations table has carried tempo and length since
+  // migration 10; the derive returns them since g1t.11 and the API carries them
+  // since g1t.12. Without this they reach the console and stop there.
+
+  const paced: Derived = {
+    name: 'Runners',
+    genres: ['rock'],
+    moods: ['raw'],
+    year_min: 0,
+    year_max: 0,
+    tempo_min: 150,
+    tempo_max: 180,
+    duration_min_s: 0,
+    duration_max_s: 240,
+    tracks: 90,
+  };
+
+  function value(f: { nativeElement: HTMLElement }, sel: string) {
+    return (f.nativeElement.querySelector(sel) as HTMLInputElement).value;
+  }
+
+  function set(f: { nativeElement: HTMLElement; detectChanges(): void }, sel: string, v: string) {
+    const el = f.nativeElement.querySelector(sel) as HTMLInputElement;
+    el.value = v;
+    el.dispatchEvent(new Event('input'));
+    f.detectChanges();
+  }
+
+  it('stations brief shows the tempo and length the AI chose', () => {
+    const fixture = mounted();
+    typeBrief(fixture, 'something to run to, nothing over four minutes');
+    describeIt(fixture, paced);
+
+    expect(value(fixture, '[data-tempo-min]')).toBe('150');
+    expect(value(fixture, '[data-tempo-max]')).toBe('180');
+    // MINUTES ON SCREEN. Nobody describes a song as 240 seconds.
+    expect(value(fixture, '[data-length-max]')).toBe('4');
+    // An unbounded side stays BLANK. A zero in the box reads as a bound the
+    // operator did not set, and clearing it would then be their job.
+    expect(value(fixture, '[data-length-min]')).toBe('');
+  });
+
+  it('stations brief sends the length in seconds and the tempo in BPM', () => {
+    const fixture = mounted();
+    typeBrief(fixture, 'something to run to');
+    describeIt(fixture, paced);
+
+    // The AI gave a ceiling and no floor; the operator adds one. Both boxes
+    // are typed into, so the binding is proved rather than assumed.
+    set(fixture, '[data-length-min]', '2');
+    set(fixture, '[data-length-max]', '4');
+    (fixture.nativeElement.querySelector('[data-add]') as HTMLButtonElement).click();
+
+    const req = ctrl.expectOne('/admin/stations');
+    expect(req.request.body.tempo_min).toBe(150);
+    expect(req.request.body.tempo_max).toBe(180);
+    // Minutes in the box, seconds on the wire.
+    expect(req.request.body.duration_min_s).toBe(120);
+    expect(req.request.body.duration_max_s).toBe(240);
+    req.flush({ id: 3, tracks: 90 });
+    ctrl.expectOne('/admin/stations').flush([]);
+  });
+
+  it('stations brief keeps a cleared range cleared', () => {
+    const fixture = mounted();
+    typeBrief(fixture, 'something to run to');
+    describeIt(fixture, paced);
+
+    // The operator decides the pace was wrong and empties both boxes.
+    set(fixture, '[data-tempo-min]', '');
+    set(fixture, '[data-tempo-max]', '');
+    (fixture.nativeElement.querySelector('[data-add]') as HTMLButtonElement).click();
+
+    const req = ctrl.expectOne('/admin/stations');
+    // ABSENT, NOT ZERO. The server reads a zero as unbounded too, but sending
+    // one is the console deciding rather than the operator -- and a cleared
+    // box has to stay cleared.
+    expect('tempo_min' in req.request.body).toBe(false);
+    expect('tempo_max' in req.request.body).toBe(false);
+    expect('duration_min_s' in req.request.body).toBe(false);
+    req.flush({ id: 3, tracks: 90 });
+    ctrl.expectOne('/admin/stations').flush([]);
+  });
+
+  it('stations brief carries the ranges through the row editor', () => {
+    const fixture = mounted([
+      {
+        id: 1,
+        name: 'RUNNERS',
+        genre: 'rock',
+        genres: ['rock'],
+        moods: [],
+        enabled: true,
+        tracks: 90,
+        tempo_min: 150,
+        tempo_max: 180,
+        duration_max_s: 240,
+      },
+    ]);
+    (fixture.nativeElement.querySelector('[data-edit]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    // THE ROW, IN THE FORM. An operator who opens an edit and finds the ranges
+    // blank has lost them, and saving would widen the station silently.
+    expect(value(fixture, '[data-edit-tempo-min]')).toBe('150');
+    expect(value(fixture, '[data-edit-tempo-max]')).toBe('180');
+    expect(value(fixture, '[data-edit-length-max]')).toBe('4');
+    expect(value(fixture, '[data-edit-length-min]')).toBe('');
+
+    // AND THEY ARE EDITABLE, not merely displayed. Typing into every one of
+    // them proves the binding both ways -- a box that shows the right value
+    // and ignores what is typed into it is the worse of the two failures,
+    // because it looks like it worked.
+    set(fixture, '[data-edit-tempo-min]', '140');
+    set(fixture, '[data-edit-tempo-max]', '170');
+    set(fixture, '[data-edit-length-min]', '1.5');
+    set(fixture, '[data-edit-length-max]', '5');
+
+    (fixture.nativeElement.querySelector('[data-save]') as HTMLButtonElement).click();
+    const req = ctrl.expectOne('/admin/stations/1');
+    expect(req.request.method).toBe('PUT');
+    expect(req.request.body.tempo_min).toBe(140);
+    expect(req.request.body.tempo_max).toBe(170);
+    // 1.5 minutes is 90 seconds, and 5 is 300. The conversion happens in one
+    // place and this is the only test that can see it round a half.
+    expect(req.request.body.duration_min_s).toBe(90);
+    expect(req.request.body.duration_max_s).toBe(300);
+    req.flush({ added: 0, removed: 0, kept: 90 });
+  });
+
+  it('stations brief shows the server sentence when a range is refused', () => {
+    const fixture = mounted();
+    set(fixture, '[data-name]', 'Runners');
+    set(fixture, '[data-tempo-min]', '900');
+    (fixture.nativeElement.querySelector('[data-add]') as HTMLButtonElement).click();
+    ctrl
+      .expectOne('/admin/stations')
+      .flush(
+        { field: 'tempo_min', error: 'station: impossible range: tempo 900 is outside 30 to 250' },
+        { status: 400, statusText: 'Bad Request' },
+      );
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('tempo 900 is outside 30 to 250');
   });
 });
