@@ -31,25 +31,44 @@ const blank = (): Jock => ({
         </tr>
       </thead>
       <tbody>
-      @for (jock of jocks(); track jock.id) {
-        <tr>
-          <td>{{ jock.name }}</td>
-          <td>{{ jock.voice_id }}</td>
-          <td>{{ jock.good_for_genres.join(', ') }}</td>
-          <td>
-            <button
-              type="button"
-              data-row-preview
-              [disabled]="!jock.voice_id || previewing() !== null"
-              (click)="preview(jock.voice_id)"
-            >
-              {{ previewing() === jock.voice_id ? 'Speaking…' : 'Hear it' }}
-            </button>
-            <button type="button" data-edit (click)="edit(jock)">Edit</button>
-            <button type="button" data-remove (click)="remove(jock)">Delete</button>
-          </td>
-        </tr>
-      }
+        @for (jock of jocks(); track jock.id) {
+          <tr>
+            <td data-label="Name">{{ jock.name }}</td>
+            <td data-label="Voice">{{ jock.voice_id }}</td>
+            <td data-label="Good for">{{ jock.good_for_genres.join(', ') }}</td>
+            <!-- LABELLED like the rest: below 48rem every row becomes a card,
+               and these three buttons were drawn past the right edge of a
+               390px phone with nothing to scroll. -->
+            <td data-label="Actions">
+              <button
+                type="button"
+                data-row-preview
+                [disabled]="!jock.voice_id || previewing() !== null"
+                (click)="preview(jock.voice_id)"
+              >
+                {{ previewing() === jock.voice_id ? 'Speaking…' : 'Hear it' }}
+              </button>
+              <button type="button" data-edit (click)="edit(jock)">Edit</button>
+              <button type="button" data-remove data-danger (click)="remove(jock)">Delete</button>
+            </td>
+          </tr>
+        } @empty {
+          <!-- LOADING AND EMPTY ARE NOT THE SAME THING and both drew a table
+               with no rows, so a slow first paint told a new operator their
+               library was empty. Jockora-e9a.50. -->
+          <tr>
+            <td colspan="5">
+              @if (!loaded()) {
+                <span data-loading>Loading…</span>
+              } @else if (!failed()) {
+                <span data-empty
+                  ><strong>No jocks yet.</strong> Add a jock below, then give a station its
+                  voice.</span
+                >
+              }
+            </td>
+          </tr>
+        }
       </tbody>
     </table>
 
@@ -96,6 +115,24 @@ export class Jocks {
   private readonly api = inject(AdminApi);
 
   readonly jocks = signal<Jock[]>([]);
+  /**
+   * True once the first answer has arrived, success OR failure.
+   *
+   * Without it a table with no rows means two opposite things -- the request is
+   * still in flight, or there is genuinely nothing -- and both drew the same
+   * empty table. A new operator was told their library was empty and given
+   * nothing to do about it. Jockora-e9a.50.
+   */
+  readonly loaded = signal(false);
+  /**
+   * True when the last read FAILED, as opposed to returning nothing.
+   *
+   * Three states, not two: a table with no rows can be in flight, genuinely
+   * empty, or the wreckage of a request that did not come back. Without this
+   * the third one wore the second one's words and told an operator whose
+   * server was down that they had never scanned anything.
+   */
+  readonly failed = signal(false);
   readonly voices = signal<string[]>([]);
   readonly draft = signal<Jock>(blank());
   readonly editing = signal(false);
@@ -118,8 +155,16 @@ export class Jocks {
 
   load(): void {
     this.api.jocks().subscribe({
-      next: (j) => this.jocks.set(j),
-      error: () => this.said.set('Could not read the jocks.'),
+      next: (j) => {
+        this.jocks.set(j);
+        this.loaded.set(true);
+        this.failed.set(false);
+      },
+      error: () => {
+        this.loaded.set(true);
+        this.failed.set(true);
+        this.said.set('Could not read the jocks.');
+      },
     });
   }
 
@@ -194,6 +239,12 @@ export class Jocks {
   }
 
   remove(jock: Jock): void {
+    // ASKED, because a persona card is hand-written content and deleting one
+    // unassigns it from every station that used it. The button beside it is
+    // Edit and looked identical.
+    if (!confirm(`Delete ${jock.name}? Any station using this jock loses it.`)) {
+      return;
+    }
     this.api.removeJock(jock.id).subscribe({
       next: (answer) => {
         // WHICH STATIONS lost their jock. One that went quiet without anyone

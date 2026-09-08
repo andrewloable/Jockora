@@ -38,7 +38,11 @@ import { Api, DialStation } from '../api/api';
           </small>
         </button>
       }
-      @if (!stations().length) {
+      @if (!loaded()) {
+        <p data-loading>Finding the stations…</p>
+      } @else if (!stations().length && !error()) {
+        <!-- A listener cannot fix this and should not be sent to a console
+             they cannot open, so it says who can. -->
         <p data-empty>No stations yet. An operator builds them in the console.</p>
       }
       @if (error()) {
@@ -71,6 +75,15 @@ export class Dial {
   readonly current = signal<number | null>(null);
   readonly error = signal('');
 
+  /**
+   * True once the first answer has arrived, success OR failure.
+   *
+   * The dial IS the listener's UI, and "no stations yet" drew while the answer
+   * was still in flight -- so a slow connection told a listener their operator
+   * had built nothing. Jockora-e9a.50.
+   */
+  readonly loaded = signal(false);
+
   /** tuned carries the station and where to listen to it. */
   readonly tuned = output<{ station: DialStation; hls: string }>();
 
@@ -80,10 +93,16 @@ export class Dial {
 
   load(): void {
     this.api.dial().subscribe({
-      next: (d) => this.stations.set(d.stations),
+      next: (d) => {
+        this.stations.set(d.stations);
+        this.loaded.set(true);
+      },
       // A dial that will not load is not a reason to hide the player: a
       // listener already tuned keeps hearing their station.
-      error: () => this.error.set('Could not load the dial.'),
+      error: () => {
+        this.loaded.set(true);
+        this.error.set('Could not load the dial.');
+      },
     });
   }
 

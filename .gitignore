@@ -49,3 +49,8 @@ docs/demo*.mp3
 
 # Ad-hoc UX review screenshots, not part of the distributed work.
 /screenshots/
+
+# Wrangler's local state. Created by any wrangler command run in this directory
+# and nothing to do with the product: Cloudflare is one of several hosted LLM
+# options, reached over plain HTTP like any other.
+/.wrangler/

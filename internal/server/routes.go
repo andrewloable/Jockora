@@ -87,6 +87,9 @@ func (s *Server) Routes() []Route {
 		// lived in exactly one place. Admin only: it is the whole library's
 		// work, and importing one is a write to every track.
 		{Path: "/admin/enrichment", Prefix: true, AnyMethod: true, Role: auth.RoleAdmin, H: withPath(s.serveEnrichment)},
+		// Choosing the model. Admin only: it decides what the DJ says and what
+		// the account is charged.
+		{Path: "/admin/llm", Prefix: true, AnyMethod: true, Role: auth.RoleAdmin, H: withPath(s.serveLLM)},
 
 		// GET /login is the app's sign-in PAGE. POST /login above is the API
 		// that page posts to; without this the page would answer 405, because

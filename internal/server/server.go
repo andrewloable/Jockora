@@ -91,6 +91,7 @@ type Server struct {
 	voices   Voices
 	personas Personas
 	port     EnrichmentPort
+	llm      LLM
 	// importCap lowers MaxImportBytes, for tests only.
 	importCap  int64
 	playlists  Playlists

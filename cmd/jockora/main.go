@@ -243,7 +243,13 @@ func runSubcommand(ctx context.Context, name string, args []string, out io.Write
 		// no model and speaks no TTS, and demanding them there would refuse to
 		// start the one mode that needs nothing -- which is the mode GATE 2 and
 		// room test A run against.
-		RequireLLM: cfg.LibraryPath != "" && cfg.PersonaPath != "",
+		// NOT HARD ANY MORE. A model that has gone away is now fixable from the
+		// operator console -- provider, key and model are all on a page there --
+		// and refusing to start locks the operator out of the very screen that
+		// fixes it. That happened: a provider withdrew a free tier overnight and
+		// the station would not come up until somebody edited a compose file over
+		// ssh. It is still reported, loudly, as a failed check.
+		RequireLLM: false,
 		RequireTTS: cfg.LibraryPath != "" && cfg.PersonaPath != "",
 	}
 
@@ -329,8 +335,11 @@ func runSubcommand(ctx context.Context, name string, args []string, out io.Write
 
 		opts.Library = lib
 		opts.Personas = loadRoster(cfg.PersonaPath, log)
-		opts.Enricher = buildEnricher(ctx, cfg, lib, log)
-		newBreaks, pipeline, writer, sidecar := buildBreaks(ctx, cfg, lib, log)
+		// ONE client for the DJ and the enricher, swappable from the console.
+		llm := buildLLM(ctx, cfg, lib, log)
+		opts.LLM = llm
+		opts.Enricher = buildEnricher(llm, lib, log)
+		newBreaks, pipeline, writer, sidecar := buildBreaks(ctx, cfg, lib, log, llm)
 		// The FACTORY is what a station-based deployment uses; the pair is the
 		// spike path's, and the default a station inherits before it has one.
 		opts.NewBreaks = newBreaks

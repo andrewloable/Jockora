@@ -21,6 +21,10 @@ describe('Jocks', () => {
   let ctrl: HttpTestingController;
 
   beforeEach(async () => {
+    // DEFAULT: yes. Destructive actions ask now, and every test that was
+    // written before they did is still testing what happens after the answer.
+    // The tests about the QUESTION stub it themselves.
+    vi.stubGlobal('confirm', () => true);
     await TestBed.configureTestingModule({
       imports: [Jocks],
       providers: [provideHttpClient(), provideHttpClientTesting()],
@@ -45,6 +49,27 @@ describe('Jocks', () => {
     // later clear of the field would not reach the DOM.
     (fixture as unknown as { detectChanges(): void }).detectChanges();
   }
+
+  // ------------------------------------------------------ console states --
+  // Jockora-e9a.50: loading and empty rendered identically, so a slow first
+  // paint told a new operator their library was empty.
+
+  it('console states tells a fresh operator what to do when there are no jocks', () => {
+    const fixture = TestBed.createComponent(Jocks);
+    ctrl.expectOne('/admin/jocks').flush([]);
+    ctrl.expectOne('/admin/voices').flush({ voices: [] });
+    fixture.detectChanges();
+    const empty = fixture.nativeElement.querySelector('[data-empty]');
+    expect(empty).not.toBeNull();
+    expect(empty.textContent).toContain('Add a jock');
+  });
+
+  it('console states does not call a loading jocks table an empty one', () => {
+    const fixture = TestBed.createComponent(Jocks);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-empty]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-loading]')).not.toBeNull();
+  });
 
   it('lists the roster', () => {
     const text = mounted().nativeElement.querySelector('[data-jocks]').textContent;
@@ -147,10 +172,12 @@ describe('Jocks', () => {
   it('repeats the server’s refusal', () => {
     const fixture = mounted();
     fixture.nativeElement.querySelector('[data-save]').click();
-    ctrl.expectOne('/admin/jocks').flush(
-      { field: 'voice_id', error: 'no voice by that name: am_fenrir, af_heart' },
-      { status: 400, statusText: 'Bad Request' },
-    );
+    ctrl
+      .expectOne('/admin/jocks')
+      .flush(
+        { field: 'voice_id', error: 'no voice by that name: am_fenrir, af_heart' },
+        { status: 400, statusText: 'Bad Request' },
+      );
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('no voice');
   });
@@ -193,7 +220,9 @@ describe('Jocks', () => {
       paused = 0;
       vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:fake');
       vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
-      vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(function (this: HTMLAudioElement) {
+      vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(function (
+        this: HTMLAudioElement,
+      ) {
         played.push(this.src);
         return Promise.resolve();
       });
@@ -222,7 +251,9 @@ describe('Jocks', () => {
       fixture.nativeElement.querySelector('[data-preview]').click();
       fixture.detectChanges();
       // Says so while it renders: a cold sidecar takes a few seconds.
-      expect(fixture.nativeElement.querySelector('[data-preview]').textContent).toContain('Speaking');
+      expect(fixture.nativeElement.querySelector('[data-preview]').textContent).toContain(
+        'Speaking',
+      );
 
       const req = ctrl.expectOne('/admin/voices/preview');
       expect(req.request.method).toBe('POST');
@@ -231,7 +262,9 @@ describe('Jocks', () => {
       fixture.detectChanges();
 
       expect(played).toEqual(['blob:fake']);
-      expect(fixture.nativeElement.querySelector('[data-preview]').textContent).toContain('Hear it');
+      expect(fixture.nativeElement.querySelector('[data-preview]').textContent).toContain(
+        'Hear it',
+      );
     });
 
     it('stops the previous clip rather than talking over it', () => {
@@ -268,7 +301,9 @@ describe('Jocks', () => {
       expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain(
         'sidecar may be down',
       );
-      expect(fixture.nativeElement.querySelector('[data-preview]').textContent).toContain('Hear it');
+      expect(fixture.nativeElement.querySelector('[data-preview]').textContent).toContain(
+        'Hear it',
+      );
     });
 
     it('ignores a click with no voice, and one while already speaking', () => {
@@ -293,7 +328,9 @@ describe('Jocks', () => {
 
       // Only the button that was pressed says so.
       expect(row.textContent).toContain('Speaking');
-      expect(fixture.nativeElement.querySelector('[data-preview]').textContent).toContain('Hear it');
+      expect(fixture.nativeElement.querySelector('[data-preview]').textContent).toContain(
+        'Hear it',
+      );
 
       const req = ctrl.expectOne('/admin/voices/preview');
       expect(req.request.body).toEqual({ voice: 'am_fenrir' });
@@ -313,5 +350,55 @@ describe('Jocks', () => {
     expect(head).toContain('Voice');
     expect(head).toContain('Good for');
     expect(head).toContain('Actions');
+  });
+
+  // The Jocks table drew Hear it, Edit and Delete to 469px on a 390px phone,
+  // with no ancestor able to scroll. Below 48rem each row is a card.
+  it('narrow jocks labels every cell with the column it replaces', () => {
+    const fixture = mounted();
+    const headers = [...fixture.nativeElement.querySelectorAll('[data-jocks] thead th')].map((h) =>
+      (h as HTMLElement).textContent?.trim(),
+    );
+    for (const row of fixture.nativeElement.querySelectorAll('[data-jocks] tbody tr')) {
+      const cells = [...row.querySelectorAll('td')];
+      expect(cells.length).toBe(headers.length);
+      cells.forEach((cell, i) => {
+        expect(cell.getAttribute('data-label')).toBe(headers[i]);
+      });
+    }
+  });
+
+  // ONE CLICK, NO PROMPT, NO UNDO, from a button identical to Edit. A persona
+  // card is hand-written content, and deleting one unassigns it from every
+  // station that used it.
+  it('destructive jocks asks before deleting', () => {
+    const fixture = mounted();
+    const confirmed: string[] = [];
+    vi.stubGlobal('confirm', (m: string) => {
+      confirmed.push(m);
+      return false;
+    });
+    fixture.nativeElement.querySelector('[data-remove]').click();
+    ctrl.expectNone('/admin/jocks/dutch');
+    expect(confirmed[0]).toContain('Dutch');
+    // It says what else goes: the stations that used the jock lose it.
+    expect(confirmed[0].toLowerCase()).toContain('station');
+
+    vi.stubGlobal('confirm', () => true);
+    fixture.nativeElement.querySelector('[data-remove]').click();
+    ctrl.expectOne('/admin/jocks/dutch').flush({ unassigned: [] });
+    vi.unstubAllGlobals();
+  });
+
+  it('destructive jocks marks the delete button as destructive', () => {
+    // Every action in the console had exactly one background. Nothing told a
+    // preview from an edit from an irreversible delete.
+    const fixture = mounted();
+    expect(
+      fixture.nativeElement.querySelector('[data-remove]').getAttribute('data-danger'),
+    ).not.toBeNull();
+    expect(
+      fixture.nativeElement.querySelector('[data-edit]').getAttribute('data-danger'),
+    ).toBeNull();
   });
 });

@@ -93,12 +93,7 @@ describe('AdminApi', () => {
       'GET',
       '/admin/stations/3/tracks?limit=50&offset=100',
     ],
-    [
-      'pin',
-      () => api.flagTrack(3, 7, 'pin').subscribe(),
-      'POST',
-      '/admin/stations/3/tracks/7/pin',
-    ],
+    ['pin', () => api.flagTrack(3, 7, 'pin').subscribe(), 'POST', '/admin/stations/3/tracks/7/pin'],
     ['regenerate', () => api.regenerate(3).subscribe(), 'POST', '/admin/stations/3/regenerate'],
     ['jocks', () => api.jocks().subscribe(), 'GET', '/admin/jocks'],
     ['remove jock', () => api.removeJock('dutch').subscribe(), 'DELETE', '/admin/jocks/dutch'],

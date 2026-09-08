@@ -10,7 +10,11 @@
 #
 # Alpine is fine here. Nothing from this stage runs in the final image -- only
 # the JavaScript it emits, which has no libc of its own.
-FROM node:lts-alpine AS web
+# NATIVE TO THE BUILDER, like the Go stage below and for the same reason: what
+# this stage emits is JavaScript, which has no architecture. Emulating node to
+# produce it is slow and, measured here, flaky -- npm ci failed under QEMU with
+# ng not found on a build that had just succeeded.
+FROM --platform=$BUILDPLATFORM node:lts-alpine AS web
 WORKDIR /src
 
 # The lockfile first, so a source change does not re-download node_modules.
@@ -21,7 +25,19 @@ COPY web/ ./web/
 RUN cd web/app && npx ng build --configuration production
 
 # --- build ------------------------------------------------------------------
-FROM golang:1.25-alpine AS build
+#
+# NATIVE TO THE BUILDER, CROSS-COMPILED TO THE TARGET. --platform=$BUILDPLATFORM
+# pins this stage to the machine doing the building, and GOARCH below aims the
+# output at the machine that will run it.
+#
+# Not a preference: building linux/amd64 on an arm64 workstation without this
+# runs the Go COMPILER under QEMU, which segfaulted twice in a row on this
+# repository -- "internal/goexperiment: compile: signal: segmentation fault".
+# Go cross-compiles natively and CGO_ENABLED=0 is already required here, so
+# emulating the toolchain buys nothing and costs the build.
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 
 # Dependencies first, so a source change does not re-download the module cache.
@@ -37,7 +53,8 @@ COPY --from=web /src/web/dist/ ./web/dist/
 # CGO_ENABLED=0 is not incidental: the SQLite driver is modernc.org/sqlite
 # precisely so this binary is static and cross-compilable, and the CI
 # cross-compile gate exists to keep it that way.
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /jockora ./cmd/jockora
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w" -o /jockora ./cmd/jockora
 
 # --- runtime ----------------------------------------------------------------
 #

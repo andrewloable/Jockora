@@ -135,6 +135,45 @@
   color-scheme: light;
 }
 
+/* ------------------------------------------------- the five decisions -- */
+/*
+ * The vocabulary above was good and was barely applied: the large spacing
+ * steps were used a handful of times in the whole sheet, --ok and --warn were
+ * used ZERO times, and every action button in the console had ONE background,
+ * so a preview, an edit and an irreversible delete were byte-identical.
+ * Jockora-e9a.49 settled the five open questions IN NUMBERS. Everything below
+ * implements them; the repair tasks consume them.
+ *
+ * 1. SEPARATION.  Between groups --s6 (32px). Within a group --s3 (12px).
+ *    A ratio of 2.67 to 1, which is what stops six tabs reading as one wall.
+ *    A heading takes its space ABOVE, never split evenly: a heading that
+ *    floats between two groups belongs to neither.
+ *
+ * 2. GROUPING.  A group is a PANEL -- --line border, --r-panel, --surface --
+ *    not bare space. The login card was already the best-looking screen in the
+ *    product and the console shared none of its structure; the fieldset rule
+ *    had reached the same answer on its own. Padding is also what makes the
+ *    ratio in decision 1 exact, because a padded box cannot collapse its
+ *    margins into its children's.
+ *
+ * 3. BUTTON TIERS.  Three, and no more:
+ *      primary      button[type='submit']  --ember on --on-ember
+ *      secondary    button                 --raised with a --line edge
+ *      destructive  button[data-danger]    --bad, outlined, filling on hover
+ *    Navigation is not an action tier. app-admin nav is transparent and sits
+ *    outside the three deliberately.
+ *
+ * 4. STATUS COLOUR.  Both status tokens now carry a status and only a status:
+ *      --ok    the completed portion of the dossier and loudness bars
+ *      --warn  the Stations warning column
+ *      --bad   the destructive tier, and an error message's edge
+ *
+ * 5. MEASURE.  The console column is 68rem (1088px) and CENTRED; it does not
+ *    grow with the screen. Prose is held to 62ch wherever it appears, not only
+ *    in a <p> -- the messages the console writes back are the prose an operator
+ *    actually reads. Jockora-e9a.47 reads this as: centre the dial too.
+ */
+
 /* ------------------------------------------------------------------ base -- */
 
 *,
@@ -194,8 +233,10 @@ h1 {
 
 h2 {
   font-size: var(--t-lg);
-  /* Section headings belong to what follows, not to what came before. */
+  /* A heading belongs to what follows, not to what came before, so decision 1
+     puts its space ABOVE: --s7 up, --s2 down. */
   margin-top: var(--s7);
+  margin-bottom: var(--s2);
   padding-bottom: var(--s2);
   border-bottom: var(--line-w) solid var(--line);
   color: var(--ink);
@@ -208,6 +249,45 @@ h2:first-child {
 p {
   margin: 0 0 var(--s3);
   max-width: 62ch;
+}
+
+/* DECISION 2: A GROUP IS A PANEL.
+ *
+ * Measured on the Overview at 1280px before this rule existed: consecutive
+ * sections were 12px apart and a heading sat 12px from its own body text, so
+ * the gap BETWEEN groups equalled the gap WITHIN one and four unrelated
+ * readouts ran together as a single column of sentences. Every section was a
+ * bare SECTION with margin 0, no border and no background.
+ *
+ * The padding is not only air: it is what makes decision 1's ratio exact,
+ * because a padded box cannot collapse its margin into its children's. */
+section {
+  margin-top: var(--s6);
+  padding: var(--s5);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--r-panel);
+  background: var(--surface);
+}
+
+section:first-of-type {
+  margin-top: var(--s5);
+}
+
+section > h3 {
+  margin-top: var(--s5);
+  margin-bottom: var(--s2);
+  font-size: var(--t-md);
+  color: var(--ink-dim);
+}
+
+/* Its own top edge is the panel's padding, which is the same --s5. */
+section > h3:first-child {
+  margin-top: 0;
+}
+
+/* The last thing in a panel does not push the panel open. */
+section > :last-child {
+  margin-bottom: 0;
 }
 
 small {
@@ -235,7 +315,10 @@ select {
   color: inherit;
 }
 
-button {
+button,
+/* The file picker's stand-in. It is not a fourth tier: it is this one, worn by
+   a span, because the control it fronts is an input the sheet has to hide. */
+[data-import-button] {
   /* 44px of touch target, always. Padding gets it there without the label
      needing to be big. */
   min-height: 44px;
@@ -253,7 +336,8 @@ button {
     transform var(--dur) var(--ease);
 }
 
-button:hover:not(:disabled) {
+button:hover:not(:disabled),
+[data-import-label]:hover [data-import-button] {
   border-color: color-mix(in oklab, var(--ember) 55%, var(--line));
   background: color-mix(in oklab, var(--ember) 8%, var(--raised));
 }
@@ -281,7 +365,15 @@ button[type='submit']:hover:not(:disabled) {
   border-color: color-mix(in oklab, var(--ember) 88%, var(--ink));
 }
 
-input,
+/* A CHECKBOX IS NOT AN ENTRY BOX. Sizing every input as one gave each option
+ * in the vocabulary a 44px-tall box whose WIDTH depended on the length of its
+ * own label -- rock 128px, alternative 88px, metal 120px -- because the box
+ * shrank by however much the text beside it needed. That is what made the
+ * picker zig-zag.
+ *
+ * The fieldset rule below learned this and this one did not, which is the same
+ * fix applied to one of two places. */
+input:not([type='checkbox']):not([type='radio']),
 select {
   min-height: 44px;
   padding: var(--s2) var(--s3);
@@ -293,20 +385,56 @@ select {
     box-shadow var(--dur) var(--ease);
 }
 
+/* Intrinsic size, and it never shrinks to make room for its own label. */
+input[type='checkbox'],
+input[type='radio'] {
+  flex: none;
+  width: auto;
+  min-height: 0;
+  margin: 0;
+}
+
 input::placeholder {
   color: var(--ink-faint);
 }
 
-input:hover,
+/* Scoped away from checkboxes for the same reason as the sizing: a box-shadow
+ * ring and a border colour are an ENTRY BOX's focus, and outline:none on a
+ * checkbox would take its native one away. The :focus-visible rule below is
+ * what keyboard users get either way. */
+input:not([type='checkbox']):not([type='radio']):hover,
 select:hover {
   border-color: color-mix(in oklab, var(--ember) 40%, var(--line));
 }
 
-input:focus,
+input:not([type='checkbox']):not([type='radio']):focus,
 select:focus {
   outline: none;
   border-color: var(--ember);
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--ember) 25%, transparent);
+}
+
+/* A DESTRUCTIVE ACTION LOOKS DESTRUCTIVE.
+ *
+ * Every button in the console had one background: nothing told a preview from
+ * an edit from an irreversible delete, and the three sat flush against each
+ * other. --bad was defined and used on nothing.
+ *
+ * Outlined rather than filled: a wall of red buttons is its own kind of noise,
+ * and the colour is meant to be the exception a hand pauses at. */
+button[data-danger] {
+  color: var(--bad);
+  /* A tint rather than a fill. At rest it is the third tier of decision 3 and
+     nothing more; the wash is enough to break the identical row of buttons the
+     operator was scanning, and the hover below commits to the colour. */
+  background: color-mix(in oklab, var(--bad) 7%, var(--raised));
+  border-color: color-mix(in oklab, var(--bad) 45%, var(--line));
+}
+
+button[data-danger]:hover:not(:disabled) {
+  color: var(--surface);
+  background: var(--bad);
+  border-color: var(--bad);
 }
 
 /* Keyboard focus is always visible. Never outline:none without this. */
@@ -335,7 +463,9 @@ label select {
 }
 
 fieldset {
-  margin: var(--s5) 0;
+  /* A form is a group, so decision 1's --s6 separates it from what came
+     before. Nested fieldsets are contents, not groups -- see below. */
+  margin: var(--s6) 0;
   padding: var(--s4);
   border: var(--line-w) solid var(--line);
   border-radius: var(--r-panel);
@@ -359,6 +489,12 @@ legend {
  * every input in a fieldset, which sized the vocabulary's checkboxes like entry
  * boxes -- 44px tall and up to 111px wide each -- and turned a 42-option picker
  * into three visible rows. */
+/* A vocabulary picker inside the station editor is part of ONE group, not a
+   group of its own, so it takes the within-group step. */
+fieldset fieldset {
+  margin: var(--s3) 0;
+}
+
 fieldset input:not([type='checkbox']):not([type='radio']),
 fieldset select {
   flex: 1 1 12rem;
@@ -396,40 +532,73 @@ table {
  * The label comes from the cell's own data-label, so the card names its fields
  * without the heading row that has just been hidden. */
 @media (max-width: 47.99rem) {
-  [data-playlist] thead {
+  [data-playlist] thead,
+  [data-stations] thead,
+  [data-jocks] thead {
     display: none;
   }
 
   [data-playlist],
   [data-playlist] tbody,
   [data-playlist] tr,
-  [data-playlist] td {
+  [data-playlist] td,
+  [data-stations],
+  [data-stations] tbody,
+  [data-stations] tr,
+  [data-stations] td,
+  [data-jocks],
+  [data-jocks] tbody,
+  [data-jocks] tr,
+  [data-jocks] td,
+  [data-overview],
+  [data-overview] tbody,
+  [data-overview] tr,
+  [data-overview] th,
+  [data-overview] td {
     display: block;
     width: auto;
   }
 
-  [data-playlist] tr {
+  [data-playlist] tr,
+  [data-stations] tr,
+  [data-jocks] tr,
+  [data-overview] tr {
     margin-bottom: var(--s3);
     padding: var(--s2) var(--s3);
     border: var(--line-w) solid var(--line);
     border-radius: var(--r-panel);
   }
 
-  [data-playlist] td {
+  [data-playlist] td,
+  [data-stations] td,
+  [data-jocks] td,
+  [data-overview] td,
+  [data-overview] th {
     padding: 0.15rem 0;
     border-bottom: 0;
   }
 
-  [data-playlist] td[data-label]::before {
+  [data-playlist] td[data-label]::before,
+  [data-stations] td[data-label]::before,
+  [data-jocks] td[data-label]::before {
     content: attr(data-label) ': ';
     color: var(--ink-faint);
     font-size: var(--t-sm);
   }
 
   /* A card of blank labels reads as missing data. An empty cell is simply not
-   * a fact about the track. */
-  [data-playlist] td:empty {
+   * a fact about the row. */
+  [data-playlist] td:empty,
+  [data-stations] td:empty,
+  [data-jocks] td:empty {
     display: none;
+  }
+
+  /* THE LONG ONES WRAP. "adult contemporary" was clipped mid-word to "adult
+   * contemporar" in a column that had nowhere to go. */
+  [data-stations] td,
+  [data-jocks] td {
+    overflow-wrap: anywhere;
   }
 }
 
@@ -719,12 +888,45 @@ app-player {
   color: var(--ink-faint);
 }
 
+/* THREE STATES, NOT TWO. A table with no rows can be in flight, genuinely
+   empty, or the wreckage of a request that did not come back, and all three
+   drew the same nothing. These are the first two; the third is the message the
+   screen already writes back, in --bad.
+
+   Dashed, because the border is saying "this is where content goes" rather
+   than drawing a panel around an absence. Both take decision 1's spacing. */
 [data-empty] {
+  display: block;
   padding: var(--s6);
   border: var(--line-w) dashed var(--line);
   border-radius: var(--r-panel);
   color: var(--ink-dim);
   text-align: center;
+}
+
+/* The empty state SAYS WHAT TO DO NEXT, and the instruction is the half people
+   skip. Its first sentence names the state; the rest is the way out. */
+[data-empty] strong {
+  display: block;
+  margin-bottom: var(--s1);
+  color: var(--ink);
+}
+
+/* Transient, so it does not shout. A loading line as loud as the content it
+   stands in for is a flash of noise on every single poll. */
+[data-loading] {
+  display: block;
+  padding: var(--s6);
+  color: var(--ink-faint);
+  text-align: center;
+}
+
+/* Inside a table the cell already has the row's borders, so the dashed box
+   would be a box inside a box. */
+td [data-empty],
+td [data-loading] {
+  border: 0;
+  padding: var(--s5) var(--s3);
 }
 
 /* ------------------------------------------------------------ the console -- */
@@ -781,9 +983,12 @@ app-admin nav button[aria-current='page']:hover:not(:disabled) {
 }
 
 /* What came of the last thing you did. Always in the same place. */
+/* DECISION 5: this is prose, and it was the only prose in the console with no
+   measure -- a failure message ran the full 1088px column as one line. */
 [data-said]:not(:empty),
 [data-error]:not(:empty) {
   display: block;
+  max-width: 62ch;
   margin-top: var(--s4);
   padding: var(--s3) var(--s4);
   border-radius: var(--r-control);
@@ -828,14 +1033,17 @@ app-admin nav button[aria-current='page']:hover:not(:disabled) {
   background: var(--ember-soft);
 }
 
+/* DECISION 4: the filled part is work that is DONE, which is the one thing
+   --ok was defined for. The trough keeps the ember, so the bar still belongs
+   to this room. */
 [data-enrich-progress] progress::-webkit-progress-value {
-  background: var(--ember);
+  background: var(--ok);
   border-radius: var(--r-pill);
   transition: width var(--dur-slow) var(--ease);
 }
 
 [data-enrich-progress] progress::-moz-progress-bar {
-  background: var(--ember);
+  background: var(--ok);
   border-radius: var(--r-pill);
 }
 
@@ -956,4 +1164,103 @@ app-admin nav button[aria-current='page']:hover:not(:disabled) {
   margin: 0;
   color: var(--ink-faint);
   font-size: 0.85rem;
+}
+
+/* DECISION 4: the Stations warning column. It is the one field in the console
+   whose whole job is to say something is not right, and it rendered as body
+   text indistinguishable from the genre beside it. */
+[data-warning] {
+  color: var(--warn);
+  font-weight: 550;
+}
+
+/* ------------------------------------------------------- enrichment panel -- */
+
+/* THE ONLY BLUE PIXEL IN THE CONSOLE. This link computed to rgb(0, 0, 238)
+   with the browser's underline, in an app whose palette is warm rust and
+   cream, and it was the one action on the page that was not a styled control. */
+[data-export] {
+  color: var(--ember);
+  font-weight: 550;
+  text-decoration-color: color-mix(in oklab, var(--ember) 40%, transparent);
+  text-underline-offset: 3px;
+}
+
+[data-export]:hover {
+  text-decoration-color: var(--ember);
+}
+
+[data-export-note],
+[data-import-note] {
+  margin-top: var(--s1);
+}
+
+/* THE LABEL IS THE CONTROL. A raw input type=file draws the browser's own
+   "Choose File / No file chosen" widget, which is the same defect as the
+   vocabulary checkboxes: an unstyled native control in a styled console.
+   The input is hidden, NOT removed -- a label click and a keypress both still
+   reach it, which is the whole reason to do it this way. */
+[data-import-label] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  align-items: center;
+}
+
+[data-import-label] input[type='file'] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+/* Everything above is the secondary button tier, shared with the button rule.
+   Only the box model differs: a span is not a button and does not centre its
+   own label. */
+[data-import-button] {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Hiding the input took its focus ring with it. This puts the ring on the
+   thing that is actually on screen, so a keyboard user has not lost the
+   control. */
+[data-import-label]:focus-within [data-import-button] {
+  outline: 2px solid var(--ember);
+  outline-offset: 2px;
+}
+
+[data-import-name] {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--ink-faint);
+  overflow-wrap: anywhere;
+}
+
+/* THE MODEL IS REFUSING.
+ *
+ * On 2026-09-08 a Cloudflare token stopped being accepted at 02:58, the station
+ * dropped twelve consecutive breaks, enrichment died at 3,923 of 7,595, and the
+ * only place any of it appeared was the container log. These two lines are the
+ * fix for that, and they take --bad because decision 4 reserved it for exactly
+ * this: something is wrong and it is not going to fix itself.
+ *
+ * Filled rather than a border alone. An operator opens the Overview to read a
+ * number, not to audit the page, so this has to interrupt. */
+[data-model-health],
+[data-llm-health] {
+  display: block;
+  max-width: 62ch;
+  margin: 0 0 var(--s5);
+  padding: var(--s3) var(--s4);
+  border-left: 3px solid var(--bad);
+  border-radius: var(--r-control);
+  background: color-mix(in oklab, var(--bad) 12%, transparent);
+  color: var(--ink);
+  font-size: var(--t-sm);
+  font-weight: 550;
 }

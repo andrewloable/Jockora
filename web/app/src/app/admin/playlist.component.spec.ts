@@ -79,6 +79,30 @@ describe('Playlist', () => {
     return fixture;
   }
 
+  // ------------------------------------------------------ console states --
+  // Jockora-e9a.50: loading and empty rendered identically, so a slow first
+  // paint told a new operator their library was empty.
+
+  it('console states tells the operator why a playlist is empty', () => {
+    const fixture = TestBed.createComponent(Host);
+    fixture.detectChanges();
+    ctrl
+      .expectOne(`/admin/stations/3/tracks?limit=${PAGE}&offset=0`)
+      .flush({ tracks: [], total: 0 });
+    fixture.detectChanges();
+    const empty = fixture.nativeElement.querySelector('[data-empty]');
+    expect(empty).not.toBeNull();
+    // A playlist is DERIVED, so the fix is upstream: the tags, or the scan.
+    expect(empty.textContent).toContain('genre');
+  });
+
+  it('console states does not call a loading playlist an empty station', () => {
+    const fixture = TestBed.createComponent(Host);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-empty]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-loading]')).not.toBeNull();
+  });
+
   it('lists a page with the total', () => {
     // "Showing 50 of 1,200" rather than guessing when to stop.
     const fixture = mounted(1200);
@@ -87,14 +111,12 @@ describe('Playlist', () => {
     expect(fixture.nativeElement.querySelector('[data-playlist]').textContent).toContain('One');
   });
 
-  it('shows a track\'s genres and moods for reference', () => {
+  it("shows a track's genres and moods for reference", () => {
     const fixture = mounted();
     expect(fixture.nativeElement.querySelector('[data-playlist]').textContent).toContain(
       'rock, grunge',
     );
-    expect(fixture.nativeElement.querySelector('[data-playlist]').textContent).toContain(
-      'angsty',
-    );
+    expect(fixture.nativeElement.querySelector('[data-playlist]').textContent).toContain('angsty');
   });
 
   it('shows an excluded track rather than hiding it', () => {
@@ -162,9 +184,7 @@ describe('Playlist', () => {
     // What CHANGED, rather than a redrawn list to compare by eye.
     const fixture = mounted();
     fixture.nativeElement.querySelector('[data-regenerate]').click();
-    ctrl
-      .expectOne('/admin/stations/3/regenerate')
-      .flush({ added: 3, removed: 1, kept: 400 });
+    ctrl.expectOne('/admin/stations/3/regenerate').flush({ added: 3, removed: 1, kept: 400 });
     ctrl.expectOne(`/admin/stations/3/tracks?limit=${PAGE}&offset=0`).flush({ tracks, total: 4 });
     fixture.detectChanges();
     const said = fixture.nativeElement.querySelector('[data-said]').textContent;
@@ -281,7 +301,7 @@ describe('Playlist tag editing', () => {
     box.dispatchEvent(new Event('change'));
   }
 
-  it('opens on the track\'s current tags', () => {
+  it("opens on the track's current tags", () => {
     const fixture = open();
     const ticked = [...fixture.nativeElement.querySelectorAll('[data-edit-genres] input')].filter(
       (i: HTMLInputElement) => i.checked,

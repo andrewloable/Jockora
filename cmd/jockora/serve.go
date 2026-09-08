@@ -85,7 +85,8 @@ func buildLibrary(ctx context.Context, cfg *config.Config, log *slog.Logger) (*a
 // for returning nil is logged at INFO with what to do about it, because the
 // failure a listener notices is silence, and the failure an operator needs to
 // see is "the DJ never started".
-func buildBreaks(ctx context.Context, cfg *config.Config, lib *app.Library, log *slog.Logger) (
+func buildBreaks(ctx context.Context, cfg *config.Config, lib *app.Library, log *slog.Logger,
+	llm *enrich.Switchable) (
 	func(int64) (*station.Pipeline, *station.BreakWriter), *station.Pipeline, *station.BreakWriter, *tts.Sidecar) {
 	if cfg.PersonaPath == "" {
 		log.Info("no DJ: no persona configured", "fix", "start with -persona personas/ to pick a jock by genre")
@@ -94,13 +95,6 @@ func buildBreaks(ctx context.Context, cfg *config.Config, lib *app.Library, log 
 	persona, err := choosePersona(ctx, cfg.PersonaPath, lib, log)
 	if err != nil {
 		log.Error("no DJ: the persona could not be loaded", "path", cfg.PersonaPath, "err", err)
-		return nil, nil, nil, nil
-	}
-
-	llm, _, err := newCompleter(ctx, cfg, log)
-	if err != nil {
-		log.Info("no DJ: no language model", "err", err,
-			"fix", "point -llm-url at a running server, add -llm-api ollama for Ollama, or set -llm-model to have Jockora run llama-server itself")
 		return nil, nil, nil, nil
 	}
 
@@ -242,14 +236,40 @@ func startLLM(ctx context.Context, cfg *config.Config, log *slog.Logger) (*enric
 	return enrich.StartLLMServer(ctx, c)
 }
 
-// buildEnricher returns the background dossier worker, or nil.
-func buildEnricher(ctx context.Context, cfg *config.Config, lib *app.Library, log *slog.Logger) *enrich.Queue {
-	llm, _, err := newCompleter(ctx, cfg, log)
-	if err != nil {
-		log.Info("no enrichment: no language model", "err", err,
-			"fix", "set -llm-url (with -llm-api ollama if that is what you run) or -llm-model")
-		return nil
+// buildLLM is the ONE switchable client the DJ and the enricher share.
+//
+// Shared so a change made in the console reaches both at once, and switchable
+// so it reaches them without a restart. Seeded from the STORED choice when the
+// operator has made one, because that is what they last said; the flags and the
+// environment are the default underneath it, exactly as the cadence works.
+//
+// It may start EMPTY. A station whose model has gone away must still come up:
+// the console is where the model is chosen, and refusing to start locks the
+// operator out of the screen that fixes it.
+func buildLLM(ctx context.Context, cfg *config.Config, lib *app.Library, log *slog.Logger) *enrich.Switchable {
+	if lib != nil && lib.Store != nil {
+		if s, ok, err := lib.Store.LLMSettings(ctx); err == nil && ok {
+			c := enrich.LLMConfig{Provider: s.Provider, URL: s.URL,
+				Account: s.Account, Model: s.Model, Key: s.Key}
+			if client, err := c.Client(nil); err == nil {
+				log.Info("language model from the console", "provider", s.Provider, "model", s.Model)
+				return enrich.NewSwitchable(client)
+			}
+			log.Warn("the saved language model cannot be used; choose another in the console",
+				"provider", s.Provider, "model", s.Model)
+		}
 	}
+	client, _, err := newCompleter(ctx, cfg, log)
+	if err != nil {
+		log.Info("no language model yet; choose one in the operator console",
+			"err", err, "where", "/admin, Language model")
+		return enrich.NewSwitchable(nil)
+	}
+	return enrich.NewSwitchable(client)
+}
+
+// buildEnricher returns the background dossier worker, or nil.
+func buildEnricher(llm *enrich.Switchable, lib *app.Library, log *slog.Logger) *enrich.Queue {
 	return &enrich.Queue{
 		Store:   lib.Store,
 		LLM:     llm,

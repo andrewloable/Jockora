@@ -27,9 +27,7 @@ describe('Login', () => {
   // every test that sets the properties directly.
   function type(fixture: ReturnType<typeof TestBed.createComponent>, values: string[]): void {
     fixture.detectChanges();
-    const inputs: HTMLInputElement[] = Array.from(
-      fixture.nativeElement.querySelectorAll('input'),
-    );
+    const inputs: HTMLInputElement[] = Array.from(fixture.nativeElement.querySelectorAll('input'));
     inputs.forEach((input, i) => {
       input.value = values[i];
       input.dispatchEvent(new Event('input'));

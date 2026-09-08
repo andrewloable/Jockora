@@ -6,22 +6,31 @@ import { Stations } from './stations.component';
 import { Playlist } from './playlist.component';
 import { Jocks } from './jocks.component';
 import { Users } from './users.component';
+import { LLM } from './llm.component';
 import { ThemeToggle } from '../theme';
 
-const sections = ['overview', 'sources', 'stations', 'playlist', 'jocks', 'accounts'] as const;
+const sections = [
+  'overview',
+  'sources',
+  'stations',
+  'playlist',
+  'jocks',
+  'accounts',
+  'model',
+] as const;
 type Section = (typeof sections)[number];
 
 /**
  * The operator console.
  *
- * One section is mounted at a time rather than all six hidden behind CSS: each
- * loads on mount, and six sections polling the server at once for pages nobody
- * is looking at is a load the operator did not ask for.
+ * One section is mounted at a time rather than all of them hidden behind CSS:
+ * each loads on mount, and every section polling the server at once for pages
+ * nobody is looking at is a load the operator did not ask for.
  */
 @Component({
   selector: 'app-admin',
   standalone: true,
-  imports: [Overview, Sources, Stations, Playlist, Jocks, Users, ThemeToggle],
+  imports: [Overview, Sources, Stations, Playlist, Jocks, Users, LLM, ThemeToggle],
   template: `
     <header data-masthead>
       <!-- "operator console", not a name. It read as one -- reported as "i
@@ -30,7 +39,9 @@ type Section = (typeof sections)[number];
            candidate. Now it says. -->
       <h1>Jockora — operator console</h1>
       @if (me(); as who) {
-        <p data-whoami>Signed in as <strong>{{ who.name }}</strong> ({{ who.role }})</p>
+        <p data-whoami>
+          Signed in as <strong>{{ who.name }}</strong> ({{ who.role }})
+        </p>
       }
       <app-theme-toggle />
     </header>
@@ -75,6 +86,9 @@ type Section = (typeof sections)[number];
       }
       @case ('jocks') {
         <app-jocks />
+      }
+      @case ('model') {
+        <app-llm />
       }
       @default {
         <!-- 'accounts'. @default rather than @case so the switch is exhaustive:

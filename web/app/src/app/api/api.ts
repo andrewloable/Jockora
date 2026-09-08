@@ -65,6 +65,39 @@ export interface User {
   disabled: boolean;
 }
 
+/** One way to reach a language model, as the console is told about it. */
+export interface LLMProvider {
+  id: string;
+  name: string;
+  help: string;
+  needs_url: boolean;
+  needs_key: boolean;
+  needs_account: boolean;
+  needs_model: boolean;
+  key_help?: string;
+  account_help?: string;
+  url_help?: string;
+  suggested?: string;
+}
+
+/** What is chosen now. The key NEVER comes back; has_key is all there is. */
+export interface LLMCurrent {
+  provider?: string;
+  url?: string;
+  account?: string;
+  model?: string;
+  has_key: boolean;
+}
+
+/** What the console sends. An empty key means "keep the one you have". */
+export interface LLMForm {
+  provider: string;
+  url?: string;
+  account?: string;
+  model?: string;
+  key?: string;
+}
+
 /** What an import did, counter by counter. */
 export interface ImportReport {
   applied: number;
@@ -219,6 +252,28 @@ export class AdminApi {
    */
   importEnrichment(file: File): Observable<ImportReport> {
     return this.http.post<ImportReport>('/admin/enrichment/import', file);
+  }
+
+  /** Every way to reach a model, what each needs, and what is chosen now. */
+  llm(): Observable<{ providers: LLMProvider[]; current: LLMCurrent; health: string }> {
+    return this.http.get<{ providers: LLMProvider[]; current: LLMCurrent; health: string }>(
+      '/admin/llm',
+    );
+  }
+
+  /** What the chosen platform hosts, so a model is picked rather than typed. */
+  llmModels(cfg: LLMForm): Observable<{ models: string[] }> {
+    return this.http.post<{ models: string[] }>('/admin/llm/models', cfg);
+  }
+
+  /** Try a model without committing to it. */
+  llmTest(cfg: LLMForm): Observable<unknown> {
+    return this.http.post('/admin/llm/test', cfg);
+  }
+
+  /** Save it. The server tests it again and refuses anything that fails. */
+  llmSave(cfg: LLMForm): Observable<{ current: LLMCurrent; health: string }> {
+    return this.http.put<{ current: LLMCurrent; health: string }>('/admin/llm', cfg);
   }
 
   rescan(): Observable<unknown> {

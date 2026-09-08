@@ -67,6 +67,8 @@ var matrix = []expectation{
 	{path: "/admin/tracks", sample: "/admin/tracks/1/tags", role: auth.RoleAdmin},
 	// The library's accumulated enrichment, out and in.
 	{path: "/admin/enrichment", sample: "/admin/enrichment/export", role: auth.RoleAdmin},
+	// Which language model the station speaks through.
+	{path: "/admin/llm", sample: "/admin/llm", role: auth.RoleAdmin},
 }
 
 func (e expectation) requestPath() string {

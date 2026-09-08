@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
@@ -13,6 +13,10 @@ describe('Sources', () => {
   let ctrl: HttpTestingController;
 
   beforeEach(async () => {
+    // DEFAULT: yes. Destructive actions ask now, and every test that was
+    // written before they did is still testing what happens after the answer.
+    // The tests about the QUESTION stub it themselves.
+    vi.stubGlobal('confirm', () => true);
     await TestBed.configureTestingModule({
       imports: [Sources],
       providers: [provideHttpClient(), provideHttpClientTesting()],
@@ -32,6 +36,49 @@ describe('Sources', () => {
     el.value = value;
     el.dispatchEvent(new Event(el.tagName === 'SELECT' ? 'change' : 'input'));
   }
+
+  // ------------------------------------------------------ console states --
+  //
+  // Jockora-e9a.50. The install this console was reviewed on has 7,595 tracks,
+  // 9 jocks and a station, so every screen was only ever seen full. A fresh
+  // install reaches NONE of that, which is why these are specified rather than
+  // discovered.
+  //
+  // The one that matters is the difference between LOADING and EMPTY: both
+  // rendered as a table with no rows, so a slow first paint told a new
+  // operator their library was empty and left them nothing to do about it.
+
+  it('console states tells a fresh operator what to do when there are no sources', () => {
+    const fixture = TestBed.createComponent(Sources);
+    ctrl.expectOne('/admin/sources').flush([]);
+    fixture.detectChanges();
+    const empty = fixture.nativeElement.querySelector('[data-empty]');
+    expect(empty).not.toBeNull();
+    // It names the control that fixes it, not just the absence.
+    expect(empty.textContent).toContain('Add a source');
+  });
+
+  it('console states does not call a loading table an empty library', () => {
+    const fixture = TestBed.createComponent(Sources);
+    fixture.detectChanges();
+    // The answer has not arrived. Nothing here knows the library is empty.
+    expect(fixture.nativeElement.querySelector('[data-empty]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-loading]')).not.toBeNull();
+    ctrl.expectOne('/admin/sources').flush([]);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-loading]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-empty]')).not.toBeNull();
+  });
+
+  it('console states says so when a request fails', () => {
+    const fixture = TestBed.createComponent(Sources);
+    ctrl.expectOne('/admin/sources').flush(null, { status: 500, statusText: 'Server Error' });
+    fixture.detectChanges();
+    // A failed read is not an empty library either.
+    expect(fixture.nativeElement.querySelector('[data-empty]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-loading]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('Could not');
+  });
 
   it('lists the sources without their passwords', () => {
     const text = mounted().nativeElement.querySelector('[data-sources]').textContent;
@@ -83,10 +130,12 @@ describe('Sources', () => {
     // create time.
     const fixture = mounted();
     fixture.nativeElement.querySelector('[data-add]').click();
-    ctrl.expectOne('/admin/sources').flush(
-      { field: 'locator', error: 'that folder cannot be read: no such file' },
-      { status: 400, statusText: 'Bad Request' },
-    );
+    ctrl
+      .expectOne('/admin/sources')
+      .flush(
+        { field: 'locator', error: 'that folder cannot be read: no such file' },
+        { status: 400, statusText: 'Bad Request' },
+      );
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain(
       'cannot be read',
@@ -199,5 +248,26 @@ describe('Sources', () => {
     ctrl.expectOne('/now.json?station=0').flush(null, { status: 500, statusText: 'Error' });
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-progress]')).toBeNull();
+  });
+
+  it('destructive sources asks before removing', () => {
+    const fixture = mounted();
+    const confirmed: string[] = [];
+    vi.stubGlobal('confirm', (m: string) => {
+      confirmed.push(m);
+      return false;
+    });
+    fixture.nativeElement.querySelector('[data-remove]').click();
+    expect(confirmed.length).toBe(1);
+    // It says what is NOT destroyed: the tracks are kept and marked missing.
+    expect(confirmed[0].toLowerCase()).toContain('kept');
+    vi.unstubAllGlobals();
+  });
+
+  it('destructive sources marks the remove button as destructive', () => {
+    const fixture = mounted();
+    expect(
+      fixture.nativeElement.querySelector('[data-remove]').getAttribute('data-danger'),
+    ).not.toBeNull();
   });
 });

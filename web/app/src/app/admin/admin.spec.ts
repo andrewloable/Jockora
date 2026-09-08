@@ -26,16 +26,16 @@ describe('Admin', () => {
         url === '/me'
           ? { name: 'mandark', role: 'admin' }
           : url === '/admin/vocab'
-          ? { genres: ['rock'], moods: [] }
-          : url === '/admin/voices'
-            ? { voices: [] }
-            : url.includes('/tracks')
-              ? { tracks: [], total: 0 }
-              : url === '/admin/overview.json'
-                ? {}
-                : url === '/admin/stations'
-                  ? [{ id: 1, name: 'Rock', genre: 'rock', enabled: true, tracks: 90 }]
-                  : [],
+            ? { genres: ['rock'], moods: [] }
+            : url === '/admin/voices'
+              ? { voices: [] }
+              : url.includes('/tracks')
+                ? { tracks: [], total: 0 }
+                : url === '/admin/overview.json'
+                  ? {}
+                  : url === '/admin/stations'
+                    ? [{ id: 1, name: 'Rock', genre: 'rock', enabled: true, tracks: 90 }]
+                    : [],
       );
     }
     fixture.detectChanges();
@@ -63,6 +63,7 @@ describe('Admin', () => {
       'playlist',
       'jocks',
       'accounts',
+      'model',
     ]);
   });
 
@@ -198,5 +199,14 @@ describe('Admin', () => {
     }
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-whoami]')).toBeNull();
+  });
+
+  it('opens the model page', () => {
+    const fixture = mounted();
+    fixture.nativeElement.querySelector('[data-section="model"]').click();
+    fixture.detectChanges();
+    ctrl.expectOne('/admin/llm').flush({ providers: [], current: { has_key: false } });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('Language model');
   });
 });

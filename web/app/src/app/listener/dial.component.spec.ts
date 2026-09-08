@@ -27,6 +27,44 @@ describe('Dial', () => {
     return fixture;
   }
 
+  // ------------------------------------------------------ console states --
+  //
+  // Jockora-e9a.50. The dial IS the listener's UI, so its empty and loading
+  // states are the whole first impression of a fresh install -- and both drew
+  // the same thing, so a listener on a slow connection was told there were no
+  // stations while the answer was still in flight.
+
+  it('console states tells a listener the dial is empty rather than showing nothing', () => {
+    const fixture = TestBed.createComponent(Dial);
+    ctrl.expectOne('/stations.json').flush({ stations: [] });
+    fixture.detectChanges();
+    const empty = fixture.nativeElement.querySelector('[data-empty]');
+    expect(empty).not.toBeNull();
+    // A listener cannot fix this and should not be sent to a console they
+    // cannot open. It says who can.
+    expect(empty.textContent).toContain('operator');
+  });
+
+  it('console states does not tell a listener the dial is empty while it is loading', () => {
+    const fixture = TestBed.createComponent(Dial);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-empty]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-loading]')).not.toBeNull();
+    ctrl.expectOne('/stations.json').flush({ stations: [] });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-loading]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-empty]')).not.toBeNull();
+  });
+
+  it('console states says so when a request fails and does not claim the dial is empty', () => {
+    const fixture = TestBed.createComponent(Dial);
+    ctrl.expectOne('/stations.json').flush(null, { status: 500, statusText: 'Server Error' });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-empty]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-loading]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-error]').textContent).toContain('Could not');
+  });
+
   it('renders what a person picks a station by', () => {
     const fixture = mounted();
     const buttons = fixture.nativeElement.querySelectorAll('[data-station]');
@@ -147,7 +185,12 @@ describe('Dial', () => {
     // what is on it.
     expect(line).not.toContain('…');
     // And no token long enough to push the card open again.
-    const longest = Math.max(...line.trim().split(/\s+/).map((w: string) => w.length));
+    const longest = Math.max(
+      ...line
+        .trim()
+        .split(/\s+/)
+        .map((w: string) => w.length),
+    );
     expect(longest).toBeLessThanOrEqual(12);
   });
 });

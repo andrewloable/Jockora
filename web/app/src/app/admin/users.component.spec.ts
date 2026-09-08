@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
@@ -13,6 +13,10 @@ describe('Users', () => {
   let ctrl: HttpTestingController;
 
   beforeEach(async () => {
+    // DEFAULT: yes. Destructive actions ask now, and every test that was
+    // written before they did is still testing what happens after the answer.
+    // The tests about the QUESTION stub it themselves.
+    vi.stubGlobal('confirm', () => true);
     await TestBed.configureTestingModule({
       imports: [Users],
       providers: [provideHttpClient(), provideHttpClientTesting()],
@@ -36,6 +40,24 @@ describe('Users', () => {
     // later clear of the field would not reach the DOM.
     (fixture as unknown as { detectChanges(): void }).detectChanges();
   }
+
+  // ------------------------------------------------------ console states --
+  // Jockora-e9a.50: loading and empty rendered identically, so a slow first
+  // paint told a new operator their library was empty.
+
+  it('console states tells a fresh operator what to do when there is only them', () => {
+    const empty = mounted([]).nativeElement.querySelector('[data-empty]');
+    expect(empty).not.toBeNull();
+    // Accounts are admin-created; there is no self-registration to wait for.
+    expect(empty.textContent).toContain('Add an account');
+  });
+
+  it('console states does not call a loading accounts table an empty one', () => {
+    const fixture = TestBed.createComponent(Users);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-empty]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-loading]')).not.toBeNull();
+  });
 
   it('lists the accounts without any trace of a hash', () => {
     const html = mounted().nativeElement.innerHTML;
@@ -90,7 +112,9 @@ describe('Users', () => {
     const fixture = mounted();
     fixture.nativeElement.querySelector('[data-reset]').click();
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('[data-reset-form]').textContent).toContain('andrew');
+    expect(fixture.nativeElement.querySelector('[data-reset-form]').textContent).toContain(
+      'andrew',
+    );
 
     type(fixture, '[data-new-password]', 'a whole new one');
     fixture.nativeElement.querySelector('[data-save-password]').click();
@@ -255,5 +279,29 @@ describe('Users', () => {
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('Could not');
     });
+  });
+
+  it('destructive accounts asks before deleting', () => {
+    const fixture = mounted();
+    const confirmed: string[] = [];
+    vi.stubGlobal('confirm', (m: string) => {
+      confirmed.push(m);
+      return false;
+    });
+    fixture.nativeElement.querySelector('[data-remove]').click();
+    ctrl.expectNone('/admin/users/1');
+    expect(confirmed[0]).toContain('andrew');
+
+    vi.stubGlobal('confirm', () => true);
+    fixture.nativeElement.querySelector('[data-remove]').click();
+    ctrl.expectOne('/admin/users/1').flush(null);
+    vi.unstubAllGlobals();
+  });
+
+  it('destructive accounts marks the delete button as destructive', () => {
+    const fixture = mounted();
+    expect(
+      fixture.nativeElement.querySelector('[data-remove]').getAttribute('data-danger'),
+    ).not.toBeNull();
   });
 });

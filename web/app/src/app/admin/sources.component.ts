@@ -20,7 +20,23 @@ import { Api, AdminApi, Source } from '../api/api';
             <button type="button" data-toggle (click)="toggle(source)">
               {{ source.enabled ? 'Disable' : 'Enable' }}
             </button>
-            <button type="button" data-remove (click)="remove(source)">Remove</button>
+            <button type="button" data-remove data-danger (click)="remove(source)">Remove</button>
+          </td>
+        </tr>
+      } @empty {
+        <!-- LOADING AND EMPTY ARE NOT THE SAME THING and both drew a table
+             with no rows, so a slow first paint told a new operator their
+             library was empty. Jockora-e9a.50. -->
+        <tr>
+          <td colspan="5">
+            @if (!loaded()) {
+              <span data-loading>Loading…</span>
+            } @else if (!failed()) {
+              <span data-empty
+                ><strong>Nothing scanned yet.</strong> Add a source below and Jockora reads it. It
+                is never written to.</span
+              >
+            }
           </td>
         </tr>
       }
@@ -59,8 +75,8 @@ import { Api, AdminApi, Source } from '../api/api';
     <button type="button" data-rescan (click)="rescan()">Rescan</button>
     @if (progress(); as p) {
       <p data-progress>
-        {{ p.running ? 'Scanning' : 'Last scan' }}: found {{ p.found }}, skipped
-        {{ p.skipped }}, missing {{ p.missing }}
+        {{ p.running ? 'Scanning' : 'Last scan' }}: found {{ p.found }}, skipped {{ p.skipped }},
+        missing {{ p.missing }}
       </p>
     }
     <p data-said>{{ said() }}</p>
@@ -71,6 +87,24 @@ export class Sources {
   private readonly listener = inject(Api);
 
   readonly sources = signal<Source[]>([]);
+  /**
+   * True once the first answer has arrived, success OR failure.
+   *
+   * Without it a table with no rows means two opposite things -- the request is
+   * still in flight, or there is genuinely nothing -- and both drew the same
+   * empty table. A new operator was told their library was empty and given
+   * nothing to do about it. Jockora-e9a.50.
+   */
+  readonly loaded = signal(false);
+  /**
+   * True when the last read FAILED, as opposed to returning nothing.
+   *
+   * Three states, not two: a table with no rows can be in flight, genuinely
+   * empty, or the wreckage of a request that did not come back. Without this
+   * the third one wore the second one's words and told an operator whose
+   * server was down that they had never scanned anything.
+   */
+  readonly failed = signal(false);
   readonly kind = signal('folder');
   readonly locator = signal('');
   readonly username = signal('');
@@ -89,8 +123,16 @@ export class Sources {
 
   load(): void {
     this.api.sources().subscribe({
-      next: (s) => this.sources.set(s),
-      error: () => this.said.set('Could not read the sources.'),
+      next: (s) => {
+        this.sources.set(s);
+        this.loaded.set(true);
+        this.failed.set(false);
+      },
+      error: () => {
+        this.loaded.set(true);
+        this.failed.set(true);
+        this.said.set('Could not read the sources.');
+      },
     });
   }
 
@@ -117,6 +159,12 @@ export class Sources {
   }
 
   remove(source: Source): void {
+    // ASKED, and it says what is NOT destroyed: the tracks stay, marked
+    // missing, and keep their dossiers. Somebody who thinks they are deleting
+    // a library needs to know they are not.
+    if (!confirm('Remove this source? Its tracks are kept and marked missing.')) {
+      return;
+    }
     this.api.removeSource(source.id).subscribe({
       next: () => {
         // Said out loud, because the tracks are NOT deleted with it -- they
@@ -143,9 +191,7 @@ export class Sources {
         this.pollProgress();
       },
       error: (e: { status?: number }) =>
-        this.said.set(
-          e.status === 409 ? 'A scan is already running.' : 'Could not start a scan.',
-        ),
+        this.said.set(e.status === 409 ? 'A scan is already running.' : 'Could not start a scan.'),
     });
   }
 

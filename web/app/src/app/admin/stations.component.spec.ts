@@ -25,6 +25,10 @@ describe('Stations', () => {
   let ctrl: HttpTestingController;
 
   beforeEach(async () => {
+    // DEFAULT: yes. Destructive actions ask now, and every test that was
+    // written before they did is still testing what happens after the answer.
+    // The tests about the QUESTION stub it themselves.
+    vi.stubGlobal('confirm', () => true);
     await TestBed.configureTestingModule({
       imports: [Stations],
       providers: [provideHttpClient(), provideHttpClientTesting()],
@@ -42,7 +46,11 @@ describe('Stations', () => {
   // Tick exactly these boxes in a checkbox group, clicking any that need to
   // change. Clicking rather than assigning .checked, because the component
   // reads the event target and an assignment fires no event.
-  function choose(fixture: { detectChanges(): void; nativeElement: HTMLElement }, sel: string, values: string[]) {
+  function choose(
+    fixture: { detectChanges(): void; nativeElement: HTMLElement },
+    sel: string,
+    values: string[],
+  ) {
     const boxes = Array.from(
       fixture.nativeElement.querySelectorAll(sel + ' input[type=checkbox]'),
     ) as HTMLInputElement[];
@@ -62,6 +70,49 @@ describe('Stations', () => {
     fixture.detectChanges();
     return fixture;
   }
+
+  // ------------------------------------------------------ console states --
+  // Jockora-e9a.50: loading and empty rendered identically, so a slow first
+  // paint told a new operator their library was empty.
+
+  it('console states tells a fresh operator what to do when there are no stations', () => {
+    const empty = mounted([]).nativeElement.querySelector('[data-empty]');
+    expect(empty).not.toBeNull();
+    expect(empty.textContent).toContain('Add a station');
+  });
+
+  it('console states does not call a loading stations table an empty one', () => {
+    const fixture = TestBed.createComponent(Stations);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-empty]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-loading]')).not.toBeNull();
+    ctrl.expectOne('/admin/stations').flush([]);
+    ctrl.expectOne('/admin/vocab').flush(vocab);
+    ctrl.expectOne('/admin/jocks').flush(jocks);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-loading]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-empty]')).not.toBeNull();
+  });
+
+  it('console states shows the warning when a station is below the track threshold', () => {
+    // e9a.25 set minimum 10 and warn 50. The column existed and was empty in
+    // every screenshot taken, because the install reviewed had no thin station.
+    const thin = mounted([
+      {
+        id: 9,
+        name: 'SEA SHANTY',
+        genre: 'folk',
+        genres: ['folk'],
+        moods: [],
+        tracks: 12,
+        enabled: false,
+        warning: 'fewer tracks than most stations',
+      },
+    ]);
+    const cell = thin.nativeElement.querySelector('[data-warning]');
+    expect(cell).not.toBeNull();
+    expect(cell.textContent).toContain('fewer tracks');
+  });
 
   it('lists the stations with their counts and warnings', () => {
     const text = mounted().nativeElement.querySelector('[data-stations]').textContent;
@@ -149,10 +200,12 @@ describe('Stations', () => {
   it('renders the threshold refusal with its numbers', () => {
     const fixture = mounted();
     fixture.nativeElement.querySelectorAll('[data-toggle]')[1].click();
-    ctrl.expectOne('/admin/stations/3/enable').flush(
-      { error: 'too few tracks to run', tracks: 9, minimum: 10 },
-      { status: 409, statusText: 'Conflict' },
-    );
+    ctrl
+      .expectOne('/admin/stations/3/enable')
+      .flush(
+        { error: 'too few tracks to run', tracks: 9, minimum: 10 },
+        { status: 409, statusText: 'Conflict' },
+      );
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('9 of 10');
   });
@@ -203,9 +256,11 @@ describe('Stations', () => {
     // stations and the dj i selected is gone".
     const fixture = TestBed.createComponent(Stations);
     // Stations first, jocks LAST, which is the order that broke it.
-    ctrl.expectOne('/admin/stations').flush([
-      { id: 1, name: 'Night Rock', genre: 'rock', jock_id: 'dutch', enabled: true, tracks: 134 },
-    ]);
+    ctrl
+      .expectOne('/admin/stations')
+      .flush([
+        { id: 1, name: 'Night Rock', genre: 'rock', jock_id: 'dutch', enabled: true, tracks: 134 },
+      ]);
     ctrl.expectOne('/admin/vocab').flush(vocab);
     fixture.detectChanges();
     ctrl.expectOne('/admin/jocks').flush(jocks);
@@ -237,12 +292,8 @@ describe('Stations', () => {
   });
 
   it('shows no jock when a station has none', () => {
-    const fixture = mounted([
-      { id: 1, name: 'Rock', genre: 'rock', enabled: true, tracks: 90 },
-    ]);
-    expect(fixture.nativeElement.querySelector('[data-stations]').textContent).toContain(
-      'no jock',
-    );
+    const fixture = mounted([{ id: 1, name: 'Rock', genre: 'rock', enabled: true, tracks: 90 }]);
+    expect(fixture.nativeElement.querySelector('[data-stations]').textContent).toContain('no jock');
     fixture.nativeElement.querySelectorAll('[data-edit]')[0].click();
     fixture.detectChanges();
     const select: HTMLSelectElement = fixture.nativeElement.querySelector('[data-jock]');
@@ -278,9 +329,7 @@ describe('Stations', () => {
     ctrl.expectOne('/admin/stations/1/jock').flush(null);
     ctrl.expectOne('/admin/stations').flush(stations);
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain(
-      'music only',
-    );
+    expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('music only');
   });
 
   it('asks before deleting, and does not delete when told no', () => {
@@ -323,9 +372,7 @@ describe('Stations', () => {
       // the vocabulary arrives over HTTP, and this is the same trap the add
       // form documents.
       expect(
-        Array.from(
-          fixture.nativeElement.querySelectorAll('[data-edit-genre] input[type=checkbox]'),
-        )
+        Array.from(fixture.nativeElement.querySelectorAll('[data-edit-genre] input[type=checkbox]'))
           .filter((b) => (b as HTMLInputElement).checked)
           .map((b) => (b as HTMLInputElement).value),
       ).toEqual(['rock']);
@@ -373,12 +420,13 @@ describe('Stations', () => {
     it("repeats the server's reason for refusing an edit", () => {
       const fixture = editing(mounted());
       fixture.nativeElement.querySelector('[data-save]').click();
-      ctrl.expectOne('/admin/stations/1').flush(
-        { error: 'name is already taken' },
-        { status: 400, statusText: 'Bad Request' },
-      );
+      ctrl
+        .expectOne('/admin/stations/1')
+        .flush({ error: 'name is already taken' }, { status: 400, statusText: 'Bad Request' });
       fixture.detectChanges();
-      expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('already taken');
+      expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain(
+        'already taken',
+      );
       // STILL OPEN, so the operator can fix it rather than retype it.
       expect(fixture.nativeElement.querySelector('[data-edit-name]')).not.toBeNull();
 
@@ -412,9 +460,7 @@ describe('Stations', () => {
       type(fixture, '[data-jock]', 'dutch');
       fixture.nativeElement.querySelector('[data-save]').click();
       ctrl.expectOne('/admin/stations/1').flush({ added: 0, removed: 0, kept: 412 });
-      ctrl
-        .expectOne('/admin/stations/1/jock')
-        .flush(null, { status: 500, statusText: 'Error' });
+      ctrl.expectOne('/admin/stations/1/jock').flush(null, { status: 500, statusText: 'Error' });
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('jock');
     });
@@ -432,10 +478,12 @@ describe('Stations', () => {
   it('says so when a create, toggle, delete or assign fails', () => {
     const fixture = mounted();
     fixture.nativeElement.querySelector('[data-add]').click();
-    ctrl.expectOne('/admin/stations').flush(
-      { field: 'genre', error: 'not in the vocabulary' },
-      { status: 400, statusText: 'Bad Request' },
-    );
+    ctrl
+      .expectOne('/admin/stations')
+      .flush(
+        { field: 'genre', error: 'not in the vocabulary' },
+        { status: 400, statusText: 'Bad Request' },
+      );
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('vocabulary');
 
@@ -518,9 +566,7 @@ describe('Stations', () => {
   });
 
   it('does not blame a mood a station does not have', () => {
-    const fixture = mounted([
-      { id: 4, name: 'Rock', genre: 'rock', enabled: false, tracks: 4 },
-    ]);
+    const fixture = mounted([{ id: 4, name: 'Rock', genre: 'rock', enabled: false, tracks: 4 }]);
     fixture.nativeElement.querySelector('[data-toggle]').click();
     ctrl
       .expectOne('/admin/stations/4/enable')
@@ -562,5 +608,33 @@ describe('Stations', () => {
     const inputs = [...fixture.nativeElement.querySelectorAll('[data-genre] input')];
     expect(inputs.length).toBeGreaterThan(0);
     expect(inputs.every((i: HTMLInputElement) => i.type === 'checkbox')).toBe(true);
+  });
+
+  // ON A PHONE every admin table becomes a card. These tables drew their
+  // action buttons past the right edge of a 390px viewport with nothing to
+  // scroll -- rendered and unreachable, so a station could not be edited,
+  // disabled, deleted or have its playlist opened at all.
+  it('narrow stations labels every cell with the column it replaces', () => {
+    const fixture = mounted();
+    const headers = [...fixture.nativeElement.querySelectorAll('[data-stations] thead th')].map(
+      (h) => (h as HTMLElement).textContent?.trim(),
+    );
+    for (const row of fixture.nativeElement.querySelectorAll('[data-stations] tbody tr')) {
+      const cells = [...row.querySelectorAll('td')];
+      expect(cells.length).toBe(headers.length);
+      cells.forEach((cell, i) => {
+        expect(cell.getAttribute('data-label')).toBe(headers[i]);
+      });
+    }
+  });
+
+  it('narrow stations labels the cells of a row being edited too', () => {
+    const fixture = mounted();
+    fixture.nativeElement.querySelector('[data-edit]').click();
+    fixture.detectChanges();
+    const row = fixture.nativeElement.querySelector('[data-stations] tbody tr');
+    for (const cell of row.querySelectorAll('td')) {
+      expect(cell.getAttribute('data-label')).toBeTruthy();
+    }
   });
 });

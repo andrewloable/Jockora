@@ -21,91 +21,114 @@ import { AdminApi, Diff, Jock, Station } from '../api/api';
         </tr>
       </thead>
       <tbody>
-      @for (station of stations(); track station.id) {
-        <tr>
-          @if (editing() === station.id) {
-            <td>
-              <input
-                data-edit-name
-                [value]="editName()"
-                (input)="editName.set($any($event.target).value)"
-              />
-            </td>
-            <td>
-              <!-- CHECKBOXES, not a multiple select. A multiple select needs
+        @for (station of stations(); track station.id) {
+          <tr>
+            @if (editing() === station.id) {
+              <td data-label="Name">
+                <input
+                  data-edit-name
+                  [value]="editName()"
+                  (input)="editName.set($any($event.target).value)"
+                />
+              </td>
+              <td data-label="Genre · mood">
+                <!-- CHECKBOXES, not a multiple select. A multiple select needs
                    ctrl-click to pick two things that are not next to each
                    other, which is a keyboard trick people do not know and
                    cannot see. A list of checkboxes shows every option and its
                    state at once, and the checked boxes ARE the display -- so
                    nothing restates them underneath. -->
-              <fieldset data-edit-genre>
-                <legend>Genre</legend>
-                @for (g of vocab().genres; track g) {
-                  <label>
-                    <input
-                      type="checkbox"
-                      [value]="g"
-                      [checked]="editGenres().includes(g)"
-                      (change)="editGenres.set(pick(vocab().genres, editGenres(), g, $event))"
-                    />{{ g }}
-                  </label>
-                }
-                <small>{{ editGenres().length ? '' : 'none ticked · any genre' }}</small>
-              </fieldset>
-              <fieldset data-edit-mood>
-                <legend>Mood</legend>
-                @for (m of vocab().moods; track m) {
-                  <label>
-                    <input
-                      type="checkbox"
-                      [value]="m"
-                      [checked]="editMoods().includes(m)"
-                      (change)="editMoods.set(pick(vocab().moods, editMoods(), m, $event))"
-                    />{{ m }}
-                  </label>
-                }
-                <small>{{ editMoods().length ? '' : 'none ticked · any mood' }}</small>
-              </fieldset>
+                <fieldset data-edit-genre>
+                  <legend>Genre</legend>
+                  @for (g of vocab().genres; track g) {
+                    <label>
+                      <input
+                        type="checkbox"
+                        [value]="g"
+                        [checked]="editGenres().includes(g)"
+                        (change)="editGenres.set(pick(vocab().genres, editGenres(), g, $event))"
+                      />{{ g }}
+                    </label>
+                  }
+                  <small>{{ editGenres().length ? '' : 'none ticked · any genre' }}</small>
+                </fieldset>
+                <fieldset data-edit-mood>
+                  <legend>Mood</legend>
+                  @for (m of vocab().moods; track m) {
+                    <label>
+                      <input
+                        type="checkbox"
+                        [value]="m"
+                        [checked]="editMoods().includes(m)"
+                        (change)="editMoods.set(pick(vocab().moods, editMoods(), m, $event))"
+                      />{{ m }}
+                    </label>
+                  }
+                  <small>{{ editMoods().length ? '' : 'none ticked · any mood' }}</small>
+                </fieldset>
+              </td>
+            } @else {
+              <td data-label="Name">{{ station.name }}</td>
+              <td data-label="Genre · mood">{{ describe(station) }}</td>
+            }
+            <td data-label="Tracks">{{ station.tracks }}</td>
+            <td data-label="Warning">
+              @if (station.warning) {
+                <span data-warning>{{ station.warning }}</span>
+              }
             </td>
-          } @else {
-            <td>{{ station.name }}</td>
-            <td>{{ describe(station) }}</td>
-          }
-          <td>{{ station.tracks }}</td>
-          <td>
-            @if (station.warning) {
-              <span data-warning>{{ station.warning }}</span>
-            }
-          </td>
-          <td>
-            @if (editing() === station.id) {
-              <select data-jock (change)="editJock.set($any($event.target).value)">
-                <option value="" [selected]="!editJock()">— no jock —</option>
-                @for (jock of jocks(); track jock.id) {
-                  <option [value]="jock.id" [selected]="jock.id === editJock()">
-                    {{ jock.name }}
-                  </option>
-                }
-              </select>
-            } @else {
-              {{ jockName(station) }}
-            }
-          </td>
-          <td>
-            @if (editing() === station.id) {
-              <button type="button" data-save (click)="save(station)">Save</button>
-              <button type="button" data-cancel (click)="cancel()">Cancel</button>
-            } @else {
-              <button type="button" data-edit (click)="startEdit(station)">Edit</button>
-              <button type="button" data-toggle (click)="toggle(station)">
-                {{ station.enabled ? 'Disable' : 'Enable' }}
-              </button>
-              <button type="button" data-remove (click)="remove(station)">Delete</button>
-              <button type="button" data-playlist (click)="playlist.emit(station)">Playlist</button>
-            }
-          </td>
-        </tr>
-      }
+            <td data-label="Jock">
+              @if (editing() === station.id) {
+                <select data-jock (change)="editJock.set($any($event.target).value)">
+                  <option value="" [selected]="!editJock()">— no jock —</option>
+                  @for (jock of jocks(); track jock.id) {
+                    <option [value]="jock.id" [selected]="jock.id === editJock()">
+                      {{ jock.name }}
+                    </option>
+                  }
+                </select>
+              } @else {
+                {{ jockName(station) }}
+              }
+            </td>
+            <!-- LABELLED like the rest: below 48rem the row becomes a card, and
+               Edit, Disable, Delete and Playlist were all drawn past the right
+               edge of a phone with nothing to scroll. -->
+            <td data-label="Actions">
+              @if (editing() === station.id) {
+                <button type="button" data-save (click)="save(station)">Save</button>
+                <button type="button" data-cancel (click)="cancel()">Cancel</button>
+              } @else {
+                <button type="button" data-edit (click)="startEdit(station)">Edit</button>
+                <button type="button" data-toggle (click)="toggle(station)">
+                  {{ station.enabled ? 'Disable' : 'Enable' }}
+                </button>
+                <button type="button" data-remove data-danger (click)="remove(station)">
+                  Delete
+                </button>
+                <button type="button" data-playlist (click)="playlist.emit(station)">
+                  Playlist
+                </button>
+              }
+            </td>
+          </tr>
+        } @empty {
+          <!-- LOADING AND EMPTY ARE NOT THE SAME THING and both drew a table
+               with no rows, so a slow first paint told a new operator their
+               library was empty. Jockora-e9a.50. -->
+          <tr>
+            <td colspan="7">
+              @if (!loaded()) {
+                <span data-loading>Loading…</span>
+              } @else if (!failed()) {
+                <span data-empty
+                  ><strong>No stations yet.</strong> Add a station below. A station is a genre, an
+                  optional mood and a jock.</span
+                >
+              }
+            </td>
+          </tr>
+        }
       </tbody>
     </table>
 
@@ -159,6 +182,23 @@ export class Stations {
   private readonly api = inject(AdminApi);
 
   readonly stations = signal<Station[]>([]);
+  /**
+   * True once the first answer has arrived, success OR failure.
+   *
+   * Without it a table with no rows means two opposite things -- the request is
+   * still in flight, or there is genuinely nothing -- and both drew the same
+   * empty table. Jockora-e9a.50.
+   */
+  readonly loaded = signal(false);
+  /**
+   * True when the last read FAILED, as opposed to returning nothing.
+   *
+   * Three states, not two: a table with no rows can be in flight, genuinely
+   * empty, or the wreckage of a request that did not come back. Without this
+   * the third one wore the second one's words and told an operator whose
+   * server was down that they had never scanned anything.
+   */
+  readonly failed = signal(false);
   readonly jocks = signal<Jock[]>([]);
   readonly vocab = signal<{ genres: string[]; moods: string[] }>({ genres: [], moods: [] });
   readonly name = signal('');
@@ -194,8 +234,16 @@ export class Stations {
 
   load(): void {
     this.api.stations().subscribe({
-      next: (s) => this.stations.set(s),
-      error: () => this.said.set('Could not read the stations.'),
+      next: (s) => {
+        this.stations.set(s);
+        this.loaded.set(true);
+        this.failed.set(false);
+      },
+      error: () => {
+        this.loaded.set(true);
+        this.failed.set(true);
+        this.said.set('Could not read the stations.');
+      },
     });
   }
 
@@ -380,5 +428,4 @@ export class Stations {
       error: () => this.said.set('Could not delete that station.'),
     });
   }
-
 }

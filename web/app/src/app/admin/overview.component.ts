@@ -21,6 +21,22 @@ const REFRESH_MS = 10_000;
   template: `
     <h2>Overview</h2>
 
+    <!-- THE MODEL IS REFUSING, and until 2026-09-08 nothing on this page said
+         so. A Cloudflare token stopped being accepted at 02:58; the station
+         dropped nine consecutive breaks and enrichment died, and the dossier
+         count below sat still while /now.json reported "llm": "ok".
+         First thing on the page, and role=alert, because the operator is here
+         reading a number that has quietly stopped moving. -->
+    @if (modelTrouble(); as t) {
+      <p role="alert" data-model-health>{{ t }}</p>
+    }
+    <!-- AND THE WORKER THAT GAVE UP. The dossier count on this page sat at
+         3,923 of 7,595 for an hour under the word "running", because the flag
+         being reported was the operator's own pause toggle. -->
+    @if (enrichmentTrouble(); as t) {
+      <p role="alert" data-enrichment-health>{{ t }}</p>
+    }
+
     <section>
       <h3>Library</h3>
       @if (lib(); as l) {
@@ -65,8 +81,8 @@ const REFRESH_MS = 10_000;
       }
       @if (failures() > 0) {
         <p data-failures>
-          {{ failures() | number }} tracks could not be measured for loudness. They play at their
-          own level.
+          {{ failures() | number }} track{{ failures() === 1 ? '' : 's' }} could not be measured for
+          loudness. They play at their own level.
         </p>
       }
     </section>
@@ -120,7 +136,7 @@ const REFRESH_MS = 10_000;
           @for (row of rows(); track row.key) {
             <tr>
               <th>{{ row.key }}</th>
-              <td>{{ row.value }}</td>
+              <td data-label="value">{{ row.value }}</td>
             </tr>
           }
         </table>
@@ -139,10 +155,20 @@ const REFRESH_MS = 10_000;
         <a data-export href="/admin/enrichment/export" download
           >Download this library's enrichment</a
         >
+      </p>
+      <!-- ITS OWN BLOCK. Inline, the two nodes touched with nothing between
+           them and the page read "Download this library's enrichmentDossiers,
+           your own tag edits and the audio analysis." -->
+      <p data-export-note>
         <small
           >Dossiers, your own tag edits and the audio analysis. No accounts, no stations.</small
         >
       </p>
+      <!-- THE LABEL IS THE CONTROL. A raw input type=file draws the browser's
+           own "Choose File / No file chosen", which is the same defect as the
+           vocabulary checkboxes: an unstyled native widget in a styled console.
+           The input is still there and still does the work -- it is hidden
+           behind the label, which is what a click and a keypress reach. -->
       <p>
         <label data-import-label>
           Merge a file from another install
@@ -152,7 +178,11 @@ const REFRESH_MS = 10_000;
             accept=".gz,application/gzip"
             (change)="importEnrichment($event)"
           />
+          <span data-import-button>Choose a file</span>
+          <span data-import-name>{{ importName() || 'No file chosen yet' }}</span>
         </label>
+      </p>
+      <p data-import-note>
         <small>Fills holes only. Your own tag edits are never overwritten.</small>
       </p>
       @if (report(); as r) {
@@ -181,6 +211,10 @@ export class Overview implements OnDestroy {
 
   /** What the last import did. Null until one has been run. */
   readonly report = signal<ImportReport | null>(null);
+
+  /** The file the operator picked, because the native widget that used to say
+   *  so is hidden behind the label now. */
+  readonly importName = signal('');
 
   readonly rows = signal<{ key: string; value: string }[]>([]);
   // The raw answer as well as the flattened rows: the table wants every field,
@@ -221,6 +255,32 @@ export class Overview implements OnDestroy {
     // No default on tracks: the guard above has already refused a library
     // without one, so a fallback here would be a branch nothing can reach.
     return { tracks: l['tracks'], playable: l['playable'] ?? 0 };
+  }
+
+  /**
+   * The model's reason for refusing, or nothing at all when it is working.
+   *
+   * "not configured" is NOT trouble: a library with no model is a working
+   * shuffle, and reporting it as an outage would make a fresh install look
+   * broken to the person setting it up.
+   */
+  modelTrouble(): string {
+    const m = this.overview()['model'] as { health?: string } | undefined;
+    const h = m?.health ?? '';
+    const mark = 'degraded: ';
+    return h.startsWith(mark) ? `The language model is refusing: ${h.slice(mark.length)}` : '';
+  }
+
+  /**
+   * Why enrichment stopped, or nothing.
+   *
+   * The server sends this ONLY when the worker gave up, never when the operator
+   * paused it -- somebody who paused it for the evening knows where it went,
+   * and telling them it stopped is the console shouting about a thing they did
+   * on purpose.
+   */
+  enrichmentTrouble(): string {
+    return (this.overview()['enrichment_stopped'] as string) ?? '';
   }
 
   /** How much of the playable library has a loudness measurement. */
@@ -379,6 +439,8 @@ export class Overview implements OnDestroy {
     }
     this.said.set('');
     this.report.set(null);
+    // The hidden input cannot say what it holds, so the label does.
+    this.importName.set(file.name);
     this.api.importEnrichment(file).subscribe({
       next: (r) => this.report.set(r),
       // NAMED, not "something went wrong": the two things that go wrong here

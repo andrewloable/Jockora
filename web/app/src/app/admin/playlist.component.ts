@@ -138,6 +138,22 @@ export const PAGE = 50;
               </td>
             </tr>
           }
+        } @empty {
+          <!-- LOADING AND EMPTY ARE NOT THE SAME THING and both drew a table
+               with no rows, so a slow first paint told a new operator their
+               library was empty. Jockora-e9a.50. -->
+          <tr>
+            <td colspan="9">
+              @if (!loaded()) {
+                <span data-loading>Loading…</span>
+              } @else if (!failed()) {
+                <span data-empty
+                  ><strong>This station matched no tracks.</strong> Widen its genre or mood, or
+                  check that enrichment has reached this part of the library.</span
+                >
+              }
+            </td>
+          </tr>
         }
       </tbody>
     </table>
@@ -161,6 +177,20 @@ export class Playlist {
   readonly station = input.required<number>();
 
   readonly tracks = signal<PlaylistTrack[]>([]);
+
+  /**
+   * True once the first answer has arrived, success OR failure. Jockora-e9a.50.
+   */
+  readonly loaded = signal(false);
+  /**
+   * True when the last read FAILED, as opposed to returning nothing.
+   *
+   * Three states, not two: a table with no rows can be in flight, genuinely
+   * empty, or the wreckage of a request that did not come back. Without this
+   * the third one wore the second one's words and told an operator whose
+   * server was down that they had never scanned anything.
+   */
+  readonly failed = signal(false);
   readonly total = signal(0);
   readonly offset = signal(0);
   readonly said = signal('');
@@ -194,8 +224,14 @@ export class Playlist {
       next: (p) => {
         this.tracks.set(p.tracks);
         this.total.set(p.total);
+        this.loaded.set(true);
+        this.failed.set(false);
       },
-      error: () => this.said.set('Could not read the playlist.'),
+      error: () => {
+        this.loaded.set(true);
+        this.failed.set(true);
+        this.said.set('Could not read the playlist.');
+      },
     });
   }
 

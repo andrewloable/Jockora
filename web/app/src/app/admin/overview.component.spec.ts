@@ -22,6 +22,68 @@ describe('Overview', () => {
     return fixture;
   }
 
+  // ------------------------------------------------------- model outage --
+  //
+  // 2026-09-08: a Cloudflare token stopped being accepted at 02:58. The station
+  // dropped nine consecutive breaks and enrichment died, and the ONLY place any
+  // of it appeared was the container log. /now.json reported "llm": "ok"
+  // throughout. This is the operator's front page; it is where they look.
+
+  it('model outage shows the operator that the model is refusing, in the provider’s words', () => {
+    const fixture = mounted({
+      library: { tracks: 7595, enriched: 3923 },
+      model: { health: 'degraded: rejected the API key', provider: 'cloudflare' },
+    });
+    const alert = fixture.nativeElement.querySelector('[data-model-health]');
+    expect(alert).not.toBeNull();
+    // The provider's own reason, because "degraded" alone still sends them to
+    // a log to find out what is wrong.
+    expect(alert.textContent).toContain('rejected the API key');
+    // Announced, not just coloured: this is the one thing on the page that has
+    // to reach somebody who is not looking straight at it.
+    expect(alert.getAttribute('role')).toBe('alert');
+  });
+
+  it('model outage says nothing at all when the model is working', () => {
+    const fixture = mounted({
+      library: { tracks: 7595, enriched: 3923 },
+      model: { health: 'ok', provider: 'cloudflare' },
+    });
+    expect(fixture.nativeElement.querySelector('[data-model-health]')).toBeNull();
+  });
+
+  it('model outage keeps quiet when no model is configured', () => {
+    // A library with no model is a working shuffle, not an outage.
+    const fixture = mounted({
+      library: { tracks: 7595, enriched: 0 },
+      model: { health: 'not configured' },
+    });
+    expect(fixture.nativeElement.querySelector('[data-model-health]')).toBeNull();
+  });
+
+  it('model outage says when enrichment gave up, not just that it is not running', () => {
+    // Measured on the box at 03:33: "done": 3923, "running": true, with a
+    // goroutine that had exited at 03:07. A green light over a dead worker and
+    // a number that had not moved in an hour.
+    const fixture = mounted({
+      library: { tracks: 7595, enriched: 3923 },
+      enriching: false,
+      enrichment_stopped: 'enrichment gave up: rejected the API key',
+    });
+    const alert = fixture.nativeElement.querySelector('[data-enrichment-health]');
+    expect(alert).not.toBeNull();
+    expect(alert.textContent).toContain('rejected the API key');
+    expect(alert.getAttribute('role')).toBe('alert');
+  });
+
+  it('model outage stays quiet about enrichment the operator paused on purpose', () => {
+    const fixture = mounted({
+      library: { tracks: 7595, enriched: 3923 },
+      enriching: false,
+    });
+    expect(fixture.nativeElement.querySelector('[data-enrichment-health]')).toBeNull();
+  });
+
   it('renders the overview as rows', () => {
     const text = mounted().nativeElement.querySelector('[data-overview]').textContent;
     expect(text).toContain('library.tracks');
@@ -267,14 +329,18 @@ describe('Overview', () => {
         library: { tracks: 1000, enriched: 100 },
         enrichment_cost: { seconds_per_track: 40 },
       });
-      expect(hours.nativeElement.querySelector('[data-enrich-eta]').textContent).toContain('10 hours');
+      expect(hours.nativeElement.querySelector('[data-enrich-eta]').textContent).toContain(
+        '10 hours',
+      );
 
       const mins = withOverview({
         enriching: true,
         library: { tracks: 100, enriched: 95 },
         enrichment_cost: { seconds_per_track: 40 },
       });
-      expect(mins.nativeElement.querySelector('[data-enrich-eta]').textContent).toContain('3 minutes');
+      expect(mins.nativeElement.querySelector('[data-enrich-eta]').textContent).toContain(
+        '3 minutes',
+      );
     });
 
     it('does not promise a time when it is paused or the rate is unknown', () => {
@@ -285,13 +351,17 @@ describe('Overview', () => {
         library: { tracks: 1000, enriched: 100 },
         enrichment_cost: { seconds_per_track: 40 },
       });
-      expect(paused.nativeElement.querySelector('[data-enrich-line]').textContent).toContain('paused');
+      expect(paused.nativeElement.querySelector('[data-enrich-line]').textContent).toContain(
+        'paused',
+      );
       const eta = paused.nativeElement.querySelector('[data-enrich-eta]').textContent;
       expect(eta).toContain('900 to go');
       expect(eta).not.toContain('hours');
 
       const unknown = withOverview({ enriching: true, library: { tracks: 10, enriched: 1 } });
-      expect(unknown.nativeElement.querySelector('[data-enrich-eta]').textContent).toContain('9 to go');
+      expect(unknown.nativeElement.querySelector('[data-enrich-eta]').textContent).toContain(
+        '9 to go',
+      );
     });
 
     it('says so when every track has a dossier', () => {
@@ -307,7 +377,9 @@ describe('Overview', () => {
 
     it('treats a library with no enriched count as none done', () => {
       const fixture = withOverview({ enriching: true, library: { tracks: 200 } });
-      expect(fixture.nativeElement.querySelector('[data-enrich-line]').textContent).toContain('0 of 200');
+      expect(fixture.nativeElement.querySelector('[data-enrich-line]').textContent).toContain(
+        '0 of 200',
+      );
     });
 
     it('says nothing has been scanned rather than dividing by zero', () => {
@@ -471,6 +543,72 @@ describe('Overview', () => {
     expect(link.getAttribute('href')).toBe('/admin/enrichment/export');
     // download, so the browser saves it rather than navigating to it.
     expect(link.hasAttribute('download')).toBe(true);
+  });
+
+  // FOUR DEFECTS SAT IN SIX LINES OF MARKUP. Measured on the running build: the
+  // download link computed to rgb(0, 0, 238) with an underline -- the browser
+  // default, and the only blue pixel in a console of warm rust and cream -- and
+  // it ran straight into the text after it, so the page read "Download this
+  // library's enrichmentDossiers, your own tag edits and the audio analysis."
+  it('enrichment panel separates the download link from its description', () => {
+    const panel = mounted().nativeElement.querySelector('[data-export]').closest('section');
+    const link = panel.querySelector('[data-export]');
+    const note = panel.querySelector('[data-export-note]');
+
+    // Structure, not textContent and not a computed style. textContent
+    // concatenates straight across element boundaries, so it reads the same
+    // whether or not the fix is in; the stylesheet is not loaded here at all.
+    // What was actually wrong is that these two were INLINE SIBLINGS, and
+    // Angular drops the whitespace-only text node between them -- which is how
+    // the page came to read "Download this library's enrichmentDossiers".
+    expect(note).not.toBeNull();
+    expect(note.tagName).toBe('P');
+    expect(note.contains(link)).toBe(false);
+    expect(link.parentElement).not.toBe(note);
+  });
+
+  it('enrichment panel says one track, not one tracks', () => {
+    const one = mounted({ library: { tracks: 7595, enriched: 412 }, analysis_failures: 1 });
+    expect(one.nativeElement.querySelector('[data-failures]').textContent).toContain('1 track ');
+    expect(one.nativeElement.querySelector('[data-failures]').textContent).not.toContain(
+      '1 tracks',
+    );
+
+    const many = mounted({ library: { tracks: 7595, enriched: 412 }, analysis_failures: 12 });
+    expect(many.nativeElement.querySelector('[data-failures]').textContent).toContain('12 tracks');
+  });
+
+  it('enrichment panel presents the file input as a control, not a raw widget', () => {
+    // The browser's own "Choose File / No file chosen" was the same defect as
+    // the vocabulary checkboxes: an unstyled native control in a styled
+    // console. The label is the control; the input is hidden behind it.
+    const fixture = mounted();
+    const label = fixture.nativeElement.querySelector('[data-import-label]');
+    expect(label.querySelector('[data-import-button]')).not.toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-import-name]').textContent).toContain(
+      'No file',
+    );
+  });
+
+  it('enrichment panel names the file the operator picked', () => {
+    const fixture = mounted();
+    const input = fixture.nativeElement.querySelector('[data-import]');
+    const file = new File(['x'], 'from-the-other-box.jsonl.gz');
+    Object.defineProperty(input, 'files', { value: [file] });
+    input.dispatchEvent(new Event('change'));
+    ctrl.expectOne('/admin/enrichment/import').flush({
+      applied: 1,
+      had_dossier: 0,
+      had_override: 0,
+      unmatched: 0,
+      wrong_track: 0,
+      rejected: 0,
+      unreadable: 0,
+    });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-import-name]').textContent).toContain(
+      'from-the-other-box.jsonl.gz',
+    );
   });
 
   it('enrichment import reports what it did, counter by counter', () => {

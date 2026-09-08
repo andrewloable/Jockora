@@ -114,6 +114,10 @@ type Options struct {
 
 	// Enricher runs dossier generation in the background. Optional.
 	Enricher *enrich.Queue
+
+	// LLM is the swappable language model client the enricher and every break
+	// writer share, so the console can change provider without a restart.
+	LLM *enrich.Switchable
 }
 
 // Library is the scanned music source.
@@ -252,6 +256,32 @@ type App struct {
 	now   map[int64]nowPlaying
 	// lastBreaks is the most recent break PER STATION.
 	lastBreaks map[int64]*server.LastBreak
+
+	// enrichWake restarts an enrichment worker that gave up.
+	//
+	// The queue ends its run after ten refusals in a row, which is right -- ten
+	// is no longer a rate limit clearing on its own. What was missing is a way
+	// BACK that is not a process restart: on 2026-09-08 a rejected key killed
+	// the worker at 3,923 of 7,595, and fixing the key in the console would
+	// have restored breaks while leaving enrichment dead under a green light.
+	// Buffered by one, because the signal is "there is a new model", not a
+	// queue of them, and SetLLMConfig runs on an HTTP handler that must never
+	// park.
+	enrichWake chan struct{}
+
+	// enrichAlive is whether the worker is ACTUALLY between tracks, as opposed
+	// to whether the operator has asked for it.
+	//
+	// Measured on the box at 03:33 on 2026-09-08: /now.json said "done": 3923,
+	// "running": true, with a goroutine that had exited at 03:07. The flag it
+	// was reporting is the PAUSE TOGGLE below, which says what the operator
+	// asked for and nothing at all about whether it is happening.
+	enrichAlive atomic.Bool
+
+	// enrichGaveUp is why the worker stopped, empty while it is fine. Held as
+	// the reason rather than a boolean because "it gave up" sends an operator
+	// to a log and "it gave up: rejected the API key" does not.
+	enrichGaveUp atomic.Value
 
 	// enriching gates the background worker so an operator can hand the
 	// machine back for an evening without stopping the station.
@@ -492,6 +522,7 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 		// the whole design: the file an operator hands to a friend carries no
 		// accounts, no stations and no said lines.
 		srv.SetEnrichmentPort(enrich.NewPort(opts.Library.Store))
+		srv.SetLLM(a)
 		srv.SetPresence(a.tracker)
 	}
 
@@ -921,6 +952,56 @@ func dependencyHealth(inUse bool) string {
 	return "not configured"
 }
 
+// enrichmentRunning is whether the worker is ACTUALLY enriching -- asked for by
+// the operator AND alive. Either alone is a green light over a dead worker.
+func (a *App) enrichmentRunning() bool {
+	return a.enriching.Load() && a.enrichAlive.Load()
+}
+
+// enrichmentTrouble is why the worker stopped, or nothing if it did not.
+//
+// PAUSED IS NOT TROUBLE. An operator who paused it for the evening knows where
+// it went, and telling them it has stopped is the console shouting about a
+// thing they did on purpose.
+func (a *App) enrichmentTrouble() string {
+	if !a.enriching.Load() || a.enrichAlive.Load() {
+		return ""
+	}
+	why, _ := a.enrichGaveUp.Load().(string)
+	if why == "" {
+		return "enrichment gave up"
+	}
+	return "enrichment gave up: " + why
+}
+
+// DegradedAfter is how many refusals in a row make the model degraded.
+//
+// Two, not one: a single 429 clearing on its own should not flap the one status
+// readout this product has. Two in a row is a provider saying no.
+const DegradedAfter = 2
+
+// llmHealth is WHAT THE MODEL LAST DID, not whether one is wired.
+//
+// The old answer was dependencyHealth(hasDJ || enricher != nil), which is a
+// question about this program's own construction. On 2026-09-08 that reported
+// "ok" for fifty minutes while every single call was being rejected and the
+// station dropped nine consecutive breaks. The provider's own reason is carried
+// through because it said exactly what was wrong -- "rejected the API key" --
+// and an operator reading "degraded" alone would still have to find the log.
+func llmHealth(llm *enrich.Switchable, inUse bool) string {
+	if llm == nil {
+		return dependencyHealth(inUse)
+	}
+	h := llm.Health()
+	if !h.Configured {
+		return "not configured"
+	}
+	if h.Failures >= DegradedAfter {
+		return "degraded: " + h.Reason
+	}
+	return "ok"
+}
+
 // recordBreakOn remembers what the DJ last said ON ONE STATION, for /now.json
 // and for the thumbs-down that rates it.
 func (a *App) recordBreakOn(stationID int64, text string, placement mix.Placement) {
@@ -1014,7 +1095,7 @@ func (a *App) Status() server.Status {
 			// Reported by what is actually WIRED, not by what the spike used
 			// to do. These read "not used by the spike" long after both were
 			// in use, which is a status endpoint inventing an answer.
-			LLM: dependencyHealth(a.hasDJ() || a.opts.Enricher != nil),
+			LLM: llmHealth(a.opts.LLM, a.hasDJ() || a.opts.Enricher != nil),
 			TTS: dependencyHealth(a.hasDJ()),
 		},
 		Metrics: server.Metrics{
@@ -1254,13 +1335,33 @@ func (a *App) Run(ctx context.Context) error {
 	if a.opts.Enricher != nil {
 		a.enriching.Store(true)
 		a.opts.Enricher.Paused = a.enriching.Load
+		a.enrichWake = make(chan struct{}, 1)
 		go func() {
-			if err := a.opts.Enricher.Run(ctx); err != nil && ctx.Err() == nil {
-				// Not fatal, and deliberately not retried in a loop here: the
-				// worker already survives one bad track, and a failure that
-				// reaches this line means the model or the lock is wrong,
-				// which is an operator problem, not a stream problem.
-				a.log.Error("enrichment stopped", "err", err)
+			for {
+				a.enrichAlive.Store(true)
+				err := a.opts.Enricher.Run(ctx)
+				a.enrichAlive.Store(false)
+				if err != nil && ctx.Err() == nil {
+					// Still not retried on a timer: the worker survives one bad
+					// track on its own, and a failure that reaches this line
+					// means the model or the lock is wrong, which is an
+					// operator problem rather than a stream problem.
+					a.log.Error("enrichment stopped", "err", err)
+					a.enrichGaveUp.Store(err.Error())
+				}
+				if ctx.Err() != nil {
+					return
+				}
+				// WAIT FOR A NEW MODEL rather than ending. Giving up after ten
+				// refusals is right; needing a process restart to undo it is
+				// not. Fixing the key in the console is now the whole fix.
+				select {
+				case <-a.enrichWake:
+					a.enrichGaveUp.Store("")
+					a.log.Info("enrichment resuming on a new language model")
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
 	}
@@ -1998,8 +2099,29 @@ func (a *App) Overview() any {
 	out["adverts"] = countOf(ctx, db, `SELECT count(*) FROM ads`)
 	out["feedback"] = recentFeedback(ctx, db)
 	out["cadence"] = a.liveCadence()
-	out["enriching"] = a.enriching.Load()
+	out["enriching"] = a.enrichmentRunning()
+	if why := a.enrichmentTrouble(); why != "" {
+		out["enrichment_stopped"] = why
+	}
+	// WHAT THE MODEL LAST DID, on the page the operator opens first. On
+	// 2026-09-08 a rejected key was visible only in the container log, and this
+	// screen carried a dossier count that had silently stopped moving.
+	out["model"] = a.modelOverview()
 	return out
+}
+
+// modelOverview is the model's health and which provider it is, for the console.
+//
+// No key, and no part of one. The health string is the provider's own words for
+// the refusal, which names the endpoint and what it objected to.
+func (a *App) modelOverview() map[string]any {
+	m := map[string]any{
+		"health": llmHealth(a.opts.LLM, a.hasDJ() || a.opts.Enricher != nil),
+	}
+	if c, ok := a.LLMSettings(); ok {
+		m["provider"], m["model"] = c.Provider, c.Model
+	}
+	return m
 }
 
 // breakStats is how the DJ is doing, per station and in total.

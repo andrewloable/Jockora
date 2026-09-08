@@ -20,7 +20,7 @@ describe('routes', () => {
     expect(admin?.component).toBeUndefined();
   });
 
-  it('loads the console\'s own routes', async () => {
+  it("loads the console's own routes", async () => {
     // The lazy loader is CALLED, not just checked for: a loadChildren that
     // points at a module which no longer exports adminRoutes type-checks and
     // fails at the moment somebody opens the console.

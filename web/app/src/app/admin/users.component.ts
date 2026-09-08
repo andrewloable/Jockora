@@ -20,42 +20,54 @@ import { AdminApi, User } from '../api/api';
         </tr>
       </thead>
       <tbody>
-      @for (user of users(); track user.id) {
-        <tr [attr.data-row]="user.id">
-          @if (editing() === user.id) {
-            <td>
-              <input
-                data-edit-name
-                [value]="editName()"
-                (input)="editName.set(value($event))"
-              />
-            </td>
-            <td>
-              <select data-edit-role (change)="editRole.set(value($event))">
-                <option value="listener" [selected]="editRole() === 'listener'">listener</option>
-                <option value="admin" [selected]="editRole() === 'admin'">admin</option>
-              </select>
-            </td>
-          } @else {
-            <td>{{ user.name }}</td>
-            <td>{{ user.role }}</td>
-          }
-          <td>{{ user.disabled ? 'disabled' : 'active' }}</td>
-          <td>
+        @for (user of users(); track user.id) {
+          <tr [attr.data-row]="user.id">
             @if (editing() === user.id) {
-              <button type="button" data-save (click)="save(user)">Save</button>
-              <button type="button" data-cancel (click)="cancel()">Cancel</button>
+              <td>
+                <input data-edit-name [value]="editName()" (input)="editName.set(value($event))" />
+              </td>
+              <td>
+                <select data-edit-role (change)="editRole.set(value($event))">
+                  <option value="listener" [selected]="editRole() === 'listener'">listener</option>
+                  <option value="admin" [selected]="editRole() === 'admin'">admin</option>
+                </select>
+              </td>
             } @else {
-              <button type="button" data-edit (click)="startEdit(user)">Edit</button>
-              <button type="button" data-toggle (click)="toggle(user)">
-                {{ user.disabled ? 'Enable' : 'Disable' }}
-              </button>
-              <button type="button" data-reset (click)="reset(user)">Reset password</button>
-              <button type="button" data-remove (click)="remove(user)">Delete</button>
+              <td>{{ user.name }}</td>
+              <td>{{ user.role }}</td>
             }
-          </td>
-        </tr>
-      }
+            <td>{{ user.disabled ? 'disabled' : 'active' }}</td>
+            <td>
+              @if (editing() === user.id) {
+                <button type="button" data-save (click)="save(user)">Save</button>
+                <button type="button" data-cancel (click)="cancel()">Cancel</button>
+              } @else {
+                <button type="button" data-edit (click)="startEdit(user)">Edit</button>
+                <button type="button" data-toggle (click)="toggle(user)">
+                  {{ user.disabled ? 'Enable' : 'Disable' }}
+                </button>
+                <button type="button" data-reset (click)="reset(user)">Reset password</button>
+                <button type="button" data-remove data-danger (click)="remove(user)">Delete</button>
+              }
+            </td>
+          </tr>
+        } @empty {
+          <!-- LOADING AND EMPTY ARE NOT THE SAME THING and both drew a table
+               with no rows, so a slow first paint told a new operator their
+               library was empty. Jockora-e9a.50. -->
+          <tr>
+            <td colspan="5">
+              @if (!loaded()) {
+                <span data-loading>Loading…</span>
+              } @else if (!failed()) {
+                <span data-empty
+                  ><strong>Only your own account.</strong> Add an account below — there is no
+                  self-registration, so listeners cannot make their own.</span
+                >
+              }
+            </td>
+          </tr>
+        }
       </tbody>
     </table>
 
@@ -97,6 +109,24 @@ export class Users {
   private readonly api = inject(AdminApi);
 
   readonly users = signal<User[]>([]);
+  /**
+   * True once the first answer has arrived, success OR failure.
+   *
+   * Without it a table with no rows means two opposite things -- the request is
+   * still in flight, or there is genuinely nothing -- and both drew the same
+   * empty table. A new operator was told their library was empty and given
+   * nothing to do about it. Jockora-e9a.50.
+   */
+  readonly loaded = signal(false);
+  /**
+   * True when the last read FAILED, as opposed to returning nothing.
+   *
+   * Three states, not two: a table with no rows can be in flight, genuinely
+   * empty, or the wreckage of a request that did not come back. Without this
+   * the third one wore the second one's words and told an operator whose
+   * server was down that they had never scanned anything.
+   */
+  readonly failed = signal(false);
   readonly name = signal('');
   readonly password = signal('');
   readonly role = signal('listener');
@@ -118,8 +148,16 @@ export class Users {
 
   load(): void {
     this.api.users().subscribe({
-      next: (u) => this.users.set(u),
-      error: () => this.said.set('Could not read the accounts.'),
+      next: (u) => {
+        this.users.set(u);
+        this.loaded.set(true);
+        this.failed.set(false);
+      },
+      error: () => {
+        this.loaded.set(true);
+        this.failed.set(true);
+        this.said.set('Could not read the accounts.');
+      },
     });
   }
 
@@ -150,24 +188,29 @@ export class Users {
         this.editing.set(null);
         this.load();
       },
-      error: (e: { error?: string }) => this.said.set(String(e.error ?? 'Could not save that account.')),
+      error: (e: { error?: string }) =>
+        this.said.set(String(e.error ?? 'Could not save that account.')),
     });
   }
 
   add(): void {
     this.said.set('');
-    this.api.addUser({ name: this.name(), password: this.password(), role: this.role() }).subscribe({
-      next: () => {
-        // The password is never shown again and cannot be read back, so the
-        // operator has to hand it over now.
-        this.said.set(`Created ${this.name()}. Give them that password; it is not stored anywhere readable.`);
-        this.name.set('');
-        this.password.set('');
-        this.load();
-      },
-      error: (e: { error?: { error?: string } }) =>
-        this.said.set(String(e.error?.error ?? 'Could not create that account.')),
-    });
+    this.api
+      .addUser({ name: this.name(), password: this.password(), role: this.role() })
+      .subscribe({
+        next: () => {
+          // The password is never shown again and cannot be read back, so the
+          // operator has to hand it over now.
+          this.said.set(
+            `Created ${this.name()}. Give them that password; it is not stored anywhere readable.`,
+          );
+          this.name.set('');
+          this.password.set('');
+          this.load();
+        },
+        error: (e: { error?: { error?: string } }) =>
+          this.said.set(String(e.error?.error ?? 'Could not create that account.')),
+      });
   }
 
   toggle(user: User): void {
@@ -197,6 +240,11 @@ export class Users {
   }
 
   remove(user: User): void {
+    // ASKED. There is no self-service way back into an account: the server
+    // refuses to remove the last admin, but every other deletion is final.
+    if (!confirm(`Delete the account ${user.name}? They will not be able to sign in.`)) {
+      return;
+    }
     this.said.set('');
     this.api.removeUser(user.id).subscribe({
       next: () => this.load(),
