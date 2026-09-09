@@ -342,7 +342,14 @@ export class Overview implements OnDestroy {
 
   progress(): { done: number; total: number; pct: number; state: string; eta: string } | null {
     const lib = (this.overview()['library'] ?? {}) as Record<string, number>;
-    const total = lib['tracks'] ?? 0;
+    // THE PLAYABLE LIBRARY, which is the only thing enrichment ever walks --
+    // the same denominator loud() below has always used. Dividing by every row
+    // in the tracks table meant one unreadable file held the bar under 100 per
+    // cent for ever: the deployment reported "7,595 of 7,696 (98.7%)" with
+    // every playable track already enriched. Jockora-0gm.
+    // Falling back to tracks for a server too old to report playable: a
+    // slightly wrong denominator beats a blank panel.
+    const total = lib['playable'] || lib['tracks'] || 0;
     if (!total) {
       return null;
     }
@@ -350,13 +357,18 @@ export class Overview implements OnDestroy {
     const cost = (this.overview()['enrichment_cost'] ?? {}) as Record<string, number>;
     const perTrack = cost['seconds_per_track'] ?? 0;
     const running = this.overview()['enriching'] === true;
+    const left = total - done;
 
     return {
       done,
       total,
       pct: Math.round((done / total) * 1000) / 10,
-      state: running ? 'running' : 'paused',
-      eta: this.eta(total - done, perTrack, running),
+      // COMPLETE OUTRANKS THE TOGGLE. "paused" is the operator's own switch, so
+      // it reads as "somebody stopped this" -- and an operator who sees it
+      // beside a full bar goes looking for something to restart. A pass with no
+      // work left is finished, whichever way the switch is set.
+      state: left <= 0 ? 'complete' : running ? 'running' : 'paused',
+      eta: this.eta(left, perTrack, running),
     };
   }
 

@@ -713,4 +713,66 @@ describe('Overview', () => {
     input.dispatchEvent(new Event('change'));
     ctrl.expectNone('/admin/enrichment/import');
   });
+
+  // -------------------------------------------------------- Jockora-0gm --
+  //
+  // Reported from the deployment: "Dossiers 7,595 of 7,696 (98.7%) - paused".
+  // Read from the box: 7696 tracks, 101 of them playable = 0, 7595 dossiers,
+  // and ZERO playable tracks without one. Enrichment was COMPLETE. The bar
+  // divided by every track in the table while enrichment only ever walks the
+  // playable ones, so it could never reach 100 percent -- and the loudness bar
+  // directly beneath it already used the right denominator.
+
+  it('enrichment progress counts against the playable library, not every file', () => {
+    // The deployment's own numbers.
+    const fixture = mounted({
+      library: { tracks: 7696, playable: 7595, enriched: 7595, loudness_measured: 7595 },
+      enriching: true,
+    });
+    const line = fixture.nativeElement.querySelector('[data-enrich-line]').textContent;
+    expect(line).toContain('7,595 of 7,595');
+    expect(line).toContain('100%');
+    expect(line).not.toContain('7,696');
+
+    // And the two bars on this screen agree, which is the whole defect: they
+    // were reading different denominators out of the same payload.
+    const loud = fixture.nativeElement.querySelector('[data-loudness-line]').textContent;
+    expect(loud).toContain('7,595 of 7,595');
+  });
+
+  it('enrichment progress says complete rather than paused when nothing is left', () => {
+    const fixture = mounted({
+      library: { tracks: 7696, playable: 7595, enriched: 7595 },
+      enriching: false,
+    });
+    const line = fixture.nativeElement.querySelector('[data-enrich-line]').textContent;
+    // "paused" is the operator's own toggle, so it implies somebody stopped it.
+    // A pass with no work left is finished, and an operator who reads paused
+    // beside a full bar goes looking for something to restart.
+    expect(line).toContain('complete');
+    expect(line).not.toContain('paused');
+    expect(fixture.nativeElement.querySelector('[data-enrich-eta]').textContent).toContain(
+      'Every track has a dossier',
+    );
+  });
+
+  it('enrichment progress still says paused while work remains', () => {
+    // The toggle still means what it meant: this is the case it exists for.
+    const fixture = mounted({
+      library: { tracks: 7696, playable: 7595, enriched: 400 },
+      enriching: false,
+    });
+    const line = fixture.nativeElement.querySelector('[data-enrich-line]').textContent;
+    expect(line).toContain('paused');
+    expect(line).not.toContain('complete');
+  });
+
+  it('enrichment progress falls back to the track count when playable is absent', () => {
+    // An older server, or one that has not learned to report it. Better a
+    // slightly wrong denominator than a division by zero and a blank panel.
+    const fixture = mounted({ library: { tracks: 500, enriched: 250 }, enriching: true });
+    expect(fixture.nativeElement.querySelector('[data-enrich-line]').textContent).toContain(
+      '250 of 500',
+    );
+  });
 });

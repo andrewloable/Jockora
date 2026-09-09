@@ -381,6 +381,15 @@ button[type='submit']:hover:not(:disabled) {
   border-color: color-mix(in oklab, var(--ember) 88%, var(--ink));
 }
 
+/* A SLIDER IS NOT AN ENTRY BOX EITHER, and this rule had to learn it twice.
+ * Jockora-b7q, reported as "i cannot make the volume 100%": the volume WAS
+ * 100% -- value 1, valueAsNumber 1, the audio element at 1 -- and the control
+ * said otherwise, because 12px of horizontal padding from the rule below inset
+ * the native track inside its own 128px box, leaving unfilled track to the
+ * right of the thumb at maximum. A control that lies about its state is worse
+ * than one that does not work: the listener drags it, sees track left over,
+ * and reports the app as broken. */
+
 /* A CHECKBOX IS NOT AN ENTRY BOX. Sizing every input as one gave each option
  * in the vocabulary a 44px-tall box whose WIDTH depended on the length of its
  * own label -- rock 128px, alternative 88px, metal 120px -- because the box
@@ -389,7 +398,7 @@ button[type='submit']:hover:not(:disabled) {
  *
  * The fieldset rule below learned this and this one did not, which is the same
  * fix applied to one of two places. */
-input:not([type='checkbox']):not([type='radio']),
+input:not([type='checkbox']):not([type='radio']):not([type='range']),
 select {
   min-height: 44px;
   padding: var(--s2) var(--s3);
@@ -423,13 +432,13 @@ input::placeholder {
  * ring and a border colour are an ENTRY BOX's focus, and outline:none on a
  * checkbox would take its native one away. The :focus-visible rule below is
  * what keyboard users get either way. */
-input:not([type='checkbox']):not([type='radio']):hover,
+input:not([type='checkbox']):not([type='radio']):not([type='range']):hover,
 select:hover,
 textarea:hover {
   border-color: color-mix(in oklab, var(--ember) 40%, var(--line));
 }
 
-input:not([type='checkbox']):not([type='radio']):focus,
+input:not([type='checkbox']):not([type='radio']):not([type='range']):focus,
 select:focus,
 textarea:focus {
   outline: none;
@@ -467,13 +476,25 @@ button[data-danger]:hover:not(:disabled) {
   border-radius: var(--r-control);
 }
 
-label {
+label,
+[data-field] {
   display: block;
   margin-bottom: var(--s3);
   font-size: var(--t-sm);
   font-weight: 550;
   color: var(--ink-dim);
 }
+
+/* [data-field] IS A LABEL THAT LABELS NOTHING.
+ *
+ * A bare button in a form row has no label header above it, so under the
+ * fieldset's bottom alignment it sat lower than the controls it belongs beside.
+ * The alternatives were a magic top offset that breaks the moment the label
+ * typography changes, or wrapping the button in a real label -- which is
+ * invalid, because a button is itself labelable.
+ *
+ * So it gets a box the same SHAPE as a label: heading, control, description.
+ * Nothing to compute and nothing to keep in sync. */
 
 /* A visible label above the field, never a placeholder standing in for one.
  *
@@ -483,7 +504,8 @@ label {
  * Jockora-e9a.55 for Ads and Jockora-e9a.53 for Stations. */
 label input,
 label select,
-label textarea {
+label textarea,
+[data-field] > button {
   display: block;
   width: 100%;
   margin-top: var(--s1);
@@ -581,7 +603,7 @@ fieldset fieldset {
   margin: var(--s3) 0;
 }
 
-fieldset input:not([type='checkbox']):not([type='radio']),
+fieldset input:not([type='checkbox']):not([type='radio']):not([type='range']),
 fieldset select,
 fieldset textarea {
   flex: 1 1 12rem;

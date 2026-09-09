@@ -86,7 +86,8 @@ The Dockerfile builds the Angular app and the Go binary itself, so no local
 ### 3.1 Back up before any migration, and know which one you are on
 
 v0.2 carried **migrations 10, 11 and 12** — station brief and range columns, ad
-brand/brief/delivery, and the `log_records` table. Migrations are forward-only:
+brand/brief/delivery, and the `log_records` table. The console round that
+followed carried **migration 13**, `ads.enabled`. Migrations are forward-only:
 there is no down-migration in this codebase and there is not meant to be.
 
 Name the backup after the migration you are about to cross, not after the date
@@ -94,6 +95,13 @@ alone, so the next person can tell what it is a backup *of*:
 
 ```
 jockora.db.pre-migration-12-20260908
+```
+
+The backups on the box, newest last:
+
+```
+jockora.db.pre-migration-12-20260908    4964352
+jockora.db.pre-migration-13-20260908    5619712
 ```
 
 ### 3.2 A backup taken while the container runs is not a backup
@@ -286,6 +294,61 @@ When it does not, breaks are landing off the transition — that is precisely ho
 `Jockora-8om` was found, and `buffered_s` was added to that line so the missing
 term is visible without a debugger.
 
+### What the second 2026-09-08 deploy verified (migration 13)
+
+The console round: eight UI defects, the durable-log startup fix, and
+`ads.enabled`.
+
+```
+schema_version                                        13
+ads.enabled                                           present    (migration 13)
+adverts back-filled to enabled=1                      2 of 2, none left NULL or 0
+log_records                                           1  <- see below
+dossiers                                    5145 -> 5150 over 70s
+enrich_lock heartbeat age                             13 s, then 40 s
+ERROR lines                                           0
+WARN lines other than the expected LAN one            none
+restarts                                              0
+image                                       sha256:db939163305f
+console bundle served                       styles-XVNTMTJK.css, 18790 bytes,
+                                            carrying the textarea, ember-accent,
+                                            inline-field and card rules
+app boots in a real browser                 title, app-root populated, login
+                                            form with labelled fields, no JS errors
+```
+
+**`log_records` is 1, and that is the whole point.** After the FIRST v0.2 deploy
+this table was empty, which is what `Jockora-69n.9` was filed for: `persistLogs`
+started inside `App.Run`, so every WARN from `app.New` reached stderr and the
+ring and never the table. The row now present is exactly the one that used to be
+lost:
+
+```
+WARN | SERVING WITHOUT AUTHENTICATION ON A NON-LOOPBACK ADDRESS
+```
+
+That is the symptom from the issue, reproduced and closed on the box rather than
+only in a test.
+
+**The back-fill is the migration's real risk and it was checked directly.**
+`enabled INTEGER NOT NULL DEFAULT 1` has to leave every advert that predates the
+column on air; a nullable flag read as false would take a working rotation off
+the air on upgrade. Both existing adverts read `1`, and the count of rows left
+NULL or 0 is zero.
+
+### The heartbeat-age criterion above is calibrated to a LOCAL model
+
+§4 asks for a lock heartbeat in single-digit seconds. That number comes from the
+local llama-server era, when enrichment ran about eight tracks a minute. This
+deployment runs **Cloudflare Workers AI**, and one dossier takes roughly
+thirty-five seconds, so the heartbeat is written once per track and its age
+sweeps from zero to about that.
+
+Measured here: 13 s, then 40 s, while dossiers moved 5145 → 5150. That is
+healthy. **Read the heartbeat against the dossier count, not against a fixed
+number** — a stalled worker is one where the count does not move, whatever the
+heartbeat says.
+
 ### What the 2026-09-08 v0.2 deploy verified
 
 ```
@@ -305,12 +368,12 @@ ERROR lines                                           0
 
 ## 5. Known gaps, filed rather than fixed here
 
-- **Startup warnings are never persisted.** `persistLogs` starts inside
-  `App.Run`, so every WARN emitted during `app.New` — migrations, seeding, the
-  non-loopback warning — reaches stderr and the ring but never `log_records`.
-  The durable log exists for the crash-loop case, and a crash loop is mostly
-  startup, so this is the window it covers least. `log_records` was empty after
-  a clean deploy for exactly this reason.
+- ~~**Startup warnings are never persisted.**~~ **FIXED** in the migration-13
+  deploy, `Jockora-69n.9`. `Sink.Persist` now drains what the ring already holds
+  at or above `PersistLevel` before it starts taking new records, under the same
+  lock the fan-out uses so nothing is written twice. Proven on the box:
+  `log_records` holds the non-loopback warning after a clean deploy, where it
+  was empty before.
 
 - **`deploy/gsc-datacenter.yml` disagrees with the box** in three ways (§1).
   Either reconcile it or mark it clearly as not-the-deployment.

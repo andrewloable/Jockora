@@ -53,6 +53,13 @@ export interface Station {
   tempo_max?: number;
   duration_min_s?: number;
   duration_max_s?: number;
+  /**
+   * How many people are on it right now.
+   *
+   * NOT optional: zero is the interesting value, and a count that can be
+   * undefined is a count the console has to guess at.
+   */
+  listeners: number;
 }
 
 export interface Jock {

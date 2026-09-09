@@ -15,6 +15,10 @@ import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api'
           <th>Name</th>
           <th>Genre &middot; mood</th>
           <th>Tracks</th>
+          <!-- THE ONE NUMBER THAT SAYS WHETHER A STATION IS DOING ANYTHING. A
+               station streams only while it has a listener, so this is also
+               the answer to "is it running". Jockora-cr7. -->
+          <th>Listeners</th>
           <th>Jock</th>
           <th>Actions</th>
         </tr>
@@ -22,7 +26,17 @@ import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api'
       <tbody>
         @for (station of stations(); track station.id) {
           <tr>
-            <td data-label="Name">{{ station.name }}</td>
+            <td data-label="Name">
+              {{ station.name }}
+              <!-- A MARKER, NOT A COLUMN. On the dial is the ordinary state, so
+                   a column would say nothing on most rows and cost width on all
+                   of them -- the reason Jockora-e9a.53 took one out of this
+                   very table. Off the dial is the exceptional state and the
+                   only one worth drawing. Jockora-yv7. -->
+              @if (!station.enabled) {
+                <small data-off-air>off the dial</small>
+              }
+            </td>
             <td data-label="Genre · mood">{{ describe(station) }}</td>
             <!-- THE WARNING SITS ON THE NUMBER IT IS DERIVED FROM. It used to
                  have a column of its own, which was empty in every screenshot
@@ -35,6 +49,7 @@ import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api'
                 <small data-warning>{{ station.warning }}</small>
               }
             </td>
+            <td data-label="Listeners" data-listeners>{{ station.listeners }}</td>
             <td data-label="Jock">{{ jockName(station) }}</td>
             <!-- LABELLED like the rest: below 48rem the row becomes a card, and
                Edit, Disable, Delete and Playlist were all drawn past the right
@@ -57,7 +72,7 @@ import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api'
                with no rows, so a slow first paint told a new operator their
                library was empty. Jockora-e9a.50. -->
           <tr>
-            <td colspan="5">
+            <td colspan="6">
               @if (!loaded()) {
                 <span data-loading>Loading…</span>
               } @else if (!failed()) {
@@ -105,14 +120,18 @@ import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api'
             (input)="editBrief.set($any($event.target).value)"
           ></textarea>
         </label>
-        <button
-          type="button"
-          data-edit-describe
-          [disabled]="editDescribing() || !editBrief().trim()"
-          (click)="describeEdit()"
-        >
-          {{ editDescribing() ? 'Describing…' : 'Describe it' }}
-        </button>
+        <!-- The same field box as the add form's, for the same reason. -->
+        <div data-field>
+          Derive it
+          <button
+            type="button"
+            data-edit-describe
+            [disabled]="editDescribing() || !editBrief().trim()"
+            (click)="describeEdit()"
+          >
+            {{ editDescribing() ? 'Describing…' : 'Describe it' }}
+          </button>
+        </div>
 
         <label>
           From year
@@ -256,17 +275,28 @@ import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api'
           (input)="brief.set($any($event.target).value)"
         ></textarea>
       </label>
-      <!-- DISABLED WHILE BLANK AND WHILE WORKING, and it says which. A live
+      <!-- THE SAME SHAPE AS A FIELD, so it lines up with the boxes beside it
+           rather than sitting low and tall against them. A bare button has no
+           label header and the fieldset aligns on the bottom of each box; this
+           is the Jockora-lph fix, applied to the form it was missed on.
+           NO DESCRIPTION, deliberately: every field on this row is bare, and a
+           box carrying one is taller, which under bottom alignment makes it
+           ride ABOVE its neighbours -- the very defect this is fixing. A row is
+           uniform or it is misaligned.
+           DISABLED WHILE BLANK AND WHILE WORKING, and it says which: a live
            model call takes seconds, and an unlabelled button that does nothing
            reads as broken. -->
-      <button
-        type="button"
-        data-describe
-        [disabled]="describing() || !brief().trim()"
-        (click)="describeStation()"
-      >
-        {{ describing() ? 'Describing…' : 'Describe it' }}
-      </button>
+      <div data-field>
+        Derive it
+        <button
+          type="button"
+          data-describe
+          [disabled]="describing() || !brief().trim()"
+          (click)="describeStation()"
+        >
+          {{ describing() ? 'Describing…' : 'Describe it' }}
+        </button>
+      </div>
       @if (derived(); as d) {
         <small data-derived
           >{{ d.tracks }} tracks match. Change anything below before saving.</small
@@ -801,7 +831,15 @@ export class Stations {
           // The TRACK COUNT, immediately: the operator sees a number rather
           // than a promise, and finds out at once if the filter selects
           // nothing.
-          this.said.set(`Added with ${made.tracks} tracks.` + this.moodHint(made.tracks));
+          // AND THE STEP NOBODY WAS TOLD ABOUT. A station is created off the
+          // dial on purpose, so the operator can see its track count before
+          // listeners can hear it -- but the console used to report only the
+          // count, and an operator who had done exactly what the design wanted
+          // was left wondering why their station never appeared. Jockora-yv7.
+          this.said.set(
+            `Added with ${made.tracks} tracks. It is off the dial until you press Enable.` +
+              this.moodHint(made.tracks),
+          );
           this.name.set('');
           this.brief.set('');
           this.yearMin.set(0);

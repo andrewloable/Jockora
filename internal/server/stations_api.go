@@ -33,9 +33,13 @@ type Stations interface {
 }
 
 // Runtimes is the part of the station manager this API needs: taking a station
-// off air when it is deleted or switched off.
+// off air when it is deleted or switched off, and saying who is on it.
 type Runtimes interface {
 	Stop(id int64) error
+	// Listeners is how many people are on this station right now. The SAME
+	// source the listener-facing dial reads, so the two can never disagree
+	// about whether a station is busy. Jockora-cr7.
+	Listeners(id int64) int
 }
 
 // Regenerator materialises a station's playlist.
@@ -119,6 +123,10 @@ type stationView struct {
 	Moods   []string `json:"moods"`
 	JockID  string   `json:"jock_id,omitempty"`
 	Enabled bool     `json:"enabled"`
+	// Listeners is how many people are on it now. NOT omitempty: zero is the
+	// interesting value here, and a count that vanishes when it is nought is a
+	// count the console has to guess at.
+	Listeners int `json:"listeners"`
 	Tracks  int      `json:"tracks"`
 	// What the operator asked for, and the bounds it became.
 	Brief   string `json:"brief,omitempty"`
@@ -232,6 +240,15 @@ func (s *Server) listStations(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, out)
 }
 
+// listeners is the live count, or zero where there is no station manager to
+// ask -- the spike path has no presence tracker at all.
+func (s *Server) listeners(id int64) int {
+	if s.runtimes == nil {
+		return 0
+	}
+	return s.runtimes.Listeners(id)
+}
+
 func (s *Server) viewOfStation(ctx context.Context, st store.Station) (stationView, error) {
 	ids, err := s.stations.StationTrackIDs(ctx, st.ID)
 	if err != nil {
@@ -240,6 +257,7 @@ func (s *Server) viewOfStation(ctx context.Context, st store.Station) (stationVi
 	view := stationView{ID: st.ID, Name: st.Name, Genre: st.Genre, Mood: st.Mood,
 		Genres: station.SplitList(st.Genre), Moods: station.SplitList(st.Mood),
 		JockID: st.JockID, Enabled: st.Enabled, Tracks: len(ids),
+		Listeners: s.listeners(st.ID),
 		Brief: st.Brief, YearMin: st.YearMin, YearMax: st.YearMax,
 		TempoMin: st.TempoMin, TempoMax: st.TempoMax,
 		DurationMinS: st.DurationMinS, DurationMaxS: st.DurationMaxS}
@@ -588,6 +606,62 @@ func (s *Server) SetStationBriefs(b StationBriefs) { s.briefs = b }
 
 // deriveStation is the PREVIEW. Nothing is saved: an operator pressing it twice
 // must not end up with two stations.
+// whatEmptied names the one bound that, dropped, brings tracks back.
+//
+// FIVE COUNTS, and only when the answer was zero: on a preview that found music
+// there is no question to answer, and five extra queries per keystroke would be
+// five too many.
+//
+// The BEST single change is reported rather than the first that works, because
+// several may work and naming an arbitrary one sends the operator to the wrong
+// place -- which is the whole reason this exists.
+func (s *Server) whatEmptied(ctx context.Context, f station.Filter) string {
+	type candidate struct {
+		name  string
+		drop  func(station.Filter) station.Filter
+		apply bool
+	}
+	candidates := []candidate{
+		{fmt.Sprintf("the years %d to %d", f.YearMin, f.YearMax),
+			func(c station.Filter) station.Filter { c.YearMin, c.YearMax = 0, 0; return c },
+			f.YearMin != 0 || f.YearMax != 0},
+		{"the tempo range",
+			func(c station.Filter) station.Filter { c.TempoMin, c.TempoMax = 0, 0; return c },
+			f.TempoMin != 0 || f.TempoMax != 0},
+		{"the track length range",
+			func(c station.Filter) station.Filter {
+				c.DurationMinS, c.DurationMaxS = 0, 0
+				return c
+			},
+			f.DurationMinS != 0 || f.DurationMaxS != 0},
+		{"the moods",
+			func(c station.Filter) station.Filter { c.Moods = nil; return c },
+			len(f.Moods) > 0},
+		{"the genres",
+			func(c station.Filter) station.Filter { c.Genres = nil; return c },
+			len(f.Genres) > 0},
+	}
+
+	bestName, bestCount := "", 0
+	for _, c := range candidates {
+		if !c.apply {
+			continue
+		}
+		got, err := s.briefs.CountMatching(ctx, c.drop(f))
+		if err != nil {
+			// A diagnosis is a courtesy. Losing it must not lose the preview.
+			return ""
+		}
+		if got > bestCount {
+			bestName, bestCount = c.name, got
+		}
+	}
+	if bestName == "" {
+		return "no single change fixes it -- together these parameters select nothing"
+	}
+	return fmt.Sprintf("%s exclude the rest; without that, %d tracks match", bestName, bestCount)
+}
+
 func (s *Server) deriveStation(w http.ResponseWriter, r *http.Request) {
 	if s.briefs == nil {
 		s.writeJSON(w, http.StatusServiceUnavailable,
@@ -655,12 +729,13 @@ func (s *Server) deriveStation(w http.ResponseWriter, r *http.Request) {
 	// EVERY PARAMETER, or the count is for a station the operator will not get.
 	// A preview showing a tempo range beside a number computed without it is
 	// worse than showing no number at all.
-	n, err := s.briefs.CountMatching(r.Context(), station.Filter{
+	filter := station.Filter{
 		Genres: params.Genres, Moods: params.Moods,
 		YearMin: params.YearMin, YearMax: params.YearMax,
 		TempoMin: params.TempoMin, TempoMax: params.TempoMax,
 		DurationMinS: params.DurationMinS, DurationMaxS: params.DurationMaxS,
-	})
+	}
+	n, err := s.briefs.CountMatching(r.Context(), filter)
 	if err != nil {
 		s.writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -676,6 +751,16 @@ func (s *Server) deriveStation(w http.ResponseWriter, r *http.Request) {
 		warning = "too few tracks to run"
 	} else if warn {
 		warning = "fewer tracks than most stations"
+	}
+	// AND WHICH PARAMETER DID IT, when the answer is none. Six parameters and a
+	// zero is a puzzle, and the console's only guess used to be the mood --
+	// which on the reported deployment was innocent: every bpm there is NULL so
+	// the tempo excluded nothing, and the years were the cause. Naming the wrong
+	// suspect confidently is worse than naming none. Jockora-2fn.
+	if n == 0 {
+		if why := s.whatEmptied(r.Context(), filter); why != "" {
+			warning += "; " + why
+		}
 	}
 
 	s.writeJSON(w, http.StatusOK, map[string]any{

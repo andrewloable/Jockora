@@ -465,6 +465,14 @@ func TestStationParamsTempoClamps(t *testing.T) {
 		{"an inverted pair is swapped", 180, 150, 150, 180},
 		{"a negative is clamped", -20, 150, SlowestBPM, 150},
 		{"only a floor", 150, 0, 150, 0},
+		// Jockora-csr, reported from the deployment: a brief reading
+		// "Late-night driving music, mostly 80s, nothing cheerful" derived
+		// Slowest 193 and Fastest 193. That is a POINT, not a range, and bpm
+		// is a float measurement -- so no track can ever satisfy it and the
+		// station is empty for a reason nothing on screen explains. No bound
+		// is honest; a bound nothing can meet is not.
+		{"a range of one value is not a range", 193, 193, 0, 0},
+		{"and neither is one at the floor", SlowestBPM, SlowestBPM, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			min, max := clampTempo(tc.inMin, tc.inMax)
@@ -488,6 +496,9 @@ func TestStationParamsLengthClamps(t *testing.T) {
 		{"longer than an album side is pulled in", 600, 99999, 600, LongestTrackS},
 		{"an inverted pair is swapped", 600, 300, 300, 600},
 		{"only a ceiling", 0, 240, 0, 240},
+		// The same rule, because they share clampRange. A duration is a float
+		// too, so "exactly 240 seconds" selects nothing. Jockora-csr.
+		{"a range of one value is not a range", 240, 240, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			min, max := clampLength(tc.inMin, tc.inMax)

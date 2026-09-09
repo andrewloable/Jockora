@@ -29,6 +29,10 @@ import (
 // existed since the spine and had no callers at all.
 type Analyser struct {
 	Store *store.Store
+	// tempoMeasured and tempoFailed are reported when the pass finishes, so a
+	// tempo path that is wholly broken says so instead of being silent.
+	tempoMeasured int
+	tempoFailed   int
 	// BPM is optional. Without it loudness is still measured, because loudness
 	// is the audible half and tempo only reorders a queue.
 	BPM BPMSource
@@ -67,6 +71,7 @@ func (a *Analyser) Run(ctx context.Context) error {
 		if errors.Is(err, errNothingToAnalyse) {
 			if measured > 0 {
 				a.log().Info("analysis complete", "tracks", measured,
+					"tempo_measured", a.tempoMeasured, "tempo_failed", a.tempoFailed,
 					"elapsed", time.Since(started).Round(time.Second))
 			}
 			return nil
@@ -83,7 +88,14 @@ func (a *Analyser) Run(ctx context.Context) error {
 	}
 }
 
-// next picks the next playable track with no loudness yet, PLAYLIST FIRST.
+// next picks the next playable track missing EITHER measurement, PLAYLIST FIRST.
+//
+// EITHER, not loudness alone. The two are measured together but only loudness
+// used to decide whether a track was picked up, so a library measured by a
+// binary that had no BPM source ended up fully levelled, entirely unmeasured
+// for tempo, and invisible to this query for ever after. Read from the
+// deployment: 7595 playable tracks, 7595 with loudness, ZERO with a tempo, and
+// nothing left for the pass to select. Jockora-ffh.
 //
 // Loudness is what stops one record landing 12 dB louder than the last, and an
 // unmeasured track plays at its own level by design -- so until a track is
@@ -100,7 +112,7 @@ func (a *Analyser) next(ctx context.Context) (string, error) {
 	var path string
 	err := a.Store.DB().QueryRowContext(ctx, `
 		SELECT t.path FROM tracks t
-		 WHERE t.playable = 1 AND t.loudness_lufs IS NULL
+		 WHERE t.playable = 1 AND (t.loudness_lufs IS NULL OR t.bpm IS NULL)
 		 ORDER BY
 		   CASE WHEN EXISTS (
 		     SELECT 1 FROM station_tracks st
@@ -124,6 +136,17 @@ func (a *Analyser) next(ctx context.Context) (string, error) {
 // when the value is poor, because a row that stays NULL is picked again on the
 // next pass and the analyser would loop on the same broken file for ever.
 func (a *Analyser) analyseOne(ctx context.Context, path string) {
+	// LOUDNESS IS A FULL DECODE. Now that a missing tempo is also a reason to
+	// select a track, most of a backfill is tracks that already have their
+	// loudness -- and re-measuring 7595 files for a number already on the row
+	// would turn a tempo backfill into a two-day job. Worse, it would overwrite
+	// a real measurement with the zero a failure stores, for a file that has
+	// since gone missing.
+	if a.hasLoudness(ctx, path) {
+		a.measureTempo(ctx, path)
+		return
+	}
+
 	m, err := Measure(ctx, path)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -142,18 +165,54 @@ func (a *Analyser) analyseOne(ctx context.Context, path string) {
 		return
 	}
 
+	a.measureTempo(ctx, path)
+}
+
+// measureTempo stores a tempo, or a zero saying it was tried.
+//
+// A ZERO ON FAILURE, for the same reason loudness stores one: the row stops
+// being NULL, so next() does not hand the same unmeasurable file back for ever
+// now that a missing tempo is a reason to select a track. Zero reads as
+// "no tempo" everywhere downstream -- the console renders it blank and the
+// station filter never excludes on it.
+//
+// THE FAILURE IS COUNTED. It used to be a bare return with no log at any level,
+// so 7595 consecutive failures produced no evidence at all and "why is the
+// tempo blank" could not be answered from the logs. No tempo is still a valid
+// answer for one track; it is not a valid answer for a whole library, and the
+// difference has to be visible.
+func (a *Analyser) measureTempo(ctx context.Context, path string) {
 	if a.BPM == nil {
 		return
 	}
 	bpm, err := a.BPM.BPM(ctx, path)
 	if err != nil {
-		// No tempo is a valid answer. The selector widens its window until
-		// something fits, so an unmeasured track is still playable.
+		if ctx.Err() != nil {
+			return
+		}
+		a.tempoFailed++
+		a.log().Debug("no tempo for this track", "path", path, "err", err)
+		if err := StoreBPM(ctx, a.Store, path, 0); err != nil {
+			a.log().Warn("could not record the tempo failure", "path", path, "err", err)
+		}
 		return
 	}
+	a.tempoMeasured++
 	if err := StoreBPM(ctx, a.Store, path, bpm); err != nil {
 		a.log().Warn("storing bpm", "path", path, "err", err)
 	}
+}
+
+// hasLoudness reports whether this track has already been levelled.
+//
+// An unreadable row counts as NOT measured: measuring twice costs time, and
+// skipping a measurement that never happened costs the loudness contract.
+func (a *Analyser) hasLoudness(ctx context.Context, path string) bool {
+	var n int
+	err := a.Store.DB().QueryRowContext(ctx,
+		`SELECT count(*) FROM tracks WHERE path = ? AND loudness_lufs IS NOT NULL`,
+		path).Scan(&n)
+	return err == nil && n > 0
 }
 
 // StoreBPM records a track's tempo.

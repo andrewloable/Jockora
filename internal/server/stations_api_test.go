@@ -24,12 +24,16 @@ import (
 type stopLog struct {
 	stopped []int64
 	err     error
+	// listeners is what the presence tracker would report, per station.
+	listeners map[int64]int
 }
 
 func (l *stopLog) Stop(id int64) error {
 	l.stopped = append(l.stopped, id)
 	return l.err
 }
+
+func (l *stopLog) Listeners(id int64) int { return l.listeners[id] }
 
 // stationsServer is an admin server over a library with `rock` tracks.
 func stationsServer(t *testing.T, rock, jazz int) (*Server, *store.Store, *stopLog) {
@@ -958,4 +962,77 @@ func TestStationsAPIRangesBadRangeNamesItsField(t *testing.T) {
 	if e.Field != "year_min" {
 		t.Errorf("an inverted year named %q", e.Field)
 	}
+}
+
+// ------------------------------------------------------------ Jockora-cr7 --
+//
+// The console could say how many TRACKS a station has and whether it is
+// enabled, but not the one number that says whether it is doing anything: how
+// many people are on it. A station streams only while it has a listener, so the
+// count is also the answer to "is this station running".
+
+func TestStationsAPIListShowsListeners(t *testing.T) {
+	s, st, stops := stationsServer(t, 12, 0)
+	admin := adminCookie(t, s)
+	ctx := context.Background()
+
+	quiet, err := st.CreateStation(ctx, store.Station{Name: "QUIET", Genre: "rock", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	busy, err := st.CreateStation(ctx, store.Station{Name: "BUSY", Genre: "rock", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stops.listeners = map[int64]int{busy: 3}
+
+	views := stationViews(t, s, admin)
+	got := map[string]int{}
+	for _, v := range views {
+		got[v.Name] = v.Listeners
+	}
+	if got["BUSY"] != 3 {
+		t.Errorf("BUSY has %d listeners, want 3", got["BUSY"])
+	}
+	// ZERO IS A NUMBER, not an absence: a station nobody is on has to read as
+	// nobody rather than as unknown.
+	if got["QUIET"] != 0 {
+		t.Errorf("QUIET has %d listeners, want 0", got["QUIET"])
+	}
+	_ = quiet
+}
+
+// TestStationsAPIListWithoutARuntimeManager: the spike path has no presence
+// tracker at all, and the list must still serve rather than panic on a nil.
+func TestStationsAPIListWithoutARuntimeManager(t *testing.T) {
+	s, st, _ := stationsServer(t, 12, 0)
+	admin := adminCookie(t, s)
+	if _, err := st.CreateStation(context.Background(),
+		store.Station{Name: "ROCK", Genre: "rock", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	// Re-wired with no Runtimes, the way a deployment with no station manager is.
+	s.SetStations(st, func(ctx context.Context, id int64) (station.Diff, error) {
+		return station.Regenerate(ctx, st, id)
+	}, nil)
+
+	for _, v := range stationViews(t, s, admin) {
+		if v.Listeners != 0 {
+			t.Errorf("%s reports %d listeners with no tracker", v.Name, v.Listeners)
+		}
+	}
+}
+
+// stationViews reads the console's own view of the station list.
+func stationViews(t *testing.T, s *Server, admin *http.Cookie) []stationView {
+	t.Helper()
+	rec := as(t, s, http.MethodGet, "/admin/stations", "", admin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list = %d: %s", rec.Code, rec.Body)
+	}
+	var out []stationView
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("list body: %v", err)
+	}
+	return out
 }

@@ -73,8 +73,12 @@ func TestAnalyseOrderStillReachesTheRestOfTheLibrary(t *testing.T) {
 		`INSERT INTO station_tracks (station_id, track_id) VALUES (1, 2)`); err != nil {
 		t.Fatal(err)
 	}
+	// BOTH HALVES. Jockora-ffh made a missing TEMPO a reason to select a track
+	// too, so loudness alone no longer means "measured" -- and this fixture was
+	// still writing the old definition, which left the playlist track queued
+	// and prioritised.
 	if _, err := db.ExecContext(ctx,
-		`UPDATE tracks SET loudness_lufs = -14 WHERE id = 2`); err != nil {
+		`UPDATE tracks SET loudness_lufs = -14, bpm = 120 WHERE id = 2`); err != nil {
 		t.Fatal(err)
 	}
 

@@ -30,6 +30,7 @@ type fakeBriefs struct {
 	block    bool
 	got      string
 	calls    atomic.Int64
+	countFor func(station.Filter) int
 }
 
 func (f *fakeBriefs) ResolveStationBrief(ctx context.Context, brief string) (enrich.StationParams, error) {
@@ -44,7 +45,12 @@ func (f *fakeBriefs) ResolveStationBrief(ctx context.Context, brief string) (enr
 	return f.params, f.err
 }
 
-func (f *fakeBriefs) CountMatching(context.Context, station.Filter) (int, error) {
+func (f *fakeBriefs) CountMatching(_ context.Context, filter station.Filter) (int, error) {
+	// countFor answers per FILTER, which is what the empty-station diagnosis
+	// needs: it drops one bound at a time and asks again.
+	if f.countFor != nil {
+		return f.countFor(filter), f.countErr
+	}
 	return f.count, f.countErr
 }
 
@@ -521,5 +527,172 @@ func TestStationBriefAPIWordsAreJSON(t *testing.T) {
 				t.Errorf("body %q has no error key, so the console shows its own fallback", rec.Body)
 			}
 		})
+	}
+}
+
+// ------------------------------------------------------------ Jockora-2fn --
+//
+// Reported: a brief derived six parameters, previewed 0 tracks, and the
+// operator concluded the tempo was at fault. It was not -- every bpm on that
+// deployment is NULL and a NULL bpm never excludes. The year range was the
+// cause: every track has a year and only 312 of 7595 are from the 1980s.
+//
+// The console said "0" and, through moodHint, blamed the mood. It named the
+// wrong suspect confidently and sent the operator after the wrong parameter.
+
+func TestStationBriefAPIDeriveSaysWhatEmptiedIt(t *testing.T) {
+	s, b := briefServer(t)
+	admin := adminCookie(t, s)
+	b.params.YearMin, b.params.YearMax = 1980, 1989
+	b.params.TempoMin, b.params.TempoMax = 90, 140
+	// Nothing matches as asked; without the YEARS, 412 do.
+	b.countFor = func(f station.Filter) int {
+		if f.YearMin == 0 && f.YearMax == 0 {
+			return 412
+		}
+		return 0
+	}
+
+	rec := as(t, s, http.MethodPost, "/admin/stations/derive", `{"brief":"eighties night rock"}`, admin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("= %d: %s", rec.Code, rec.Body)
+	}
+	var got struct {
+		Tracks  int    `json:"tracks"`
+		Warning string `json:"warning"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Tracks != 0 {
+		t.Fatalf("tracks = %d, want 0", got.Tracks)
+	}
+	// THE PARAMETER, BY NAME, and what removing it would give back.
+	if !strings.Contains(got.Warning, "1980") || !strings.Contains(got.Warning, "1989") {
+		t.Errorf("the warning does not name the years: %q", got.Warning)
+	}
+	if !strings.Contains(got.Warning, "412") {
+		t.Errorf("the warning does not say what dropping them recovers: %q", got.Warning)
+	}
+	// And it must NOT blame something innocent.
+	if strings.Contains(got.Warning, "tempo") {
+		t.Errorf("the warning blames the tempo, which excludes nothing here: %q", got.Warning)
+	}
+}
+
+func TestStationBriefAPIDeriveSaysWhenNothingSingleIsToBlame(t *testing.T) {
+	s, b := briefServer(t)
+	admin := adminCookie(t, s)
+	b.params.YearMin, b.params.YearMax = 1980, 1989
+	b.countFor = func(station.Filter) int { return 0 }
+
+	rec := as(t, s, http.MethodPost, "/admin/stations/derive", `{"brief":"nothing at all"}`, admin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("= %d: %s", rec.Code, rec.Body)
+	}
+	var got struct {
+		Warning string `json:"warning"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	// Honest rather than confident: no single change fixes it.
+	if !strings.Contains(got.Warning, "no single") {
+		t.Errorf("the warning invents a culprit: %q", got.Warning)
+	}
+}
+
+// TestStationBriefAPIDeriveDiagnosesOnlyWhenEmpty: five extra counts on every
+// preview would be five extra queries for a question nobody asked.
+func TestStationBriefAPIDeriveDiagnosesOnlyWhenEmpty(t *testing.T) {
+	s, b := briefServer(t)
+	admin := adminCookie(t, s)
+	calls := 0
+	b.countFor = func(station.Filter) int {
+		calls++
+		return 412
+	}
+	if rec := as(t, s, http.MethodPost, "/admin/stations/derive",
+		`{"brief":"night rock"}`, admin); rec.Code != http.StatusOK {
+		t.Fatalf("= %d", rec.Code)
+	}
+	if calls != 1 {
+		t.Errorf("counted %d times for a station that has music, want once", calls)
+	}
+}
+
+// TestStationBriefAPIDeriveKeepsThePreviewWhenTheDiagnosisFails: naming the
+// culprit is a courtesy. Losing it must not lose the preview the operator
+// actually asked for.
+func TestStationBriefAPIDeriveKeepsThePreviewWhenTheDiagnosisFails(t *testing.T) {
+	s, b := briefServer(t)
+	admin := adminCookie(t, s)
+	b.params.YearMin, b.params.YearMax = 1980, 1989
+	first := true
+	b.countFor = func(station.Filter) int {
+		if first {
+			first = false
+			return 0
+		}
+		b.countErr = errors.New("the database went away")
+		return 0
+	}
+
+	rec := as(t, s, http.MethodPost, "/admin/stations/derive", `{"brief":"x"}`, admin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("= %d: %s", rec.Code, rec.Body)
+	}
+	var got struct {
+		Name    string `json:"name"`
+		Warning string `json:"warning"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "Night Rock" {
+		t.Errorf("the preview was lost: %+v", got)
+	}
+	if strings.Contains(got.Warning, "without that") {
+		t.Errorf("a failed diagnosis still named a culprit: %q", got.Warning)
+	}
+}
+
+// TestStationBriefAPIDeriveNamesTheBiggestCulprit: several bounds may each be
+// enough to empty a station, and naming an arbitrary one sends the operator to
+// the wrong place -- which is the whole reason this diagnosis exists.
+//
+// Falsification found this: taking the FIRST candidate that recovers instead of
+// the best killed no test, because every other case here has only one.
+func TestStationBriefAPIDeriveNamesTheBiggestCulprit(t *testing.T) {
+	s, b := briefServer(t)
+	admin := adminCookie(t, s)
+	b.params.YearMin, b.params.YearMax = 1980, 1989
+	b.params.TempoMin, b.params.TempoMax = 90, 140
+
+	// Dropping the years recovers 12; dropping the tempo recovers 900. The
+	// tempo is the answer, and it is checked SECOND.
+	b.countFor = func(f station.Filter) int {
+		switch {
+		case f.YearMin == 0 && f.TempoMin != 0:
+			return 12
+		case f.TempoMin == 0 && f.YearMin != 0:
+			return 900
+		default:
+			return 0
+		}
+	}
+
+	rec := as(t, s, http.MethodPost, "/admin/stations/derive", `{"brief":"x"}`, admin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("= %d: %s", rec.Code, rec.Body)
+	}
+	var got struct {
+		Warning string `json:"warning"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.Warning, "tempo") || !strings.Contains(got.Warning, "900") {
+		t.Errorf("the warning names the smaller culprit: %q", got.Warning)
 	}
 }

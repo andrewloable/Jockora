@@ -215,7 +215,7 @@ func (f Filter) TrackIDs(ctx context.Context, s *store.Store) ([]int64, error) {
 		rows, err := s.DB().QueryContext(ctx, `
 			SELECT t.id FROM tracks t
 			 WHERE t.playable = 1 AND t.missing_at IS NULL
-			   AND (t.bpm IS NULL OR t.bpm BETWEEN ? AND ?)
+			   AND (t.bpm IS NULL OR t.bpm <= 0 OR t.bpm BETWEEN ? AND ?)
 			   AND (t.year IS NULL OR t.year BETWEEN ? AND ?)
 			   AND (t.duration_s IS NULL OR t.duration_s BETWEEN ? AND ?)
 			 ORDER BY t.id`, lo, hi, yLo, yHi, dLo, dHi)
@@ -243,6 +243,14 @@ func (f Filter) TrackIDs(ctx context.Context, s *store.Store) ([]int64, error) {
 	// A MOOD IMPLIES A TEMPO, for the five where tempo means anything. A NULL
 	// bpm never excludes: analysis is a slow background pass, and on a fresh
 	// library dropping the unmeasured would make every mood station empty.
+	//
+	// NOR DOES A ZERO, which means the same thing by a different route. A
+	// failed measurement stores a zero so the analysis queue drains rather than
+	// handing the same unmeasurable file back for ever (Jockora-ffh), and zero
+	// already reads as "no tempo" everywhere else -- the console renders it
+	// blank and the playlist query coalesces NULL to it. This was the one place
+	// that did not know, and it would have emptied every mood station on a
+	// deployment whose sidecar cannot measure. Jockora-8d0.
 	lo, hi := tempoBounds(f)
 	yLo, yHi := f.yearBounds()
 	dLo, dHi := f.lengthBounds()
@@ -251,7 +259,7 @@ func (f Filter) TrackIDs(ctx context.Context, s *store.Store) ([]int64, error) {
 		SELECT DISTINCT t.id FROM tracks t
 		  JOIN effective_tags e ON e.track_id = t.id
 		 WHERE t.playable = 1 AND t.missing_at IS NULL
-		   AND (t.bpm IS NULL OR t.bpm BETWEEN ? AND ?)
+		   AND (t.bpm IS NULL OR t.bpm <= 0 OR t.bpm BETWEEN ? AND ?)
 		   AND (t.year IS NULL OR t.year BETWEEN ? AND ?)
 		   AND (t.duration_s IS NULL OR t.duration_s BETWEEN ? AND ?)
 		   AND (json_array_length(?) = 0 OR EXISTS (
@@ -291,7 +299,7 @@ func (f Filter) unplacedTrackIDs(ctx context.Context, s *store.Store) ([]int64, 
 		SELECT t.id FROM tracks t
 		  JOIN effective_tags e ON e.track_id = t.id
 		 WHERE t.playable = 1 AND t.missing_at IS NULL
-		   AND (t.bpm IS NULL OR t.bpm BETWEEN ? AND ?)
+		   AND (t.bpm IS NULL OR t.bpm <= 0 OR t.bpm BETWEEN ? AND ?)
 		   AND (t.year IS NULL OR t.year BETWEEN ? AND ?)
 		   AND (t.duration_s IS NULL OR t.duration_s BETWEEN ? AND ?)
 		   AND (json_array_length(e.station_tags) = 0

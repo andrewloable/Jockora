@@ -6,7 +6,16 @@ import { Stations } from './stations.component';
 import { Derived } from '../api/api';
 
 const stations = [
-  { id: 1, name: 'ROCK', genre: 'rock', genres: ['rock'], moods: [], tracks: 412, enabled: true },
+  {
+    id: 1,
+    name: 'ROCK',
+    genre: 'rock',
+    genres: ['rock'],
+    moods: [],
+    tracks: 412,
+    enabled: true,
+    listeners: 2,
+  },
   {
     id: 3,
     name: 'AMBIENT',
@@ -16,6 +25,7 @@ const stations = [
     moods: ['calm'],
     tracks: 12,
     enabled: false,
+    listeners: 0,
     warning: 'fewer tracks than most stations',
   },
 ];
@@ -753,6 +763,66 @@ describe('Stations', () => {
     expect(warning.closest('td').textContent).toContain('12');
     // And a healthy station carries none at all.
     expect(rows[0].querySelector('[data-warning]')).toBeNull();
+  });
+
+  // -------------------------------------------- Jockora-yv7 and Jockora-cr7 --
+  //
+  // yv7, reported: "i added a 2nd station but it is not showing up in the
+  // listener ui". It was created disabled, which is DELIBERATE -- a station is
+  // enabled after its track count has been seen -- and nothing on screen said
+  // so. The console reported only "Added with 210 tracks." and the sole cue in
+  // the list was a button reading Enable rather than Disable: a button label
+  // doing the work of a state.
+  //
+  // cr7, requested: the console could say how many tracks a station has, and
+  // not the one number that says whether it is doing anything.
+
+  it('station on air says a new station is off the dial until it is enabled', () => {
+    const fixture = mounted();
+    type(fixture, '[data-name]', 'NIGHT ROCK');
+    choose(fixture, '[data-genre]', ['rock']);
+    (fixture.nativeElement.querySelector('[data-add]') as HTMLButtonElement).click();
+    ctrl.expectOne('/admin/stations').flush({ id: 9, tracks: 210 });
+    // load() re-reads the stations only; the vocabulary and jocks are read once
+    // on mount.
+    ctrl.expectOne('/admin/stations').flush(stations);
+    fixture.detectChanges();
+
+    const said = fixture.nativeElement.querySelector('[data-said]').textContent;
+    // The count first -- it is why the station is off the dial in the first
+    // place -- then the step nobody was told about.
+    expect(said).toContain('210');
+    expect(said.toLowerCase()).toContain('enable');
+  });
+
+  it('station on air marks a station that is off the dial', () => {
+    const fixture = mounted();
+    const rows = [...fixture.nativeElement.querySelectorAll('[data-stations] tbody tr')];
+
+    // A MARKER ON THE ROW, not a column: on the dial is the ordinary state, so
+    // a column would say nothing on most rows and cost width on all of them.
+    // Jockora-e9a.59 has just taken a permanently-blank column out of the
+    // playlist for that reason, and Jockora-e9a.53 one out of this table.
+    expect(rows[0].querySelector('[data-off-air]')).toBeNull();
+    const off = rows[1].querySelector('[data-off-air]');
+    expect(off).not.toBeNull();
+    expect(off.textContent.toLowerCase()).toContain('off the dial');
+    // On the name it describes, so it reads as a state of THAT station.
+    expect(off.closest('td').textContent).toContain('AMBIENT');
+  });
+
+  it('station on air shows how many listeners each station has', () => {
+    const fixture = mounted();
+    const heads = [...fixture.nativeElement.querySelectorAll('[data-stations] thead th')].map((h) =>
+      h.textContent.trim().toLowerCase(),
+    );
+    expect(heads).toContain('listeners');
+
+    const rows = [...fixture.nativeElement.querySelectorAll('[data-stations] tbody tr')];
+    expect(rows[0].querySelector('[data-listeners]').textContent.trim()).toBe('2');
+    // Zero reads as a number, not as a blank: nobody is listening is an
+    // answer, and an empty cell is the absence of one.
+    expect(rows[1].querySelector('[data-listeners]').textContent.trim()).toBe('0');
   });
 });
 

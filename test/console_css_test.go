@@ -309,6 +309,59 @@ func TestConsoleCSSStylesATextarea(t *testing.T) {
 	}
 }
 
+// TestConsoleCSSLetsASliderBeASlider: Jockora-b7q, reported as "i cannot make
+// the volume 100%".
+//
+// The volume IS 100%. Measured on a real browser the input reads value 1,
+// valueAsNumber 1, max 1, and the audio element's volume is 1 -- and a
+// screenshot of the element at that value shows UNFILLED TRACK to the right of
+// the thumb. The control was lying about its own state, which is worse than one
+// that does not work: the listener drags it, sees track left over, and
+// concludes the app is broken.
+//
+// The entry-field rule matched input[type=range], so the slider was wearing a
+// text box: min-height 44px, padding 8px 12px, a border and a surface fill.
+// That padding insets the native track inside the 128px box.
+//
+// Exactly the defect the sheet already fixed for checkboxes one rule below --
+// "A CHECKBOX IS NOT AN ENTRY BOX" -- with range never added to the exclusion.
+func TestConsoleCSSLetsASliderBeASlider(t *testing.T) {
+	css := styles(t)
+	sizing := regexp.MustCompile(`(?m)^input:not\(\[type='checkbox'\]\)[^,{]*`)
+	sel := sizing.FindString(css)
+	if sel == "" {
+		t.Fatal("the entry-field sizing rule is gone; if it moved, move this test with it")
+	}
+	if !strings.Contains(sel, `:not([type='range'])`) {
+		t.Errorf("a range still gets the entry-field box, so its track is inset: %q",
+			strings.TrimSpace(sel))
+	}
+}
+
+// TestConsoleCSSShapesAFieldLikeALabel: Jockora-lph. The markup contract that a
+// form row is a run of same-shaped boxes is only half the fix -- the sheet has
+// to give [data-field] the same box a label gets, or the Angular spec passes
+// while the row still misaligns on screen.
+//
+// A bare button in a form row has no label header above it, so under the
+// fieldset's bottom alignment it sat below the controls it belongs beside. It
+// cannot be wrapped in a real label: a button is itself labelable, so that
+// markup is invalid. A box of the same SHAPE needs no offset to maintain.
+func TestConsoleCSSShapesAFieldLikeALabel(t *testing.T) {
+	css := styles(t)
+	// THE WHOLE SELECTOR LIST, not just "[data-field]": the rule that lays out
+	// the button inside the box also names it and also says display:block, so a
+	// looser anchor matched that one instead and the mutation survived.
+	if !strings.Contains(ruleFor(t, css, "label,\n[data-field]"), "display: block") {
+		t.Error("[data-field] does not get the label box, so an action sits below its row")
+	}
+	// And its button is laid out like a control inside a label, or the box is
+	// the right height and the thing inside it still is not.
+	if !strings.Contains(ruleFor(t, css, "[data-field] > button"), "margin-top: var(--s1)") {
+		t.Error("the action inside a field box is not spaced like a control")
+	}
+}
+
 func TestConsoleCSSMarksDestructiveActions(t *testing.T) {
 	rule := ruleFor(t, styles(t), "button[data-danger]")
 	if !strings.Contains(rule, "var(--bad)") {

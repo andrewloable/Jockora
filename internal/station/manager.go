@@ -145,6 +145,13 @@ func (m *Manager) selectorState(ctx context.Context, id int64) (store.SelectorSt
 // The position is saved on a context that OUTLIVES the caller's: a station
 // stopped by the server shutting down must still record its cursor, or every
 // restart of the server restarts every station from the top.
+// Listeners is how many people are on this station right now.
+//
+// STRAIGHT THROUGH TO THE TRACKER, which is the same object App.Dial counts
+// from -- so the operator's console and the listener's dial can never disagree
+// about whether a station is busy. Jockora-cr7.
+func (m *Manager) Listeners(id int64) int { return m.tracker.Count(id) }
+
 func (m *Manager) Stop(id int64) error {
 	m.mu.Lock()
 	rt := m.running[id]

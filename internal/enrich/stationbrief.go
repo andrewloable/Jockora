@@ -319,6 +319,23 @@ func clampRange(min, max, lo, hi float64) (float64, float64) {
 	if min != 0 && max != 0 && min > max {
 		min, max = max, min
 	}
+	// A POINT IS NOT A RANGE, and it is worse than no range at all. Reported
+	// from the deployment: a brief reading "Late-night driving music, mostly
+	// 80s, nothing cheerful" derived Slowest 193 and Fastest 193.
+	//
+	// Tempo and duration are FLOAT MEASUREMENTS, so a bound of exactly one
+	// value is satisfiable by nothing -- and the operator gets an empty station
+	// with nothing on screen to say which of six parameters emptied it. Dropped
+	// rather than widened: widening invents a number the model did not say, and
+	// no bound is the honest reading of an answer that cannot mean what it
+	// says.
+	//
+	// clampYears deliberately does NOT do this, and the difference is the type:
+	// a year is an INTEGER, so 1985 to 1985 is a meaningful "only 1985" that
+	// tracks can match exactly. Jockora-csr.
+	if min != 0 && min == max {
+		return 0, 0
+	}
 	return min, max
 }
 

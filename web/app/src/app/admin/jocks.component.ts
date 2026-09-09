@@ -112,6 +112,7 @@ const blank = (): Jock => ({
           [value]="draft().name"
           (input)="setName($event)"
         />
+        <small>What the DJ is called on air, and what the identifier is made from.</small>
       </label>
       <!-- DERIVED, NOT DEMANDED. This used to be the first field, a free-text
            box whose placeholder was the word "id", asking a person to invent a
@@ -135,15 +136,25 @@ const blank = (): Jock => ({
             <option [value]="voice" [selected]="voice === draft().voice_id">{{ voice }}</option>
           }
         </select>
+        <small>Which speech voice reads this jock's breaks.</small>
       </label>
-      <button
-        type="button"
-        data-preview
-        [disabled]="!draft().voice_id || previewing() !== null"
-        (click)="preview(draft().voice_id)"
-      >
-        {{ previewing() === draft().voice_id ? 'Speaking…' : 'Hear it' }}
-      </button>
+      <!-- THE SAME SHAPE AS A FIELD, so it lines up with the controls beside it
+           rather than sitting below them. A bare button has no label header, and
+           the fieldset aligns on the bottom of each box -- so without this the
+           button hung 12px low. It cannot be a real label: a button is itself
+           labelable, so a label wrapping one is invalid. -->
+      <div data-field>
+        Preview
+        <button
+          type="button"
+          data-preview
+          [disabled]="!draft().voice_id || previewing() !== null"
+          (click)="preview(draft().voice_id)"
+        >
+          {{ previewing() === draft().voice_id ? 'Speaking…' : 'Hear it' }}
+        </button>
+        <small>Speaks one line, so you hear it before you save.</small>
+      </div>
       <label>
         Speech style
         <input

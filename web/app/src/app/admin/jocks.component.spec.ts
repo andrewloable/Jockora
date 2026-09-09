@@ -488,4 +488,45 @@ describe('Jocks', () => {
       expect(name, c.getAttribute('data-name') ?? c.outerHTML.slice(0, 60)).toBeTruthy();
     }
   });
+
+  // -------------------------------------------------------- Jockora-lph --
+  //
+  // Reported by the operator: the New jock elements are not aligned. Measured
+  // at 1280px, row one -- Name label top 469 control 496, Identifier label 447
+  // control 473, Voice label 469 control 496. Three fields, two different
+  // heights, because "fieldset {align-items: end}" bottom-aligns each label BOX
+  // and a label carrying helper text is taller, so it starts higher.
+  //
+  // The stylesheet is not loaded in this environment, so this pins the markup
+  // contract the sheet lays out: a row is a run of labels of the SAME SHAPE.
+  // test/console_css_test.go pins the rule, and the real geometry was measured
+  // on a browser.
+
+  it('jock list gives every field on a row the same shape', () => {
+    const fixture = mounted();
+    const form = fixture.nativeElement.querySelector('[data-jock-form]');
+    // Labels AND the action box: the Hear it button is a field on this row too,
+    // and it is the item that hung low. It cannot be a real label -- a button is
+    // itself labelable, so a label wrapping one is invalid -- so it is a
+    // [data-field] box of the same shape.
+    const fields = [...form.querySelectorAll(':scope > label, :scope > [data-field]')];
+    expect(fields.length).toBe(6);
+    expect(form.querySelector(':scope > button'), 'bare button outside a field box').toBeNull();
+
+    // EVERY field carries a description, or none does. A row that mixes the two
+    // is the row that misaligned: helper text changes a box's height, and the
+    // fieldset aligns on the bottom of the box rather than on the control in it.
+    const withHelp = fields.filter((f) => f.querySelector('small')).length;
+    expect(withHelp, 'fields carrying helper text').toBe(fields.length);
+
+    // And each field is the same three things in the same order, so nothing on
+    // the row is a different shape from its neighbours.
+    for (const field of fields) {
+      const control = field.querySelector('input, select, button');
+      const help = field.querySelector('small');
+      expect(control).not.toBeNull();
+      expect(help).not.toBeNull();
+      expect(help.previousElementSibling).toBe(control);
+    }
+  });
 });
