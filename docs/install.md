@@ -51,6 +51,17 @@ sudo chown -R 10001 ./config
 docker compose up -d
 ```
 
+The compose file builds the `jockora` image from this checkout (`build: .`) —
+portable, no registry dependency. Every tagged release also publishes prebuilt
+images to Docker Hub and GHCR, so you can pull instead of building:
+
+```sh
+docker pull andrewloable/jockora:latest    # or ghcr.io/andrewloable/jockora:latest
+```
+
+To use one, swap `build: .` for `image: andrewloable/jockora:latest` under the
+`jockora` service in `docker-compose.yml`.
+
 **5. Make yourself an account.** Nobody can sign in until you do, and there is
 no self-registration:
 

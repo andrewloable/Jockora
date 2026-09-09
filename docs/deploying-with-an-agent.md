@@ -228,10 +228,25 @@ mkdir -p ~/jockora-backup-$STAMP && sudo cp -a <config-dir>/. ~/jockora-backup-$
 
 ---
 
-## 5. Build the image
+## 5. Get the image
 
-Build **on the target host** unless you are set up for cross-architecture
-builds — an arm64 workstation cannot produce an x86_64 image without buildx.
+**Prefer pulling a published tag** over building on the target host. Every
+version tag (`v*`) publishes multi-arch (`linux/amd64`, `linux/arm64`) images
+to Docker Hub and GHCR via CI, so there is usually nothing to build:
+
+```sh
+ssh user@host 'docker pull andrewloable/jockora:v0.2.0'
+# or: ghcr.io/andrewloable/jockora:v0.2.0
+```
+
+This skips the rsync, skips needing npm/Go/pip network access on the target
+host, and guarantees the image matches what CI's licence and cross-compile
+gates already passed.
+
+**Only build locally** if you are deploying an unreleased commit, or the host
+cannot reach Docker Hub/GHCR. Build **on the target host** unless you are set
+up for cross-architecture builds — an arm64 workstation cannot produce an
+x86_64 image without buildx.
 
 ```sh
 rsync -az --delete \
@@ -247,11 +262,11 @@ browser app, a Go stage embeds it, and the runtime stage is Debian with ffmpeg
 and the Python speech sidecar. It needs network access for npm, Go modules and
 pip.
 
-**Sanity check the result** — the binary should be materially larger than the Go
-code alone, because the browser bundle is embedded in it:
+**Sanity check the result either way** — the binary should be materially larger
+than the Go code alone, because the browser bundle is embedded in it:
 
 ```sh
-docker run --rm --entrypoint sh jockora:v0.2 -c 'ls -l /usr/local/bin/jockora'
+docker run --rm --entrypoint sh andrewloable/jockora:v0.2.0 -c 'ls -l /usr/local/bin/jockora'
 # ~12-13 MB. Much smaller means the web stage did not run.
 ```
 
@@ -262,7 +277,7 @@ docker run --rm --entrypoint sh jockora:v0.2 -c 'ls -l /usr/local/bin/jockora'
 ```yaml
 services:
   jockora:
-    image: jockora:v0.2
+    image: andrewloable/jockora:v0.2.0  # or jockora:v0.2 if built locally in step 5
     container_name: jockora
     restart: always
     networks: [server-network]
