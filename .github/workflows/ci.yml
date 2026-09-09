@@ -226,6 +226,21 @@ jobs:
           REF: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          # LOWERCASE, BECAUSE THE REPOSITORY IS NOT.
+          #
+          # This repository is andrewloable/Jockora with a capital J, and a
+          # Docker repository name must be lowercase -- so ghcr.io/<repo> built
+          # straight from github.repository is an invalid tag and buildx refuses
+          # the whole build before it pushes anything. Measured, not guessed:
+          # the v0.2.0 release failed here with "repository name must be
+          # lowercase", after test and gates had both passed.
+          #
+          # Docker Hub was unaffected because its path is a literal lowercase
+          # jockora, which is exactly why this hid until the first real release.
+          # tr rather than ${REPO,,}: the bash lowercase expansion needs bash 4,
+          # and a construct that works on the runner but not in a shell used to
+          # check it is a construct nobody can verify before pushing a tag.
+          REPO=$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')
           # THE TAG LIST IS BUILT HERE, not inlined in the action's `tags:`.
           # Composing it there needs an expression that yields an empty line
           # when Docker Hub is unset, and whether the action ignores a blank
