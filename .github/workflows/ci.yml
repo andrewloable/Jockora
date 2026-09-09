@@ -125,6 +125,32 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # THE TAG IS THE VERSION, OR NOTHING SHIPS.
+      #
+      # Three places state it and nothing forced them to agree: the git tag
+      # becomes the image tag AND is stamped into the binary with -X, while the
+      # console is built from package.json's version. Tag v0.9.0 on a tree that
+      # says 0.2.0 and you get a binary calling itself v0.9.0 beside a console
+      # built as 0.2.0, an image tagged for neither, and no failure anywhere.
+      #
+      # test/version_test.go holds main.go and package.json together but cannot
+      # see the tag. This is the half that can, and it runs before anything is
+      # built so a mismatched tag costs seconds rather than a published image
+      # somebody has to go and delete.
+      - name: The tag must match the version in the tree
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          go_version=$(sed -n 's/^var Version = "\(.*\)"$/\1/p' cmd/jockora/main.go)
+          # sed rather than node: this step runs BEFORE setup-node, and the
+          # runner's preinstalled node is not something to depend on.
+          web_version=$(sed -n 's/^  "version": "\(.*\)",$/\1/p' web/app/package.json)
+          echo "tag=${tag} main.go=${go_version} package.json=${web_version}"
+          if [ "$tag" != "$go_version" ] || [ "$tag" != "$web_version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match the declared version. Set cmd/jockora/main.go var Version and web/app/package.json version to ${tag}, or tag v${go_version}."
+            exit 1
+          fi
+
       - uses: actions/setup-go@v6
         with:
           go-version: '1.25'
@@ -180,7 +206,50 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # DOCKER HUB IS OPTIONAL AND GHCR IS NOT.
+      #
+      # These steps used to be unconditional, and they run BEFORE the image
+      # build and the GitHub release -- so an unset DOCKERHUB_TOKEN did not cost
+      # you Docker Hub, it cost you the whole release: no GHCR image, no
+      # tarballs, no release page. Same on any fork, which cannot have the
+      # secret at all.
+      #
+      # GHCR needs no secret: GITHUB_TOKEN is minted for the run. So the
+      # publish that always works is the one that always happens, and Docker Hub
+      # is added on top when it is configured.
+      - name: Work out where this image is published
+        id: dockerhub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # THE TAG LIST IS BUILT HERE, not inlined in the action's `tags:`.
+          # Composing it there needs an expression that yields an empty line
+          # when Docker Hub is unset, and whether the action ignores a blank
+          # entry is not something this repository can test. Emitting exactly
+          # the lines we mean removes the question.
+          {
+            echo "tags<<TAGS"
+            echo "ghcr.io/${REPO}:${REF}"
+            echo "ghcr.io/${REPO}:latest"
+            if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+              echo "docker.io/${DOCKERHUB_USERNAME}/jockora:${REF}"
+              echo "docker.io/${DOCKERHUB_USERNAME}/jockora:latest"
+            fi
+            echo "TAGS"
+          } >> "$GITHUB_OUTPUT"
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::DOCKERHUB_USERNAME or DOCKERHUB_TOKEN is unset; publishing to GHCR only."
+          fi
+
       - name: Log in to Docker Hub
+        if: steps.dockerhub.outputs.configured == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -192,11 +261,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-            ghcr.io/${{ github.repository }}:latest
-            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/jockora:${{ github.ref_name }}
-            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/jockora:latest
+          tags: ${{ steps.dockerhub.outputs.tags }}
 
       - name: Publish the release
         uses: softprops/action-gh-release@v2
