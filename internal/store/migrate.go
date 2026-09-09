@@ -15,7 +15,7 @@ import (
 // It exists from the very first migration, not from the first time the schema
 // changes. Retrofitting versioning after dossiers exist means either discarding
 // hours of enrichment or hand-writing a recovery script.
-const CurrentSchemaVersion = 13
+const CurrentSchemaVersion = 14
 
 // migrations are applied in order; index i brings the schema to version i+1.
 var migrations = []string{
@@ -383,6 +383,28 @@ var migrations = []string{
 	// deliver a pause button.
 	`
 	ALTER TABLE ads ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
+	`,
+
+	// 14. SIGNING OUT ENDS THE SESSION, NOT JUST THE COOKIE.
+	//
+	// Sessions are stateless HMAC tokens with a thirty-day life, so clearing
+	// the cookie ended the session on that device and nowhere else -- a copied
+	// cookie went on authenticating for up to a month. There was no sign-out
+	// control at all before this, so the weakness had never been reachable.
+	//
+	// KEYED ON THE SID, which the token already carries to tell one sign-in
+	// from another. Revoking the user instead would sign out the household's
+	// other device, and the presence model exists to keep those separate.
+	//
+	// expires is when the revoked token would have died anyway, which is when
+	// the row stops being worth keeping.
+	`
+	CREATE TABLE revoked_sessions (
+		sid     TEXT PRIMARY KEY,
+		expires INTEGER NOT NULL
+	);
+
+	CREATE INDEX idx_revoked_sessions_expires ON revoked_sessions(expires);
 	`,
 }
 

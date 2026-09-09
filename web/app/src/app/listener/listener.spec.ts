@@ -127,4 +127,36 @@ describe('Listener', () => {
     expect(fixture.nativeElement.querySelector('[data-thumbsdown]')).toBeNull();
     ctrl.expectOne('/now.json?station=7').flush({});
   });
+
+  // ------------------------------------------------------- Jockora-e9a.66 --
+  //
+  // The listener's device is the shared one by the product's own account: a
+  // household tablet, or a phone handed to somebody else. Accounts are
+  // admin-created, a listener cannot change their own password, and a session
+  // lasts thirty days -- so whoever signed in stayed signed in.
+
+  it('sign out is offered on the listener page as well as the console', async () => {
+    const fixture = mounted();
+    const out = fixture.nativeElement.querySelector('[data-sign-out]') as HTMLButtonElement;
+    expect(out).not.toBeNull();
+    expect(out.closest('[data-masthead]')).not.toBeNull();
+
+    out.click();
+    const req = ctrl.expectOne('/logout');
+    expect(req.request.method).toBe('POST');
+    req.flush(null);
+    await Promise.resolve();
+    fixture.detectChanges();
+
+    expect(navigate).toHaveBeenCalledWith(['/login']);
+  });
+
+  it('sign out leaves the page even when the server refuses', async () => {
+    const fixture = mounted();
+    (fixture.nativeElement.querySelector('[data-sign-out]') as HTMLButtonElement).click();
+    ctrl.expectOne('/logout').error(new ProgressEvent('failed'));
+    await Promise.resolve();
+    fixture.detectChanges();
+    expect(navigate).toHaveBeenCalledWith(['/login']);
+  });
 });

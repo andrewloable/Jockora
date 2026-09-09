@@ -1,5 +1,17 @@
-import { Component, inject, signal } from '@angular/core';
-import { Api, AdminApi, Source } from '../api/api';
+import { Component, OnDestroy, inject, signal } from '@angular/core';
+import { Api, AdminApi, Source, serverSaid } from '../api/api';
+import { FormDialog } from './form-dialog';
+
+/**
+ * How often the console re-asks WHILE A SCAN IS RUNNING.
+ *
+ * The same four seconds now-playing settled on. This exists because
+ * pollProgress used to call the endpoint exactly once: Rescan said "Progress
+ * appears below", one snapshot appeared, and the number never moved again -- so
+ * on a large library the operator could not tell a running scan from a finished
+ * one. Jockora-e9a.64.
+ */
+export const SCAN_POLL_MS = 4000;
 
 /**
  * Where the music comes from, and the button that goes and gets it.
@@ -7,6 +19,7 @@ import { Api, AdminApi, Source } from '../api/api';
 @Component({
   selector: 'app-sources',
   standalone: true,
+  imports: [FormDialog],
   template: `
     <h2>Sources</h2>
     <table data-sources>
@@ -42,8 +55,11 @@ import { Api, AdminApi, Source } from '../api/api';
       }
     </table>
 
-    <fieldset>
-      <legend>Add a source</legend>
+    <button type="button" data-add-open (click)="adding.set(true)">Add a source</button>
+    <app-form-dialog [title]="'Add a source'" [open]="adding()" (closed)="closeAdd()">
+      @if (adding()) {
+        <fieldset data-source-form>
+          <legend>Add a source</legend>
       <label>
         Kind
         <select data-kind [value]="kind()" (change)="kind.set($any($event.target).value)">
@@ -82,10 +98,12 @@ import { Api, AdminApi, Source } from '../api/api';
           />
         </label>
       }
-      <div data-form-actions>
-        <button type="button" data-add (click)="add()">Add</button>
-      </div>
-    </fieldset>
+          <div data-form-actions>
+            <button type="button" data-add (click)="add()">Add</button>
+          </div>
+        </fieldset>
+      }
+    </app-form-dialog>
 
     <button type="button" data-rescan (click)="rescan()">Rescan</button>
     @if (progress(); as p) {
@@ -97,7 +115,7 @@ import { Api, AdminApi, Source } from '../api/api';
     <p data-said>{{ said() }}</p>
   `,
 })
-export class Sources {
+export class Sources implements OnDestroy {
   private readonly api = inject(AdminApi);
   private readonly listener = inject(Api);
 
@@ -124,7 +142,10 @@ export class Sources {
   readonly locator = signal('');
   readonly username = signal('');
   readonly password = signal('');
+  /** Whether the Add a source dialog is open. */
+  readonly adding = signal(false);
   readonly said = signal('');
+  private timer: ReturnType<typeof setInterval> | null = null;
   readonly progress = signal<{
     running: boolean;
     found: number;
@@ -151,6 +172,17 @@ export class Sources {
     });
   }
 
+  /**
+   * Close the Add a source dialog, taking whatever was half-typed with it --
+   * the password especially, which is a credential for one server.
+   */
+  closeAdd(): void {
+    this.adding.set(false);
+    this.locator.set('');
+    this.username.set('');
+    this.password.set('');
+  }
+
   add(): void {
     this.said.set('');
     this.api
@@ -162,14 +194,13 @@ export class Sources {
       })
       .subscribe({
         next: () => {
-          this.locator.set('');
-          this.password.set('');
+          this.closeAdd();
           this.load();
         },
         // The SERVER'S OWN WORDS: it stats the folder and pings the server, and
         // its refusal says which one failed and why.
-        error: (e: { error?: { error?: string } }) =>
-          this.said.set(String(e.error?.error ?? 'Could not add that source.')),
+        error: (e: unknown) =>
+          this.said.set(serverSaid(e, 'Could not add that source.')),
       });
   }
 
@@ -213,8 +244,41 @@ export class Sources {
   /** Progress rides on /now.json, which the page already polls elsewhere. */
   pollProgress(): void {
     this.listener.now(0).subscribe({
-      next: (n) => this.progress.set((n as { rescan?: never }).rescan ?? null),
-      error: () => undefined,
+      next: (n) => {
+        this.progress.set((n as { rescan?: never }).rescan ?? null);
+        this.followScan();
+      },
+      // A dropped poll leaves the LAST answer on screen and stops asking. The
+      // alternative is retrying against a server that just failed, which is
+      // not how to find out whether the scan is still going.
+      error: () => this.stopPolling(),
     });
+  }
+
+  /**
+   * Keep asking only while a scan is actually running.
+   *
+   * ONLY WHILE. An idle scanner has nothing to report, so the page makes no
+   * requests at all -- a four-second poll that never ends is a poll running on
+   * every console tab for ever.
+   */
+  private followScan(): void {
+    if (!this.progress()?.running) {
+      this.stopPolling();
+      return;
+    }
+    this.timer ??= setInterval(() => this.pollProgress(), SCAN_POLL_MS);
+  }
+
+  private stopPolling(): void {
+    if (this.timer !== null) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  ngOnDestroy(): void {
+    // A timer left running polls for ever on a page nobody is looking at.
+    this.stopPolling();
   }
 }

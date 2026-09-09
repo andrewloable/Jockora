@@ -140,8 +140,23 @@ type CompletionRequest struct {
 
 // Sampling temperatures, by what is being asked for.
 const (
-	// DefaultTemperature suits fact extraction: low, and reproducible.
+	// DefaultTemperature suits fact extraction: low, and NEARLY reproducible.
+	//
+	// It is not actually reproducible, and this comment used to say it was.
+	// Measured 2026-09-09: three runs of the station-brief live gate at this
+	// temperature gave three different answers for the same brief. That is
+	// tolerable for a dossier, which is written once and cached forever, and
+	// intolerable for anything an operator re-runs and compares -- see
+	// GreedyTemperature.
 	DefaultTemperature = 0.2
+
+	// GreedyTemperature is for the calls an operator can repeat.
+	//
+	// llama.cpp and the OpenAI-compatible providers all treat a temperature of
+	// zero as "pick the most likely token", so this is a real value and not a
+	// missing one -- which is why it cannot be written as 0: every provider
+	// here reads a zero Temperature as unset and substitutes the default.
+	GreedyTemperature = 0.01
 	// WritingTemperature suits a DJ break. Enough variety that two breaks about
 	// the same track are not the same break.
 	WritingTemperature = 0.8

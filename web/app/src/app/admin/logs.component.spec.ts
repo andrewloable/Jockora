@@ -191,6 +191,25 @@ describe('logs', () => {
     expect(warn.textContent.toLowerCase()).toContain('debug');
   });
 
+  it('says what the server said when the session has gone, not its own sentence', () => {
+    // TWO SHAPES REACH THIS SCREEN. Its own handler refuses with JSON through
+    // writeJSON and writeFieldError, but every admin route is wrapped by
+    // require, which refuses an expired session with http.Error -- text/plain.
+    // A reader written for one of them silently mangles the other, and the
+    // half this component was written for was the JSON half. Jockora-gq6.
+    const fixture = mounted();
+    const record = fixture.nativeElement.querySelector('[data-log-record]') as HTMLSelectElement;
+    record.value = 'DEBUG';
+    record.dispatchEvent(new Event('change'));
+
+    ctrl
+      .expectOne('/admin/logs/level')
+      .flush('sign in\n', { status: 401, statusText: 'Unauthorized' });
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('sign in');
+  });
+
   it('a streamed record appends to the list', () => {
     const fixture = mounted();
     FakeSource.last!.send({

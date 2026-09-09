@@ -215,6 +215,14 @@ func TestBriefGateLive(t *testing.T) {
 		"something to run to",
 		// AND A LENGTH AND NOTHING ELSE.
 		"long ambient pieces, nothing short",
+		// Jockora-2mu, REPORTED FROM THE DEPLOYMENT AND REPRODUCED HERE. This
+		// brief came back with a tempo band of 192 to 193, a length band of
+		// 1938 to 1939 seconds, and years of 1970 to 1979 -- a decade closed at
+		// both ends, excluding everything the words "and below" were there to
+		// include. The tempo and length were the schema forbidding the 0 the
+		// prompt demands; the years were the decade rule firing on "70s" with
+		// nothing covering the direction.
+		"Oldies 70s and below",
 	} {
 		t.Run(brief[:min(len(brief), 30)], func(t *testing.T) {
 			p, err := DeriveStationParams(ctx, llm, brief)
@@ -240,7 +248,22 @@ func TestBriefGateLive(t *testing.T) {
 			// AND THE ONES THAT MENTION NEITHER MUST COME BACK UNBOUNDED. An
 			// unbidden range silently shrinks a playlist, which is worse than a
 			// missing one because nothing on screen explains it.
-			if brief == "angry guitars" || strings.HasPrefix(brief, "Loud eighties") {
+			// Jockora-2mu. A DECADE WITH A DIRECTION IS ONE-SIDED, and the
+			// closed decade this used to return is the answer that excludes
+			// everything the operator asked for.
+			if brief == "Oldies 70s and below" {
+				if p.YearMax != 1979 {
+					t.Errorf("%q gave year_max %d, want 1979 -- the end of the decade named",
+						brief, p.YearMax)
+				}
+				if p.YearMin != 0 {
+					t.Errorf("%q gave year_min %d, want 0 -- \"and below\" is an open floor, "+
+						"and a closed decade excludes everything those words were there to include",
+						brief, p.YearMin)
+				}
+			}
+			if brief == "angry guitars" || strings.HasPrefix(brief, "Loud eighties") ||
+				brief == "Oldies 70s and below" {
 				if p.TempoMin != 0 || p.TempoMax != 0 {
 					t.Errorf("%q says nothing about pace and came back bounded at %g..%g",
 						brief, p.TempoMin, p.TempoMax)

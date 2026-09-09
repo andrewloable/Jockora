@@ -150,9 +150,19 @@ func TestStationParamsHappy(t *testing.T) {
 	if got.YearMin != 1975 || got.YearMax != 2005 {
 		t.Errorf("years = %d..%d", got.YearMin, got.YearMax)
 	}
-	// CATALOGUING, not writing: the same temperature the dossier pass uses.
-	if c.got.Temperature != 0 && c.got.Temperature != DefaultTemperature {
-		t.Errorf("temperature = %v, want the cataloguing default", c.got.Temperature)
+	// GREEDY, because an operator can press Describe it again and compare.
+	//
+	// This used to accept the dossier's DefaultTemperature of 0.2, whose own
+	// comment called it reproducible. It is not: measured 2026-09-09 over three
+	// live runs, the same brief gave three different stations -- "Oldies 70s
+	// and below" answered year_max 1979 on one run and 0 on the next. A
+	// dossier is written once and cached forever so 0.2 costs it nothing; a
+	// derive is a button, and a button that answers differently each press is
+	// a feature nobody can trust or tune. Two runs at GreedyTemperature were
+	// byte-identical. Jockora-2mu.
+	if c.got.Temperature != GreedyTemperature {
+		t.Errorf("temperature = %v, want GreedyTemperature (%v) -- pressing Describe it "+
+			"twice on one brief must give one station", c.got.Temperature, GreedyTemperature)
 	}
 	if c.got.JSONSchema == nil {
 		t.Error("no schema was sent, so the sampler was never constrained")
@@ -347,22 +357,39 @@ func TestStationParamsTempoSchemaBounds(t *testing.T) {
 		lo, hi  float64
 		whatFor string
 	}{
-		{"tempo_min", SlowestBPM, FastestBPM, "the sidecar refuses a tempo outside this"},
-		{"tempo_max", SlowestBPM, FastestBPM, "the sidecar refuses a tempo outside this"},
-		{"duration_min_s", ShortestTrackS, LongestTrackS, "half a minute to an album side"},
-		{"duration_max_s", ShortestTrackS, LongestTrackS, "half a minute to an album side"},
+		// THE CEILING IS THE SAMPLER'S, THE FLOOR IS THE CLAMP'S, and that
+		// split is the whole point. The floor used to be here too, and it made
+		// 0 unrepresentable while the prompt ordered the model to answer 0 four
+		// times over -- so it answered with noise instead: 192 to 193 on a
+		// brief about oldies. The floor is still enforced, one layer down,
+		// which is what the cases below this loop are for. Jockora-2mu.
+		{"tempo_min", 0.0, FastestBPM, "0 is unbounded and the model must be able to say it"},
+		{"tempo_max", 0.0, FastestBPM, "0 is unbounded and the model must be able to say it"},
+		{"duration_min_s", 0.0, LongestTrackS, "0 is unbounded and the model must be able to say it"},
+		{"duration_max_s", 0.0, LongestTrackS, "0 is unbounded and the model must be able to say it"},
 	} {
 		spec, ok := props[c.field].(map[string]any)
 		if !ok {
 			t.Errorf("the schema has no %s, so the sampler can return anything", c.field)
 			continue
 		}
-		// BOUNDED AT THE SAMPLER, not merely repaired afterwards. The clamps
-		// are the second line; a value that cannot be generated is the first.
+		// THE CEILING IS BOUNDED AT THE SAMPLER, not merely repaired
+		// afterwards: a value that cannot be generated is the first line.
 		if spec["minimum"] != c.lo || spec["maximum"] != c.hi {
 			t.Errorf("%s bounds = %v..%v, want %v..%v (%s)",
 				c.field, spec["minimum"], spec["maximum"], c.lo, c.hi, c.whatFor)
 		}
+	}
+	// AND THE FLOOR STILL BINDS, one layer down, which is the guarantee the
+	// bounds above used to carry and must not have lost: a tempo under the
+	// sidecar's floor is raised to it rather than passed on.
+	if lo, _ := clampTempo(5, 200); lo != SlowestBPM {
+		t.Errorf("clampTempo(5, 200) floor = %v, want %v -- the sidecar refuses "+
+			"a tempo below this and the schema no longer stops it being generated", lo, SlowestBPM)
+	}
+	if lo, _ := clampLength(5, 600); lo != ShortestTrackS {
+		t.Errorf("clampLength(5, 600) floor = %v, want %v -- half a minute is "+
+			"the shortest thing worth calling a track", lo, ShortestTrackS)
 	}
 	// REQUIRED, like the years. A model that may omit a field omits it, and an
 	// absent tempo and an unbounded one then look identical.
@@ -549,5 +576,55 @@ func TestStationParamsTempoPromptStatesTheDefault(t *testing.T) {
 	}
 	if !strings.Contains(p, "Do not invent a tempo or a length") {
 		t.Errorf("the prompt does not forbid inventing one:\n%s", p)
+	}
+}
+
+// Jockora-2mu. Reported live with a screenshot: the brief "Oldies 70s and
+// below" derived a tempo band of 192 to 193 and a length band of 32.3 to
+// 32.3166666666667 minutes, neither of which the brief says anything about.
+//
+// The schema forbade the value the prompt demands. Both tempo fields and both
+// length fields carried a minimum of 30 and sat in the required list, while the
+// prompt orders the model to answer 0 four separate times. Under a constrained
+// sampler the model could not obey, could not omit, and had to emit something
+// inside the band -- so it emitted noise.
+
+func TestStationParamsNarrowBandIsNotABand(t *testing.T) {
+	// A POINT ESTIMATE WITH NOISE ON IT. Jockora-csr dropped min equal to max
+	// and cited 193 to 193 by name; the model moved one step sideways.
+	if lo, hi := clampTempo(192, 193); lo != 0 || hi != 0 {
+		t.Errorf("clampTempo(192, 193) = %v, %v; want 0, 0 -- a one-BPM band "+
+			"selects nothing and empties the station with nothing on screen to say why", lo, hi)
+	}
+	if lo, hi := clampLength(1938, 1939); lo != 0 || hi != 0 {
+		t.Errorf("clampLength(1938, 1939) = %v, %v; want 0, 0 -- a one-second band "+
+			"is the same answer wearing a disguise", lo, hi)
+	}
+	// A REAL BAND SURVIVES, which is the half that matters: this must not
+	// quietly delete the filters an operator actually asked for.
+	if lo, hi := clampTempo(120, 140); lo != 120 || hi != 140 {
+		t.Errorf("clampTempo(120, 140) = %v, %v; want 120, 140", lo, hi)
+	}
+	if lo, hi := clampLength(120, 360); lo != 120 || hi != 360 {
+		t.Errorf("clampLength(120, 360) = %v, %v; want 120, 360", lo, hi)
+	}
+	// AND AN OPEN BOUND IS NOT A NARROW ONE. Caught by the existing suite the
+	// first time this was written: a floor with no ceiling has a negative span
+	// and was dropped, which threw away the operator's only bound.
+	if lo, hi := clampTempo(150, 0); lo != 150 || hi != 0 {
+		t.Errorf("clampTempo(150, 0) = %v, %v; want 150, 0", lo, hi)
+	}
+}
+
+func TestStationParamsPromptSaysADecadeWithADirectionIsOneSided(t *testing.T) {
+	// "Oldies 70s and below" came back 1970 to 1979 -- the decade rule firing
+	// on the word 70s, excluding everything the word BELOW was there to
+	// include. The one-sided rule already existed; nothing said it wins.
+	p := BuildStationBriefPrompt("Oldies 70s and below")
+	for _, want := range []string{"and below", "one-sided", "that reading wins"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("the prompt never says %q, so a decade plus a direction still "+
+				"reads as a closed decade", want)
+		}
 	}
 }

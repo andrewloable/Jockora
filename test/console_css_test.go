@@ -362,6 +362,61 @@ func TestConsoleCSSShapesAFieldLikeALabel(t *testing.T) {
 	}
 }
 
+// TestConsoleCSSGivesADialogAPhoneShape: Jockora-e9a.60. Every add and edit
+// form used to be an in-page fieldset below the list it belonged to. Measured
+// on a 390x844 phone: tapping Edit on the first station left scrollY at 0 while
+// the form opened at viewport y 868 -- entirely below the fold on a page 2664px
+// tall, with nothing scrolling to it.
+//
+// The dialog element solves WHERE the form is; these rules decide what shape it
+// takes, and a small centred box on a 390px screen is a form in a letterbox.
+func TestConsoleCSSGivesADialogAPhoneShape(t *testing.T) {
+	css := styles(t)
+
+	box := ruleFor(t, css, "[data-form-dialog]")
+	if !strings.Contains(box, "width: min(") {
+		t.Error("a dialog takes whatever width it likes, rather than a readable column")
+	}
+	// The backdrop is the platform's, and dimming it is what makes the page
+	// behind read as out of reach.
+	if !strings.Contains(css, "[data-form-dialog]::backdrop") {
+		t.Error("the dialog has no backdrop, so the page behind it looks live")
+	}
+	// A FULL-HEIGHT SHEET BELOW 48rem, the same breakpoint every admin table
+	// already becomes a card at.
+	// A FULL-HEIGHT SHEET BELOW 48rem, the same breakpoint every admin table
+	// already becomes a card at. Read from the narrow block rather than through
+	// ruleFor, which splits on braces and so cannot see inside a media query --
+	// the same reason TestConsoleCSSStacksThePlaylistOnAPhone reads it this way.
+	narrow := strings.Index(css, "@media (max-width: 47.99rem)")
+	if narrow < 0 {
+		t.Fatal("there are no narrow-viewport rules at all")
+	}
+	sheet := css[narrow:]
+	if !strings.Contains(sheet, "[data-form-dialog]") || !strings.Contains(sheet, "100dvh") {
+		t.Error("a dialog is still a centred box on a phone, which is a form in a letterbox")
+	}
+}
+
+// TestConsoleCSSKeepsARangePairTogether: Jockora-e9a.61. A range is two boxes
+// describing ONE bound, and as loose flex items the wrap could put them
+// anywhere -- measured at 1280px, Shortest sat at x951 on one row and Longest
+// at x113 on the next, which is the worst possible place for the two halves of
+// one number.
+func TestConsoleCSSKeepsARangePairTogether(t *testing.T) {
+	css := styles(t)
+	pair := ruleFor(t, css, "[data-range]")
+	if !strings.Contains(pair, "flex-wrap: nowrap") {
+		t.Error("a range pair may still wrap, so its two ends can land on different rows")
+	}
+	// And the field a generate button acts on travels with it, or the button
+	// starts the next row and reads as part of whatever it lands beside.
+	group := ruleFor(t, css, "[data-brief-group]")
+	if !strings.Contains(group, "flex: 1 0 100%") {
+		t.Error("the description and its button are not one row of their own")
+	}
+}
+
 func TestConsoleCSSMarksDestructiveActions(t *testing.T) {
 	rule := ruleFor(t, styles(t), "button[data-danger]")
 	if !strings.Contains(rule, "var(--bad)") {

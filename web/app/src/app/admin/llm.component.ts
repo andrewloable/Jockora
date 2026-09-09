@@ -1,5 +1,5 @@
 import { Component, computed, inject, signal } from '@angular/core';
-import { AdminApi, LLMCurrent, LLMForm, LLMProvider } from '../api/api';
+import { AdminApi, LLMCurrent, LLMForm, LLMProvider, serverSaid } from '../api/api';
 
 /**
  * Which language model the station speaks through.
@@ -225,9 +225,14 @@ export class LLM {
         this.busy.set(false);
         this.said.set(`${r.models.length} models available.`);
       },
-      error: (e: { error?: { message?: string } }) => {
+      // THE SERVER WRITES THE REASON AND THIS THREW IT AWAY. Every failure
+      // here goes through writeFieldError, which is {field, error} -- there is
+      // no message key anywhere in llm_api.go, so this read undefined every
+      // time and the operator got the generic sentence instead of the API key
+      // error that would have told them what to fix. Jockora-gq6.
+      error: (e: unknown) => {
         this.busy.set(false);
-        this.said.set(e.error?.message ?? 'Could not list the models.');
+        this.said.set(serverSaid(e, 'Could not list the models.'));
       },
     });
   }
@@ -240,9 +245,9 @@ export class LLM {
         this.busy.set(false);
         this.said.set('That model answered and honoured the schema.');
       },
-      error: (e: { error?: { message?: string } }) => {
+      error: (e: unknown) => {
         this.busy.set(false);
-        this.said.set(e.error?.message ?? 'That model could not be used.');
+        this.said.set(serverSaid(e, 'That model could not be used.'));
       },
     });
   }
@@ -261,9 +266,9 @@ export class LLM {
       },
       // The server tests before it saves, so a failure here is the model
       // refusing rather than the form being wrong.
-      error: (e: { error?: { message?: string } }) => {
+      error: (e: unknown) => {
         this.busy.set(false);
-        this.said.set(e.error?.message ?? 'That model could not be used, so nothing was saved.');
+        this.said.set(serverSaid(e, 'That model could not be used, so nothing was saved.'));
       },
     });
   }

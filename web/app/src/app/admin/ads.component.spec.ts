@@ -46,6 +46,9 @@ describe('ads', () => {
     const fixture = TestBed.createComponent(Ads);
     ctrl.expectOne('/admin/ads').flush(list);
     fixture.detectChanges();
+    // THE FORM IS BEHIND A BUTTON since Jockora-e9a.60 moved it into a dialog.
+    (fixture.nativeElement.querySelector('[data-add-open]') as HTMLButtonElement).click();
+    fixture.detectChanges();
     return fixture;
   }
 
@@ -348,10 +351,15 @@ describe('ads', () => {
       'Stillwater Ceramics',
     );
     click(fixture, '[data-cancel]');
+    // The form is GONE, not merely emptied: since Jockora-e9a.60 it lives in a
+    // dialog and cancelling closes it.
+    expect(fixture.nativeElement.querySelector('[data-ad-form]')).toBeNull();
+    // Reopened it is blank, rather than holding the advert just abandoned.
+    (fixture.nativeElement.querySelector('[data-add-open]') as HTMLButtonElement).click();
+    fixture.detectChanges();
     expect((fixture.nativeElement.querySelector('[data-brand]') as HTMLInputElement).value).toBe(
       '',
     );
-    expect(fixture.nativeElement.querySelector('[data-cancel]')).toBeNull();
     ctrl.verify();
   });
 
@@ -508,5 +516,121 @@ describe('ads', () => {
     expect(count).not.toBeNull();
     const scriptLabel = form.querySelector('[data-script]')!.closest('label');
     expect(scriptLabel!.contains(count)).toBe(true);
+  });
+
+  // ------------------------------------------------------- Jockora-e9a.63 --
+  //
+  // A slow Write it answer landed in whichever advert was open when it
+  // returned. Start a blurb for brand A, press Edit on advert B while it works,
+  // and A's copy arrives in B's form -- press Save and B is overwritten with
+  // copy about A.
+  //
+  // The window is wide by the product's own account: the form warns that
+  // writing queues behind enrichment and may be slow, which is exactly when an
+  // operator goes and does something else.
+
+  it('advert write ignores an answer that arrives after the operator moved on', () => {
+    const fixture = mounted();
+    type(fixture, '[data-brand]', 'Stillwater Ceramics');
+    type(fixture, '[data-about]', 'hand-thrown mugs');
+    click(fixture, '[data-write]');
+    const inFlight = ctrl.expectOne('/admin/ads/write');
+
+    // The operator gives up waiting and edits a different advert.
+    click(fixture, '[data-ads] tbody tr:nth-child(2) [data-edit]');
+    fixture.detectChanges();
+    expect(fixture.componentInstance.editing()!.brand).toBe('Harrow & Fen');
+    const openScript = fixture.componentInstance.script();
+
+    // A's answer arrives now.
+    inFlight.flush({ brand: 'Stillwater Ceramics', script: 'Stillwater. One mug, still.' });
+    fixture.detectChanges();
+
+    // IT MUST NOT LAND. The open form still holds Harrow's own copy.
+    expect(fixture.componentInstance.script()).toBe(openScript);
+    expect(fixture.componentInstance.script()).not.toContain('Stillwater');
+  });
+
+  it('advert write clears the writing state when the form changes', () => {
+    const fixture = mounted();
+    type(fixture, '[data-brand]', 'Stillwater Ceramics');
+    type(fixture, '[data-about]', 'hand-thrown mugs');
+    click(fixture, '[data-write]');
+    const inFlight = ctrl.expectOne('/admin/ads/write');
+    expect(fixture.componentInstance.writing()).toBe(true);
+
+    click(fixture, '[data-ads] tbody tr:nth-child(2) [data-edit]');
+    fixture.detectChanges();
+
+    // The label belonged to a request that has nothing to do with this advert,
+    // and it disabled this advert's own Write it until the other one returned.
+    expect(fixture.componentInstance.writing()).toBe(false);
+    const button = fixture.nativeElement.querySelector('[data-write]') as HTMLButtonElement;
+    expect(button.textContent!.trim()).toBe('Write it');
+
+    inFlight.flush({ brand: 'Stillwater Ceramics', script: 'Stillwater. One mug, still.' });
+    fixture.detectChanges();
+    expect(fixture.componentInstance.writing()).toBe(false);
+  });
+
+  it('advert write ignores a failure that arrives after the operator moved on', () => {
+    const fixture = mounted();
+    type(fixture, '[data-brand]', 'Stillwater Ceramics');
+    type(fixture, '[data-about]', 'hand-thrown mugs');
+    click(fixture, '[data-write]');
+    const inFlight = ctrl.expectOne('/admin/ads/write');
+
+    click(fixture, '[data-ads] tbody tr:nth-child(2) [data-edit]');
+    fixture.detectChanges();
+    inFlight.error(new ProgressEvent('failed'), { status: 502 });
+    fixture.detectChanges();
+
+    // A message about the OTHER advert's request, on this advert's form, is the
+    // same defect wearing different clothes.
+    expect(fixture.nativeElement.querySelector('[data-said]')!.textContent!.trim()).toBe('');
+  });
+
+  it('advert write still lands when the operator waited for it', () => {
+    // The guard must not throw away the answer in the ordinary case.
+    const fixture = mounted();
+    type(fixture, '[data-brand]', 'Stillwater Ceramics');
+    type(fixture, '[data-about]', 'hand-thrown mugs');
+    click(fixture, '[data-write]');
+    ctrl
+      .expectOne('/admin/ads/write')
+      .flush({ brand: 'Stillwater Ceramics', script: 'Stillwater. One mug, still.' });
+    fixture.detectChanges();
+    expect(fixture.componentInstance.script()).toContain('One mug');
+    expect(fixture.componentInstance.writing()).toBe(false);
+  });
+
+  it('edit dialog dismissing the advert form forgets what was half-written', () => {
+    const fixture = mounted();
+    type(fixture, '[data-brand]', 'Vellum Press');
+    type(fixture, '[data-about]', 'A tiny press that prints poetry on thick paper.');
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-ad-form]')).toBeNull();
+
+    (fixture.nativeElement.querySelector('[data-add-open]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect((fixture.nativeElement.querySelector('[data-brand]') as HTMLInputElement).value).toBe(
+      '',
+    );
+  });
+
+  it('station fields puts the write button with the box it fills', () => {
+    // Jockora-e9a.61: it sat between the Delivery helper text and The advert
+    // label, belonging to neither by position, with no name of its own.
+    const fixture = mounted();
+    const form = fixture.nativeElement.querySelector('[data-ad-form]');
+    const box = form.querySelector('[data-write]')!.closest('[data-field]');
+    expect(box).not.toBeNull();
+    expect(box.textContent).toContain('Write the advert');
+
+    // IMMEDIATELY BEFORE the field it writes into.
+    const script = form.querySelector('[data-script]')!.closest('label');
+    expect(box.nextElementSibling).toBe(script);
   });
 });

@@ -637,6 +637,119 @@ label[data-inline-field] input {
   margin-top: 0;
 }
 
+/* ------------------------------------------------------------- dialogs -- */
+
+/* EVERY ADD AND EDIT FORM LIVES IN ONE OF THESE.
+ * They used to be in-page fieldsets below the list they belonged to: on a
+ * 390x844 phone, tapping Edit on the first station left scrollY at 0 while the
+ * form opened at viewport y 868, entirely below the fold on a page 2664px tall,
+ * with nothing scrolling to it. Tapping Edit looked like it did nothing.
+ * Jockora-e9a.60. */
+[data-form-dialog] {
+  padding: 0;
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--r-panel);
+  background: var(--surface);
+  color: var(--ink);
+  /* A COMFORTABLE COLUMN on a desktop, not the whole screen: these forms are
+     read left to right and a 1280px-wide dialog is worse than the page was. */
+  width: min(56rem, calc(100vw - 2 * var(--s4)));
+  max-height: calc(100vh - 2 * var(--s4));
+  overflow: auto;
+}
+
+[data-form-dialog]::backdrop {
+  background: color-mix(in oklab, var(--ink) 55%, transparent);
+}
+
+/* The title bar stays put while a long form scrolls under it, so the thing
+   being edited is named wherever the operator has got to. */
+[data-dialog-head] {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: var(--s4);
+  border-bottom: var(--line-w) solid var(--line);
+  background: var(--surface);
+}
+
+[data-dialog-title] {
+  margin: 0;
+  font-size: var(--t-md);
+}
+
+[data-dialog-body] {
+  padding: 0 var(--s4) var(--s4);
+}
+
+/* The form inside is already a fieldset with its own group spacing, and a
+   border around a border inside a panel is three boxes for one form. */
+[data-dialog-body] fieldset {
+  margin: var(--s4) 0 0;
+  padding: 0;
+  border: none;
+  background: none;
+}
+
+[data-dialog-body] legend {
+  /* The dialog title already says what this is. */
+  display: none;
+}
+
+/* A FULL-HEIGHT SHEET ON A PHONE. A small centred box on a 390px screen is a
+   form in a letterbox; the sheet is the shape a phone form actually wants, and
+   it is the same dialog either way. */
+@media (max-width: 47.99rem) {
+  [data-form-dialog] {
+    width: 100vw;
+    max-width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+    margin: 0;
+    border: none;
+    border-radius: 0;
+  }
+}
+
+/* BOTH ENDS OF ONE VALUE, ON ONE ROW.
+ * A range is two boxes describing a single bound, and as loose flex items the
+ * wrap could put them anywhere: measured at 1280px, Shortest sat at x951 on one
+ * row and Longest at x113 on the next -- the worst possible place for the two
+ * halves of one number. Grouped, the pair moves as a unit and a wrap can never
+ * get between them. Jockora-e9a.61. */
+[data-range] {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: var(--s2);
+  align-items: end;
+}
+
+[data-range] > label {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* THE FIELD AND THE BUTTON THAT READS IT, likewise. The description takes a
+ * full row, so a bare action after it started the NEXT row and read as part of
+ * the numeric filters it happened to land beside. */
+[data-brief-group] {
+  flex: 1 0 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  align-items: end;
+}
+
+[data-brief-group] > [data-brief-label] {
+  flex: 1 1 20rem;
+  margin-bottom: 0;
+}
+
 /* THE PRIMARY INPUT GETS THE ROW.
  * The station description is the sentence the whole station is derived from,
  * and as an ordinary flex item it was the SMALLEST field on the form: 182px

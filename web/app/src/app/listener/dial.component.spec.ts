@@ -1,8 +1,8 @@
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
-import { Dial } from './dial.component';
+import { Dial, DIAL_POLL_MS } from './dial.component';
 
 const stations = [
   { id: 1, name: 'ROCK', genre: 'rock', jock_name: 'Dutch', tracks: 412, listeners: 2 },
@@ -11,13 +11,35 @@ const stations = [
 
 describe('Dial', () => {
   let ctrl: HttpTestingController;
+  /**
+   * What document.visibilityState reports. jsdom's is read-only and always
+   * "visible", so the tests that need a backgrounded tab redefine it here and
+   * put it back afterwards.
+   */
+  let hidden: DocumentVisibilityState;
+  let realVisibility: PropertyDescriptor | undefined;
 
   beforeEach(async () => {
+    vi.useFakeTimers();
+    hidden = 'visible';
+    realVisibility = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState');
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => hidden,
+    });
     await TestBed.configureTestingModule({
       imports: [Dial],
       providers: [provideHttpClient(), provideHttpClientTesting()],
     }).compileComponents();
     ctrl = TestBed.inject(HttpTestingController);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    Reflect.deleteProperty(document, 'visibilityState');
+    if (realVisibility) {
+      Object.defineProperty(Document.prototype, 'visibilityState', realVisibility);
+    }
   });
 
   function mounted() {
@@ -192,5 +214,112 @@ describe('Dial', () => {
         .map((w: string) => w.length),
     );
     expect(longest).toBeLessThanOrEqual(12);
+  });
+
+  // ------------------------------------------------------- Jockora-e9a.64 --
+  //
+  // The dial fetched once and never again. A station still building its
+  // playlist comes back ready:false and renders as a DISABLED button reading
+  // "still filling" -- and when it finished, nothing told the page. The button
+  // stayed dead for as long as the tab was open, on the listener's whole UI,
+  // and the only way to hear the station was to guess that reloading helped.
+
+  it('stale view re-enables a station once it has finished filling', () => {
+    const filling = [{ ...stations[0], ready: false, tracks: 3 }];
+    const fixture = TestBed.createComponent(Dial);
+    ctrl.expectOne('/stations.json').flush({ stations: filling });
+    fixture.detectChanges();
+    expect(
+      (fixture.nativeElement.querySelector('[data-station]') as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    vi.advanceTimersByTime(DIAL_POLL_MS);
+    ctrl
+      .expectOne('/stations.json')
+      .flush({ stations: [{ ...stations[0], ready: true, tracks: 412 }] });
+    fixture.detectChanges();
+
+    // WITHOUT A RELOAD, which is the whole point.
+    const button = fixture.nativeElement.querySelector('[data-station]') as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    expect(button.textContent).not.toContain('still filling');
+  });
+
+  it('stale view keeps asking while somebody is looking at the dial', () => {
+    // THE LISTENER COUNT IS THE ONE NUMBER HERE THAT CHANGES ON ITS OWN. The
+    // server recomputes it from the presence tracker on every request, and the
+    // poll used to stop the moment every station was ready -- so the count
+    // froze at whatever it was when the page loaded. Reported live.
+    // Jockora-1ge.
+    const fixture = mounted();
+    vi.advanceTimersByTime(DIAL_POLL_MS);
+    ctrl.expectOne('/stations.json').flush({
+      stations: [
+        { ...stations[0], listeners: 7 },
+        { ...stations[1], listeners: 1 },
+      ],
+    });
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.stations()[0].listeners).toBe(7);
+    expect(fixture.nativeElement.textContent).toContain('7 listening');
+  });
+
+  it('stale view goes quiet while the tab is in the background', () => {
+    // THE REASON BEHIND e9a.64's DO NOT IS KEPT: what it defended against was a
+    // four second timer running for ever on a page nobody is looking at, and
+    // that is exactly the question the Page Visibility API answers.
+    const fixture = mounted();
+    hidden = 'hidden';
+    document.dispatchEvent(new Event('visibilitychange'));
+    fixture.detectChanges();
+
+    vi.advanceTimersByTime(DIAL_POLL_MS * 3);
+    ctrl.expectNone('/stations.json');
+  });
+
+  it('stale view asks again the moment the tab comes back', () => {
+    // Returning to a tab is exactly when the count on screen is most stale, so
+    // it is asked at once rather than up to four seconds later.
+    const fixture = mounted();
+    hidden = 'hidden';
+    document.dispatchEvent(new Event('visibilitychange'));
+    fixture.detectChanges();
+    ctrl.expectNone('/stations.json');
+
+    hidden = 'visible';
+    document.dispatchEvent(new Event('visibilitychange'));
+    fixture.detectChanges();
+    ctrl.expectOne('/stations.json').flush({ stations: [{ ...stations[0], listeners: 4 }] });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('4 listening');
+  });
+
+  it('stale view does not restart the timer for an answer that lands after the tab hides', () => {
+    // THE RACE BETWEEN THE TWO. A poll is already in flight when the listener
+    // switches tabs, and the answer arrives afterwards -- so the check has to
+    // be where the answer is handled as well as on the visibility event, or a
+    // backgrounded tab quietly schedules itself again.
+    const fixture = TestBed.createComponent(Dial);
+    const inFlight = ctrl.expectOne('/stations.json');
+
+    hidden = 'hidden';
+    inFlight.flush({ stations });
+    fixture.detectChanges();
+
+    vi.advanceTimersByTime(DIAL_POLL_MS * 3);
+    ctrl.expectNone('/stations.json');
+  });
+
+  it('stale view leaves no timer behind when the dial goes away', () => {
+    const filling = [{ ...stations[0], ready: false, tracks: 3 }];
+    const fixture = TestBed.createComponent(Dial);
+    ctrl.expectOne('/stations.json').flush({ stations: filling });
+    fixture.detectChanges();
+
+    fixture.destroy();
+    vi.advanceTimersByTime(DIAL_POLL_MS * 3);
+    // A timer left running polls for ever on a page nobody is looking at.
+    ctrl.expectNone('/stations.json');
   });
 });

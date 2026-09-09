@@ -92,8 +92,26 @@ func StationParamsSchema() map[string]any {
 	// ZERO IS LEGAL AND MEANS UNBOUNDED, so the minimum is 0 rather than the
 	// floor -- a schema that forbade 0 would force the model to invent a bound
 	// for every brief that mentions neither.
-	tempo := map[string]any{"type": "number", "minimum": SlowestBPM, "maximum": FastestBPM}
-	length := map[string]any{"type": "number", "minimum": ShortestTrackS, "maximum": LongestTrackS}
+	//
+	// THIS COMMENT WAS RIGHT AND THE CODE UNDER IT WAS NOT, for as long as
+	// these lines have existed: the minimum was SlowestBPM and ShortestTrackS,
+	// both 30. The prompt below orders the model to answer 0 four separate
+	// times and ends on the sentence that all four are 0 for most
+	// descriptions, and the grammar made 0 unrepresentable. Every field is
+	// required too, so the model could not obey, could not omit, and had to
+	// emit something inside the band. It emitted noise: reported live from the
+	// deployment, the brief "Oldies 70s and below" came back with a tempo band
+	// of 192 to 193 and a length band of 1938 to 1939 seconds, neither of
+	// which the brief says anything about. Jockora-2mu.
+	//
+	// The floors move to 0 and the clamps below stay exactly as they were --
+	// they already raise anything under the floor up to it, which is what
+	// makes this safe as well as correct.
+	//
+	// 0.0 AND NOT 0: everything else in this schema is float64, and an untyped
+	// 0 lands in the map as an int that compares equal to nothing.
+	tempo := map[string]any{"type": "number", "minimum": 0.0, "maximum": FastestBPM}
+	length := map[string]any{"type": "number", "minimum": 0.0, "maximum": LongestTrackS}
 
 	return map[string]any{
 		"type": "object",
@@ -162,7 +180,17 @@ func BuildStationBriefPrompt(brief string) string {
 	b.WriteString("  * If the description NAMES a decade or a period, give BOTH ends: ")
 	b.WriteString("\"the nineties\" is 1990 and 1999, \"eighties\" is 1980 and 1989.\n")
 	b.WriteString("  * If it bounds only one side -- \"nothing after 2005\", ")
-	b.WriteString("\"anything from 1994 on\" -- use 0 for the side it leaves open.\n")
+	b.WriteString("\"anything from 1994 on\", \"the seventies and earlier\", ")
+	b.WriteString("\"1980 and below\" -- use 0 for the side it leaves open.\n")
+	// A DECADE PLUS A DIRECTION IS ONE-SIDED, and the decade rule above fires
+	// first on the decade alone. Reported live: "Oldies 70s and below" came
+	// back 1970 to 1979, which is the opposite of what was asked -- it excludes
+	// everything the word BELOW was there to include. Jockora-2mu.
+	b.WriteString("  * A decade WITH a direction is one-sided, and that reading wins: ")
+	b.WriteString("\"70s and below\", \"seventies and earlier\", \"the nineties and older\" ")
+	b.WriteString("all mean 0 for year_min and the END of that decade for year_max. ")
+	b.WriteString("\"80s and up\" and \"nineties onwards\" mean the START of that decade ")
+	b.WriteString("for year_min and 0 for year_max.\n")
 	b.WriteString("  * IF IT SAYS NOTHING ABOUT WHEN THE MUSIC IS FROM, BOTH ARE 0. ")
 	b.WriteString("Do not invent a period. Most descriptions mention no dates at all, ")
 	b.WriteString("and 0 and 0 is the correct answer for every one of them.\n")
@@ -197,8 +225,36 @@ func BuildStationBriefPrompt(brief string) string {
 	b.WriteString("nothing over a few minutes -- give the range IN SECONDS, ")
 	b.WriteString("counting sixty seconds to the minute.\n")
 	b.WriteString("  * IF THE DESCRIPTION MENTIONS NEITHER PACE NOR LENGTH, ALL FOUR ARE 0. ")
-	b.WriteString("Do not invent a tempo or a length. Most descriptions mention neither, ")
-	b.WriteString("and 0 and 0 is the correct answer for every one of them.\n")
+	b.WriteString("Do not invent a tempo or a length. Most descriptions mention neither.\n")
+	// AND THE OTHER HALF, STATED LAST FOR THE SAME REASON THE DEFAULT WAS.
+	//
+	// MEASURED LIVE 2026-09-09, immediately after Jockora-2mu made 0
+	// representable at all. Under the old schema the model COULD NOT answer 0,
+	// so the rules above were written to shout the default down its throat --
+	// and the moment 0 became reachable it answered 0 to everything, including
+	// the two briefs that are entirely about pace and length. Eight briefs,
+	// eight tempo bands of 0 to 0: "something to run to" and "long ambient
+	// pieces, nothing short" among them.
+	//
+	// So the exception now gets the last word, and it names the WORDS that
+	// trigger it rather than a pair of numbers. The comment above records why
+	// that distinction is not optional: a concrete pair in this prompt was
+	// copied verbatim by seven briefs out of seven.
+	// NO FURTHER RULE ABOUT PACE AND LENGTH, AND THAT IS A MEASURED DECISION.
+	//
+	// Three wordings were written and probed against the live model on
+	// 2026-09-09 -- the exception stated last, the exception scoped to the four
+	// numeric fields, and the "it almost never is" hedges removed -- and all
+	// three produced BYTE-IDENTICAL output to having none of them. "something
+	// to run to" and "long ambient pieces, nothing short" came back unbounded
+	// every time. Prompt tokens that change nothing are prompt tokens that will
+	// be believed by the next person to read them, so they are not here.
+	//
+	// Those two briefs are recorded as a known gap on the live gate rather than
+	// papered over here. Note that the deployment runs a 70B model and this was
+	// measured against the 4B test model, so the gap may not exist in
+	// production -- which is exactly why it is written down instead of guessed
+	// at. Jockora-2mu.
 	b.WriteString("- name: what a listener would read on a dial. ")
 	b.WriteString("Two or three words, no punctuation, and not a restatement of the description.\n")
 	return b.String()
@@ -223,6 +279,21 @@ func DeriveStationParams(ctx context.Context, llm Completer, brief string) (Stat
 		Prompt:     BuildStationBriefPrompt(brief),
 		JSONSchema: StationParamsSchema(),
 		NPredict:   200,
+		// GREEDY, BECAUSE THIS IS EXTRACTION AND THE OPERATOR CAN PRESS THE
+		// BUTTON AGAIN.
+		//
+		// DefaultTemperature is 0.2 and its own comment calls it reproducible.
+		// It is not: measured 2026-09-09 over three runs of the live gate, the
+		// same brief gave different stations each time. "Oldies 70s and below"
+		// came back with year_max 1979 on one run and 0 on the next, and
+		// "something to run to" produced a tempo on one and nothing on the
+		// next. That is a feature whose answer changes when an operator presses
+		// Describe it twice, and it is also a feature nobody can tune, because
+		// every prompt change is measured against noise.
+		//
+		// Set HERE and not on DefaultTemperature, which the dossier path shares
+		// and which has thousands of cached answers already written against it.
+		Temperature: GreedyTemperature,
 	}
 
 	for attempt := 0; attempt < 2; attempt++ {
@@ -333,7 +404,18 @@ func clampRange(min, max, lo, hi float64) (float64, float64) {
 	// clampYears deliberately does NOT do this, and the difference is the type:
 	// a year is an INTEGER, so 1985 to 1985 is a meaningful "only 1985" that
 	// tracks can match exactly. Jockora-csr.
-	if min != 0 && min == max {
+	//
+	// AND A RANGE ONE UNIT WIDE IS THE SAME ANSWER WEARING A DISGUISE. That
+	// first fix compared for equality and cited 193 to 193 by name; the model
+	// moved one step sideways and returned 192 to 193, which walked straight
+	// through it and is just as unsatisfiable. Jockora-2mu.
+	//
+	// MEASURED AGAINST THE DOMAIN THE BOUNDS ALREADY CARRY rather than against
+	// two new invented constants: a band narrower than a fiftieth of the range
+	// it is drawn from is a point estimate with noise on it, not a band an
+	// operator meant. On tempo that is about four BPM out of 30 to 250; on
+	// length about a minute out of 30 seconds to an hour.
+	if min != 0 && max != 0 && max-min < (hi-lo)/50 {
 		return 0, 0
 	}
 	return min, max

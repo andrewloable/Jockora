@@ -1,5 +1,6 @@
-import { Component, inject, signal } from '@angular/core';
-import { AdminApi, Jock } from '../api/api';
+import { Component, OnDestroy, inject, signal } from '@angular/core';
+import { AdminApi, Jock, serverSaid } from '../api/api';
+import { FormDialog } from './form-dialog';
 
 /**
  * A name turned into the identifier the seeded jocks already use.
@@ -33,6 +34,7 @@ const blank = (): Jock => ({
 @Component({
   selector: 'app-jocks',
   standalone: true,
+  imports: [FormDialog],
   template: `
     <h2>Jocks</h2>
     <table data-jocks>
@@ -100,8 +102,15 @@ const blank = (): Jock => ({
       </tbody>
     </table>
 
-    <fieldset data-jock-form>
-      <legend>{{ editing() ? 'Edit ' + draft().id : 'New jock' }}</legend>
+    <button type="button" data-add-open (click)="adding.set(true)">Add a jock</button>
+    <app-form-dialog
+      [title]="editing() ? 'Edit ' + draft().name : 'New jock'"
+      [open]="adding() || editing()"
+      (closed)="reset()"
+    >
+      @if (adding() || editing()) {
+        <fieldset data-jock-form>
+          <legend>{{ editing() ? 'Edit ' + draft().id : 'New jock' }}</legend>
       <!-- THE NAME COMES FIRST, because it is the only thing on this form an
            operator actually has in mind. The id follows FROM it. -->
       <label>
@@ -175,18 +184,18 @@ const blank = (): Jock => ({
         />
         <small>Who they are. The persona card is ground truth and never drifts.</small>
       </label>
-      <div data-form-actions>
-        <button type="button" data-save (click)="save()">Save</button>
-        @if (editing()) {
-          <button type="button" data-cancel (click)="reset()">Cancel</button>
-        }
-      </div>
-    </fieldset>
+          <div data-form-actions>
+            <button type="button" data-save (click)="save()">Save</button>
+            <button type="button" data-cancel (click)="reset()">Cancel</button>
+          </div>
+        </fieldset>
+      }
+    </app-form-dialog>
 
     <p data-said>{{ said() }}</p>
   `,
 })
-export class Jocks {
+export class Jocks implements OnDestroy {
   private readonly api = inject(AdminApi);
 
   readonly jocks = signal<Jock[]>([]);
@@ -210,6 +219,8 @@ export class Jocks {
   readonly failed = signal(false);
   readonly voices = signal<string[]>([]);
   readonly draft = signal<Jock>(blank());
+  /** Whether the New jock dialog is open. */
+  readonly adding = signal(false);
   readonly editing = signal(false);
   /** True once the operator has set an id by hand, so it stops being derived. */
   readonly idTyped = signal(false);
@@ -284,6 +295,14 @@ export class Jocks {
     }
   }
 
+  ngOnDestroy(): void {
+    // THE SECTIONS ARE A SWITCH, so leaving Jocks destroys this component --
+    // and a preview left playing goes on talking over a console that no longer
+    // shows the jock it belongs to, with its blob held until the tab closes.
+    // The same reason the dial and the rescan poller stop themselves.
+    this.stop();
+  }
+
   set(field: keyof Jock, event: Event): void {
     const value = (event.target as HTMLInputElement).value;
     this.draft.set({ ...this.draft(), [field]: value });
@@ -309,6 +328,8 @@ export class Jocks {
   }
 
   edit(jock: Jock): void {
+    // NEVER BOTH AT ONCE.
+    this.adding.set(false);
     this.draft.set({ ...jock });
     this.editing.set(true);
     this.idTyped.set(true);
@@ -318,6 +339,7 @@ export class Jocks {
   reset(): void {
     this.draft.set(blank());
     this.editing.set(false);
+    this.adding.set(false);
     this.idTyped.set(false);
   }
 
@@ -331,8 +353,8 @@ export class Jocks {
         this.reset();
         this.load();
       },
-      error: (e: { error?: { error?: string } }) =>
-        this.said.set(String(e.error?.error ?? 'Could not save that jock.')),
+      error: (e: unknown) =>
+        this.said.set(serverSaid(e, 'Could not save that jock.')),
     });
   }
 

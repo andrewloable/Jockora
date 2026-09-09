@@ -79,6 +79,18 @@ describe('Stations', () => {
     ctrl.expectOne('/admin/vocab').flush(vocab);
     ctrl.expectOne('/admin/jocks').flush(jocks);
     fixture.detectChanges();
+    // THE ADD FORM IS BEHIND A BUTTON since Jockora-e9a.60 moved it into a
+    // dialog. It used to be always on screen, which is the precondition every
+    // test below was written against, so opening it here restores that in one
+    // place rather than in thirty.
+    openAdd(fixture);
+    return fixture;
+  }
+
+  /** Open the Add a station dialog. */
+  function openAdd(fixture: { nativeElement: HTMLElement; detectChanges(): void }) {
+    (fixture.nativeElement.querySelector('[data-add-open]') as HTMLButtonElement).click();
+    fixture.detectChanges();
     return fixture;
   }
 
@@ -740,9 +752,109 @@ describe('Stations', () => {
     // operator types into the wrong one.
     expect(fixture.nativeElement.querySelector('[data-station-add]')).toBeNull();
 
+    // AND CANCELLING THE EDIT DOES NOT REOPEN IT. Jockora-e9a.60 made these
+    // two separate dialogs, so closing one leaves the operator on the list --
+    // which is where they were. Reopening the add form they had abandoned
+    // would be the console deciding what they meant.
     (fixture.nativeElement.querySelector('[data-cancel]') as HTMLButtonElement).click();
     fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-station-add]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-station-edit]')).toBeNull();
+
+    // The way back in is the button, and it still works.
+    openAdd(fixture);
     expect(fixture.nativeElement.querySelector('[data-station-add]')).not.toBeNull();
+  });
+
+  it('edit dialog dismissing an edit leaves the station alone', () => {
+    const fixture = mounted();
+    (fixture.nativeElement.querySelector('[data-edit]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-station-edit]')).not.toBeNull();
+
+    // Escape, which is the dialog's own way out and the one nobody has to find.
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.editing()).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-station-edit]')).toBeNull();
+    // NOTHING WAS SAVED: dismissing is not a quiet Save.
+    ctrl.expectNone((r) => r.method === 'PUT');
+  });
+
+  it('edit dialog dismissing the add form forgets what was half-typed', () => {
+    const fixture = mounted();
+    fixture.componentInstance.brief.set('Late-night driving music.');
+    fixture.componentInstance.name.set('NIGHT ROCK');
+    fixture.detectChanges();
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-station-add]')).toBeNull();
+    // REOPENED IT IS EMPTY. A form that keeps last time's description is how a
+    // station gets created from a brief nobody meant to reuse.
+    openAdd(fixture);
+    expect(fixture.componentInstance.brief()).toBe('');
+    expect(fixture.componentInstance.name()).toBe('');
+  });
+
+  // ------------------------------------------------------- Jockora-e9a.61 --
+  //
+  // Three arrangement defects survived the rebuild. Measured on the running
+  // build at 1280px: Shortest sat at x951 on one row and Longest at x113 on the
+  // next -- opposite ends of two different rows, for the two halves of one
+  // value. Describe it sat between the description it acts on and the numeric
+  // row it visually joined, with no label of its own. And the jock select sat
+  // after the year, tempo and duration filters, reading as a seventh filter.
+
+  it('station fields keeps both ends of a range on one row', () => {
+    const fixture = mounted();
+    (fixture.nativeElement.querySelector('[data-edit]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    // GROUPED, so a wrap cannot get between them however the row breaks. At
+    // some widths they happen to land together; that is luck, not a layout.
+    for (const [lo, hi] of [
+      ['[data-edit-year-min]', '[data-edit-year-max]'],
+      ['[data-edit-tempo-min]', '[data-edit-tempo-max]'],
+      ['[data-edit-length-min]', '[data-edit-length-max]'],
+    ]) {
+      const a = fixture.nativeElement.querySelector(lo)!.closest('[data-range]');
+      const b = fixture.nativeElement.querySelector(hi)!.closest('[data-range]');
+      expect(a, lo).not.toBeNull();
+      expect(a, `${lo} and ${hi}`).toBe(b);
+    }
+  });
+
+  it('station fields names the describe button and puts it with the field it reads', () => {
+    const fixture = mounted();
+    (fixture.nativeElement.querySelector('[data-edit]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const form = fixture.nativeElement.querySelector('[data-station-edit]');
+    const box = form.querySelector('[data-edit-describe]')!.closest('[data-field]');
+
+    // IMMEDIATELY AFTER THE DESCRIPTION IT ACTS ON, not adrift in the numeric
+    // row below it.
+    expect(box.previousElementSibling).toBe(form.querySelector('[data-brief-label]'));
+    // And it has a name of its own, which it did not.
+    expect(box.textContent.trim().length).toBeGreaterThan(0);
+    expect(form.querySelector('[data-edit-describe]')!.closest('label')).toBeNull();
+  });
+
+  it('station fields separates the jock choice from the numeric filters', () => {
+    const fixture = mounted();
+    (fixture.nativeElement.querySelector('[data-edit]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    const form = fixture.nativeElement.querySelector('[data-station-edit]');
+    const kids = [...form.children];
+    const at = (sel: string) => kids.findIndex((k) => k.querySelector(sel));
+
+    // Choosing who presents a station is a different kind of decision from
+    // bounding its BPM, so it sits WITH THE NAME rather than after the ranges.
+    expect(at('[data-jock]')).toBeLessThan(at('[data-edit-year-min]'));
+    expect(at('[data-jock]')).toBeLessThan(at('[data-edit-tempo-min]'));
+    expect(at('[data-jock]')).toBe(at('[data-edit-name]') + 1);
   });
 
   it('station form puts the warning on the track count and keeps no warning column', () => {
@@ -848,6 +960,9 @@ describe('stations brief', () => {
     ctrl.expectOne('/admin/stations').flush(list);
     ctrl.expectOne('/admin/vocab').flush(vocab);
     ctrl.expectOne('/admin/jocks').flush(jocks);
+    fixture.detectChanges();
+    // See the note on the other mounted(): the add form lives in a dialog now.
+    (fixture.nativeElement.querySelector('[data-add-open]') as HTMLButtonElement).click();
     fixture.detectChanges();
     return fixture;
   }
@@ -1068,6 +1183,10 @@ describe('stations brief', () => {
     expect(withYears.request.body).toMatchObject({ year_min: 1980, year_max: 1989 });
     withYears.flush({ id: 1, tracks: 4 });
     ctrl.expectOne('/admin/stations').flush([]);
+    fixture.detectChanges();
+    // A SUCCESSFUL ADD CLOSES THE DIALOG since Jockora-e9a.60, so the second
+    // one starts by opening it again -- which is also what an operator does.
+    (fixture.nativeElement.querySelector('[data-add-open]') as HTMLButtonElement).click();
     fixture.detectChanges();
 
     // CLEARED means unbounded, and an unbounded side is simply not sent --
@@ -1465,6 +1584,161 @@ describe('stations brief', () => {
       );
     fixture.detectChanges();
     expect(fixture.nativeElement.textContent).toContain('tempo 900 is outside 30 to 250');
+  });
+
+  it('stations brief shows a length a person can read, not a raw float', () => {
+    // REPORTED LIVE with a screenshot: Longest read "32.3166666666667" in a box
+    // whose step is 0.5. Seconds were divided by sixty and bound straight to
+    // the input. Jockora-2mu.
+    const fixture = mounted([
+      { ...stations[0], duration_min_s: 1938, duration_max_s: 1939 },
+    ]);
+    (fixture.nativeElement.querySelectorAll('[data-edit]')[0] as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-edit-length-max]').value).toBe('32.32');
+    expect(fixture.nativeElement.querySelector('[data-edit-length-min]').value).toBe('32.3');
+  });
+
+  // ------------------------------------------------- abandoned derivations --
+  // Describing is a model call, and this very form warns it can queue behind
+  // enrichment. Both forms are dialogs now, so the operator can shut one while
+  // its answer is still coming. The same defect Jockora-e9a.63 fixed on the
+  // advert writer, which this call had not been given.
+
+  /** Start a derivation and walk away without waiting for it. */
+  function describeThenLeave(
+    fixture: ReturnType<typeof mounted>,
+    button: string,
+    leave: () => void,
+  ) {
+    (fixture.nativeElement.querySelector(button) as HTMLButtonElement).click();
+    const req = ctrl.expectOne('/admin/stations/derive');
+    leave();
+    fixture.detectChanges();
+    return req;
+  }
+
+  /**
+   * Press Close on the dialog holding a given form.
+   *
+   * BY WHAT IS INSIDE IT, not by position: both dialogs render their header at
+   * all times, so an index would have picked the editor's Close button for the
+   * add form and passed for the wrong reason.
+   */
+  function closeDialog(fixture: ReturnType<typeof mounted>, inside: string) {
+    const dialog = (fixture.nativeElement.querySelector(inside) as HTMLElement).closest('dialog')!;
+    (dialog.querySelector('[data-dialog-close]') as HTMLButtonElement).click();
+  }
+
+  it('stations abandoned a derivation answered after the add form closed fills nothing in', () => {
+    const fixture = mounted();
+    typeBrief(fixture, 'late-night rock for driving');
+    const req = describeThenLeave(fixture, '[data-describe]', () => closeDialog(fixture, '[data-station-add]'));
+
+    req.flush({ ...derived, name: 'Night Rock', genres: ['rock'], moods: ['raw'] });
+    fixture.detectChanges();
+
+    // NOTHING FROM IT LANDS. The form the answer was asked for is gone, and
+    // filling it back in is how a station gets made from a brief nobody meant.
+    expect(fixture.componentInstance.name()).toBe('');
+    expect(fixture.componentInstance.genres()).toEqual([]);
+    expect(fixture.componentInstance.derived()).toBeNull();
+    expect(fixture.componentInstance.describing()).toBe(false);
+  });
+
+  it('stations abandoned a derivation that fails after the add form closed says nothing', () => {
+    const fixture = mounted();
+    typeBrief(fixture, 'late-night rock for driving');
+    const req = describeThenLeave(fixture, '[data-describe]', () => closeDialog(fixture, '[data-station-add]'));
+
+    // A 503 OPENS THE BY-HAND FIELDSETS, so a stale one does not just print a
+    // message: it changes what is on screen for a request already abandoned.
+    req.flush(
+      { error: 'no language model is configured' },
+      { status: 503, statusText: 'Service Unavailable' },
+    );
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-said]')!.textContent).toBe('');
+    expect(fixture.componentInstance.manualOpen()).toBe(false);
+  });
+
+  it('stations abandoned a derivation never lands in the next station opened', () => {
+    const fixture = mounted(stations);
+    (fixture.nativeElement.querySelectorAll('[data-edit]')[0] as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-edit-name]').value).toBe('ROCK');
+    set(fixture, '[data-edit-brief]', 'heavier, faster, nothing after 1990');
+
+    // ROCK's description is still being derived when the operator gives up on
+    // it and opens AMBIENT instead.
+    const req = describeThenLeave(fixture, '[data-edit-describe]', () =>
+      (fixture.nativeElement.querySelectorAll('[data-edit]')[1] as HTMLButtonElement).click(),
+    );
+    expect(fixture.nativeElement.querySelector('[data-edit-name]').value).toBe('AMBIENT');
+
+    req.flush({ ...derived, name: 'Night Rock', genres: ['rock'], moods: ['raw'] });
+    fixture.detectChanges();
+
+    // THE STATION THE OPERATOR IS ACTUALLY LOOKING AT, untouched. This is the
+    // damaging shape: the answer fills in a form that is open, over a station
+    // it was never about, with Save one click away.
+    expect(fixture.nativeElement.querySelector('[data-edit-name]').value).toBe('AMBIENT');
+    expect(fixture.componentInstance.editGenres()).toEqual(['ambient']);
+    expect(fixture.componentInstance.editMoods()).toEqual(['calm']);
+    expect(fixture.componentInstance.editDescribing()).toBe(false);
+  });
+
+  it('stations abandoned a derivation that fails after the editor closed says nothing', () => {
+    const fixture = mounted(stations);
+    (fixture.nativeElement.querySelectorAll('[data-edit]')[0] as HTMLButtonElement).click();
+    fixture.detectChanges();
+    set(fixture, '[data-edit-brief]', 'calm ambient, nothing loud');
+    const req = describeThenLeave(fixture, '[data-edit-describe]', () =>
+      (fixture.nativeElement.querySelector('[data-cancel]') as HTMLButtonElement).click(),
+    );
+
+    req.flush(
+      { error: 'the language model could not do it' },
+      { status: 502, statusText: 'Bad Gateway' },
+    );
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-said]')!.textContent).toBe('');
+  });
+
+  it('stations abandoned the add form opens empty after a described station is created', () => {
+    const fixture = mounted();
+    typeBrief(fixture, 'late-night rock for driving');
+    describeIt(fixture, {
+      ...derived,
+      tempo_min: 90,
+      tempo_max: 130,
+      duration_min_s: 120,
+      duration_max_s: 360,
+    });
+    expect(fixture.componentInstance.genres()).toEqual(['rock']);
+
+    (fixture.nativeElement.querySelector('[data-add]') as HTMLButtonElement).click();
+    ctrl.expectOne('/admin/stations').flush({ id: 7, tracks: 412 });
+    ctrl.expectOne('/admin/stations').flush(stations);
+    fixture.detectChanges();
+
+    (fixture.nativeElement.querySelector('[data-add-open]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    // EVERY FIELD, not the four the success path used to clear. The genre and
+    // mood ticks live inside a closed details element, so a second station made
+    // after a described one inherited its whole filter with nothing on screen
+    // saying so -- the operator only found out from the track count.
+    expect(fixture.componentInstance.genres()).toEqual([]);
+    expect(fixture.componentInstance.moods()).toEqual([]);
+    expect(fixture.componentInstance.tempoMin()).toBe(0);
+    expect(fixture.componentInstance.tempoMax()).toBe(0);
+    expect(fixture.componentInstance.lengthMin()).toBe(0);
+    expect(fixture.componentInstance.lengthMax()).toBe(0);
+    expect(fixture.componentInstance.manualOpen()).toBe(false);
   });
 
 });

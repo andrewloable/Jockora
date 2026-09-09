@@ -8,10 +8,12 @@ import { NowPlayingView, POLL_MS } from './now-playing.component';
 @Component({
   standalone: true,
   imports: [NowPlayingView],
-  template: `<app-now-playing [station]="station()" />`,
+  template: `<app-now-playing [station]="station()" (spoke)="spoke.set($event)" />`,
 })
 class Host {
   readonly station = signal<number | null>(null);
+  /** What the thumbs-down would be handed. */
+  readonly spoke = signal('');
 }
 
 describe('NowPlayingView', () => {
@@ -62,7 +64,7 @@ describe('NowPlayingView', () => {
     expect(fixture.nativeElement.textContent).not.toContain('7595');
   });
 
-  it('renders the track and the transcript', () => {
+  it('renders the track, and does not print what the DJ said', () => {
     const fixture = TestBed.createComponent(Host);
     fixture.detectChanges();
     fixture.componentInstance.station.set(3);
@@ -77,7 +79,14 @@ describe('NowPlayingView', () => {
 
     const el = fixture.nativeElement;
     expect(el.querySelector('[data-nowplaying]').textContent).toContain('Blue Monday');
-    expect(el.querySelector('[data-transcript]').textContent).toContain('still holds up');
+    // NOT PRINTED. Radio is heard, and a transcript under the player turns a
+    // break into something to read along with. Jockora-do2.
+    expect(el.querySelector('[data-transcript]')).toBeNull();
+    expect(el.textContent).not.toContain('still holds up');
+    // STILL CARRIED, which is the half that must not go with it: this
+    // component owns the poll, and the thumbs-down one component sideways has
+    // nothing to rate without the break it emits.
+    expect(fixture.componentInstance.spoke()).toContain('still holds up');
   });
 
   it('polls on a timer', () => {

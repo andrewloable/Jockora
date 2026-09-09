@@ -1,5 +1,6 @@
 import { Component, computed, inject, output, signal } from '@angular/core';
-import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api';
+import { AdminApi, Derived, Diff, Jock, Station, StationBody, serverSaid } from '../api/api';
+import { FormDialog } from './form-dialog';
 
 /**
  * The dial, from the operator's side.
@@ -7,6 +8,7 @@ import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api'
 @Component({
   selector: 'app-stations',
   standalone: true,
+  imports: [FormDialog],
   template: `
     <h2>Stations</h2>
     <table data-stations>
@@ -93,8 +95,13 @@ import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api'
          column at x109-413, the pickers sat in Genre-mood, and Save and Cancel
          were stranded in Actions at y610 and y644 -- vertically adrift of every
          field they applied to, with 200px of dead column between them. -->
-    @if (editingStation(); as station) {
-      <fieldset data-station-edit>
+    <app-form-dialog
+      [title]="editingStation() ? 'Edit ' + editingStation()!.name : ''"
+      [open]="editing() !== null"
+      (closed)="cancel()"
+    >
+      @if (editingStation(); as station) {
+        <fieldset data-station-edit>
         <legend>Edit {{ station.name }}</legend>
 
         <label>
@@ -105,102 +112,9 @@ import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api'
             (input)="editName.set($any($event.target).value)"
           />
         </label>
-
-        <!-- The SAME description this station was made from, so an operator can
-             rewrite the sentence rather than reverse engineer the boxes.
-             Describing again replaces what is ticked; they can adjust it or
-             leave without saving. -->
-        <label data-brief-label>
-          What is this station?
-          <textarea
-            data-edit-brief
-            rows="2"
-            [attr.maxlength]="maxBrief"
-            [value]="editBrief()"
-            (input)="editBrief.set($any($event.target).value)"
-          ></textarea>
-        </label>
-        <!-- The same field box as the add form's, for the same reason. -->
-        <div data-field>
-          Derive it
-          <button
-            type="button"
-            data-edit-describe
-            [disabled]="editDescribing() || !editBrief().trim()"
-            (click)="describeEdit()"
-          >
-            {{ editDescribing() ? 'Describing…' : 'Describe it' }}
-          </button>
-        </div>
-
-        <label>
-          From year
-          <input
-            data-edit-year-min
-            type="number"
-            [value]="editYearMin() || ''"
-            (input)="editYearMin.set(+$any($event.target).value)"
-          />
-        </label>
-        <label>
-          To year
-          <input
-            data-edit-year-max
-            type="number"
-            [value]="editYearMax() || ''"
-            (input)="editYearMax.set(+$any($event.target).value)"
-          />
-        </label>
-        <!-- ONE LABEL PER BOX. A single label over a PAIR of stacked inputs
-             said nothing about which box was which -- and the tempo one read
-             "Fastest and slowest" above the MIN box, so it named them
-             backwards. The same four fields, in the same units, as the add
-             form: an operator who opens an edit and finds them blank has lost
-             them, and saving would widen the station with nothing on screen to
-             say so. -->
-        <label>
-          Slowest (BPM)
-          <input
-            data-edit-tempo-min
-            type="number"
-            placeholder="any"
-            [value]="editTempoMin() || ''"
-            (input)="editTempoMin.set(+$any($event.target).value)"
-          />
-        </label>
-        <label>
-          Fastest (BPM)
-          <input
-            data-edit-tempo-max
-            type="number"
-            placeholder="any"
-            [value]="editTempoMax() || ''"
-            (input)="editTempoMax.set(+$any($event.target).value)"
-          />
-        </label>
-        <label>
-          Shortest (minutes)
-          <input
-            data-edit-length-min
-            type="number"
-            step="0.5"
-            placeholder="any"
-            [value]="editLengthMin() || ''"
-            (input)="editLengthMin.set(+$any($event.target).value)"
-          />
-        </label>
-        <label>
-          Longest (minutes)
-          <input
-            data-edit-length-max
-            type="number"
-            step="0.5"
-            placeholder="any"
-            [value]="editLengthMax() || ''"
-            (input)="editLengthMax.set(+$any($event.target).value)"
-          />
-        </label>
-
+        <!-- WHO PRESENTS IT belongs with what it is called, not after the year,
+             tempo and duration filters where it read as a seventh filter.
+             Jockora-e9a.61. -->
         <label>
           Jock
           <select data-jock (change)="editJock.set($any($event.target).value)">
@@ -212,6 +126,119 @@ import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api'
             }
           </select>
         </label>
+
+        <!-- The SAME description this station was made from, so an operator can
+             rewrite the sentence rather than reverse engineer the boxes.
+             Describing again replaces what is ticked; they can adjust it or
+             leave without saving. -->
+        <!-- THE DESCRIPTION AND THE BUTTON THAT READS IT are one thing, and
+             grouping them is what stops the button drifting into the numeric
+             row below: measured at x209 y335, level with From year, acting on a
+             field at y200. Jockora-e9a.61. -->
+        <div data-brief-group>
+          <label data-brief-label>
+            What is this station?
+            <textarea
+              data-edit-brief
+              rows="2"
+              [attr.maxlength]="maxBrief"
+              [value]="editBrief()"
+              (input)="editBrief.set($any($event.target).value)"
+            ></textarea>
+          </label>
+        <!-- The same field box as the add form's, for the same reason. -->
+          <div data-field>
+            Derive it
+            <button
+              type="button"
+              data-edit-describe
+              [disabled]="editDescribing() || !editBrief().trim()"
+              (click)="describeEdit()"
+            >
+              {{ editDescribing() ? 'Describing…' : 'Describe it' }}
+            </button>
+          </div>
+        </div>
+
+
+        <!-- ONE VALUE, TWO BOXES. Grouped so a row wrap can never get between them:
+           measured before, Shortest sat at x951 on one row and Longest at x113
+           on the next. Jockora-e9a.61. -->
+        <div data-range>
+          <label>
+            From year
+            <input
+              data-edit-year-min
+              type="number"
+              [value]="editYearMin() || ''"
+              (input)="editYearMin.set(+$any($event.target).value)"
+            />
+          </label>
+          <label>
+            To year
+            <input
+              data-edit-year-max
+              type="number"
+              [value]="editYearMax() || ''"
+              (input)="editYearMax.set(+$any($event.target).value)"
+            />
+          </label>
+        </div>
+        <!-- ONE LABEL PER BOX. A single label over a PAIR of stacked inputs
+             said nothing about which box was which -- and the tempo one read
+             "Fastest and slowest" above the MIN box, so it named them
+             backwards. The same four fields, in the same units, as the add
+             form: an operator who opens an edit and finds them blank has lost
+             them, and saving would widen the station with nothing on screen to
+             say so. -->
+        <!-- The same pairing, for the same reason. -->
+        <div data-range>
+          <label>
+            Slowest (BPM)
+            <input
+              data-edit-tempo-min
+              type="number"
+              placeholder="any"
+              [value]="editTempoMin() || ''"
+              (input)="editTempoMin.set(+$any($event.target).value)"
+            />
+          </label>
+          <label>
+            Fastest (BPM)
+            <input
+              data-edit-tempo-max
+              type="number"
+              placeholder="any"
+              [value]="editTempoMax() || ''"
+              (input)="editTempoMax.set(+$any($event.target).value)"
+            />
+          </label>
+        </div>
+        <!-- And again. -->
+        <div data-range>
+          <label>
+            Shortest (minutes)
+            <input
+              data-edit-length-min
+              type="number"
+              step="0.5"
+              placeholder="any"
+              [value]="editLengthMin() || ''"
+              (input)="editLengthMin.set(+$any($event.target).value)"
+            />
+          </label>
+          <label>
+            Longest (minutes)
+            <input
+              data-edit-length-max
+              type="number"
+              step="0.5"
+              placeholder="any"
+              [value]="editLengthMax() || ''"
+              (input)="editLengthMax.set(+$any($event.target).value)"
+            />
+          </label>
+        </div>
 
         <!-- CHECKBOXES, not a multiple select. A multiple select needs
              ctrl-click to pick two things that are not next to each other,
@@ -248,33 +275,39 @@ import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api'
         </fieldset>
 
         <!-- AT THE END OF THE FORM, with the fields they apply to. -->
-        <div data-form-actions>
-          <button type="button" data-save (click)="save(station)">Save</button>
-          <button type="button" data-cancel (click)="cancel()">Cancel</button>
-        </div>
-      </fieldset>
-    }
+          <div data-form-actions>
+            <button type="button" data-save (click)="save(station)">Save</button>
+            <button type="button" data-cancel (click)="cancel()">Cancel</button>
+          </div>
+        </fieldset>
+      }
+    </app-form-dialog>
 
     <!-- HIDDEN WHILE AN EDIT IS OPEN. Both were on screen at once, so two name
          boxes and two Describe it buttons faced the operator together. -->
-    @if (!editing()) {
-      <fieldset data-station-add>
+    <button type="button" data-add-open (click)="adding.set(true)">Add a station</button>
+    <app-form-dialog [title]="'Add a station'" [open]="adding()" (closed)="closeAdd()">
+      @if (adding()) {
+        <fieldset data-station-add>
         <legend>Add a station</legend>
 
       <!-- A STATION IS DESCRIBED, NOT TICKED. Two closed vocabularies in a
            checkbox grid is a form that makes the operator do the model's job;
            the boxes are still here, they just stop being where you start. -->
-      <label data-brief-label>
-        What is this station?
-        <textarea
-          data-brief
-          rows="2"
-          [attr.maxlength]="maxBrief"
-          placeholder="Late-night driving music, mostly 80s, nothing cheerful."
-          [value]="brief()"
-          (input)="brief.set($any($event.target).value)"
-        ></textarea>
-      </label>
+      <!-- The description and the button that reads it are one thing; see the
+           edit form above. Jockora-e9a.61. -->
+      <div data-brief-group>
+        <label data-brief-label>
+          What is this station?
+          <textarea
+            data-brief
+            rows="2"
+            [attr.maxlength]="maxBrief"
+            placeholder="Late-night driving music, mostly 80s, nothing cheerful."
+            [value]="brief()"
+            (input)="brief.set($any($event.target).value)"
+          ></textarea>
+        </label>
       <!-- THE SAME SHAPE AS A FIELD, so it lines up with the boxes beside it
            rather than sitting low and tall against them. A bare button has no
            label header and the fieldset aligns on the bottom of each box; this
@@ -286,16 +319,17 @@ import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api'
            DISABLED WHILE BLANK AND WHILE WORKING, and it says which: a live
            model call takes seconds, and an unlabelled button that does nothing
            reads as broken. -->
-      <div data-field>
-        Derive it
-        <button
-          type="button"
-          data-describe
-          [disabled]="describing() || !brief().trim()"
-          (click)="describeStation()"
-        >
-          {{ describing() ? 'Describing…' : 'Describe it' }}
-        </button>
+        <div data-field>
+          Derive it
+          <button
+            type="button"
+            data-describe
+            [disabled]="describing() || !brief().trim()"
+            (click)="describeStation()"
+          >
+            {{ describing() ? 'Describing…' : 'Describe it' }}
+          </button>
+        </div>
       </div>
       @if (derived(); as d) {
         <small data-derived
@@ -329,24 +363,27 @@ import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api'
             (input)="name.set($any($event.target).value)"
           />
         </label>
-      <label>
-        From year
-        <input
-          data-year-min
-          type="number"
-          [value]="yearMin() || ''"
-          (input)="yearMin.set(+$any($event.target).value)"
-        />
-      </label>
-      <label>
-        To year
-        <input
-          data-year-max
-          type="number"
-          [value]="yearMax() || ''"
-          (input)="yearMax.set(+$any($event.target).value)"
-        />
-      </label>
+      <!-- One value, two boxes; see the edit form. Jockora-e9a.61. -->
+      <div data-range>
+        <label>
+          From year
+          <input
+            data-year-min
+            type="number"
+            [value]="yearMin() || ''"
+            (input)="yearMin.set(+$any($event.target).value)"
+          />
+        </label>
+        <label>
+          To year
+          <input
+            data-year-max
+            type="number"
+            [value]="yearMax() || ''"
+            (input)="yearMax.set(+$any($event.target).value)"
+          />
+        </label>
+      </div>
       <!-- THE UNIT IS IN THE LABEL, not left to be guessed. Tempo is BPM
            because that is what tracks.bpm holds; length is MINUTES because
            nobody describes a song as 240 seconds, and the conversion to
@@ -354,48 +391,54 @@ import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api'
 
            EMPTY MEANS UNBOUNDED and must stay empty: an input bound to a zero
            renders "0", which an operator reads as a bound they did not set. -->
-        <label>
-          Slowest (BPM)
-          <input
-            data-tempo-min
-            type="number"
-            placeholder="any"
-            [value]="tempoMin() || ''"
-            (input)="tempoMin.set(+$any($event.target).value)"
-          />
-        </label>
-        <label>
-          Fastest (BPM)
-          <input
-            data-tempo-max
-            type="number"
-            placeholder="any"
-            [value]="tempoMax() || ''"
-            (input)="tempoMax.set(+$any($event.target).value)"
-          />
-        </label>
-        <label>
-          Shortest (minutes)
-          <input
-            data-length-min
-            type="number"
-            step="0.5"
-            placeholder="any"
-            [value]="lengthMin() || ''"
-            (input)="lengthMin.set(+$any($event.target).value)"
-          />
-        </label>
-        <label>
-          Longest (minutes)
-          <input
-            data-length-max
-            type="number"
-            step="0.5"
-            placeholder="any"
-            [value]="lengthMax() || ''"
-            (input)="lengthMax.set(+$any($event.target).value)"
-          />
-        </label>
+        <!-- The same pairing. -->
+        <div data-range>
+          <label>
+            Slowest (BPM)
+            <input
+              data-tempo-min
+              type="number"
+              placeholder="any"
+              [value]="tempoMin() || ''"
+              (input)="tempoMin.set(+$any($event.target).value)"
+            />
+          </label>
+          <label>
+            Fastest (BPM)
+            <input
+              data-tempo-max
+              type="number"
+              placeholder="any"
+              [value]="tempoMax() || ''"
+              (input)="tempoMax.set(+$any($event.target).value)"
+            />
+          </label>
+        </div>
+        <!-- And again. -->
+        <div data-range>
+          <label>
+            Shortest (minutes)
+            <input
+              data-length-min
+              type="number"
+              step="0.5"
+              placeholder="any"
+              [value]="lengthMin() || ''"
+              (input)="lengthMin.set(+$any($event.target).value)"
+            />
+          </label>
+          <label>
+            Longest (minutes)
+            <input
+              data-length-max
+              type="number"
+              step="0.5"
+              placeholder="any"
+              [value]="lengthMax() || ''"
+              (input)="lengthMax.set(+$any($event.target).value)"
+            />
+          </label>
+        </div>
       <!-- [selected] per option, never [value] on the select: these options
            come from the vocabulary, which arrives over HTTP, and a select whose
            value is bound before its options exist silently falls back to the
@@ -437,8 +480,9 @@ import { AdminApi, Derived, Diff, Jock, Station, StationBody } from '../api/api'
         <div data-form-actions>
           <button type="button" data-add (click)="add()">Add</button>
         </div>
-      </fieldset>
-    }
+        </fieldset>
+      }
+    </app-form-dialog>
 
     <p data-said>{{ said() }}</p>
   `,
@@ -507,6 +551,19 @@ export class Stations {
   readonly editLengthMin = signal(0);
   readonly editLengthMax = signal(0);
   readonly editDescribing = signal(false);
+  /**
+   * Which derivation either form is waiting for.
+   *
+   * THE ANSWER HAS TO PROVE IT STILL APPLIES. Describing is a model call, and
+   * this form's own copy warns it can queue behind enrichment -- so the window
+   * is wide, and both forms are now dialogs the operator can shut while one is
+   * running. Start a description for a new station, close the dialog, open a
+   * station's editor, and the answer landed in it: name, genres, moods, years,
+   * tempo and length all replaced from a brief about something else, with Save
+   * one click away. The same defect Jockora-e9a.63 fixed on the advert writer,
+   * which this call had not been given.
+   */
+  private describeSeq = 0;
   readonly said = signal('');
 
   /** playlist asks the console to open one station's playlist. */
@@ -515,6 +572,8 @@ export class Stations {
   // WHICH ROW IS OPEN, by station id rather than a boolean, so opening a second
   // row closes the first: two half-edited rows and one Save button between them
   // is a way to write the wrong station's name.
+  /** Whether the Add dialog is open. */
+  readonly adding = signal(false);
   readonly editing = signal<number | null>(null);
 
   /**
@@ -587,6 +646,12 @@ export class Stations {
   }
 
   startEdit(st: Station): void {
+    // NEVER BOTH AT ONCE. Two forms open together is how an operator presses
+    // Save on the one they were not looking at -- and closed the same way
+    // Escape closes it, so a half-written brief does not survive out of sight.
+    // closeAdd abandons any derivation in flight, which is what stops the add
+    // form's answer landing in this one.
+    this.closeAdd();
     this.said.set('');
     this.editing.set(st.id);
     this.editName.set(st.name);
@@ -610,6 +675,10 @@ export class Stations {
   }
 
   cancel(): void {
+    // The editor's own derivation goes with it, for the same reason the add
+    // form's does: an answer to a brief nobody is looking at any more must not
+    // fill in the next station opened.
+    this.abandonDescribe();
     this.editing.set(null);
   }
 
@@ -640,8 +709,7 @@ export class Stations {
       )
       .subscribe({
         next: (d) => this.saveJock(st, d),
-        error: (e: { error?: { error?: string } }) =>
-          this.said.set(String(e.error?.error ?? 'Could not save that station.')),
+        error: (e: unknown) => this.said.set(serverSaid(e, 'Could not save that station.')),
       });
   }
 
@@ -703,10 +771,14 @@ export class Stations {
    * plausible-looking wrong answer.
    */
   describeStation(): void {
+    const seq = ++this.describeSeq;
     this.said.set('');
     this.describing.set(true);
     this.api.deriveStation(this.brief()).subscribe({
       next: (d) => {
+        if (seq !== this.describeSeq) {
+          return;
+        }
         this.describing.set(false);
         this.derived.set(d);
         this.name.set(d.name);
@@ -720,8 +792,14 @@ export class Stations {
         this.lengthMax.set(this.toMinutes(d.duration_max_s));
       },
       error: (e: { status?: number; error?: { error?: string } }) => {
+        // A FAILURE IS STALE THE SAME WAY, and a 503 opening the manual
+        // fieldsets on a form the operator has moved on from is worse than the
+        // message: it changes what is on screen for a request they abandoned.
+        if (seq !== this.describeSeq) {
+          return;
+        }
         this.describing.set(false);
-        this.said.set(String(e.error?.error ?? 'Could not describe that station.'));
+        this.said.set(serverSaid(e, 'Could not describe that station.'));
         // 503 IS "NO MODEL", and the server's sentence names both ways out.
         // Opening the manual path is the second of them, done rather than
         // described. A 502 is the model failing -- the operator was not wrong
@@ -735,10 +813,14 @@ export class Stations {
 
   /** The same, for a station being edited. */
   describeEdit(): void {
+    const seq = ++this.describeSeq;
     this.said.set('');
     this.editDescribing.set(true);
     this.api.deriveStation(this.editBrief()).subscribe({
       next: (d) => {
+        if (seq !== this.describeSeq) {
+          return;
+        }
         this.editDescribing.set(false);
         this.editName.set(d.name);
         this.editGenres.set(d.genres ?? []);
@@ -751,10 +833,27 @@ export class Stations {
         this.editLengthMax.set(this.toMinutes(d.duration_max_s));
       },
       error: (e: { error?: { error?: string } }) => {
+        if (seq !== this.describeSeq) {
+          return;
+        }
         this.editDescribing.set(false);
-        this.said.set(String(e.error?.error ?? 'Could not describe that station.'));
+        this.said.set(serverSaid(e, 'Could not describe that station.'));
       },
     });
+  }
+
+  /**
+   * Abandon any derivation in flight, because the form it was asked for is
+   * gone. Bumping the counter is what makes the answer stale.
+   *
+   * ONE COUNTER FOR BOTH FORMS on purpose: they cannot be open at once, and a
+   * derivation started in one and answered after the other opened is exactly
+   * the crossing this exists to stop.
+   */
+  private abandonDescribe(): void {
+    this.describeSeq++;
+    this.describing.set(false);
+    this.editDescribing.set(false);
   }
 
   /**
@@ -804,9 +903,54 @@ export class Stations {
     return body;
   }
 
-  /** Seconds off the wire, minutes for the box. */
+  /**
+   * Seconds off the wire, minutes for the box.
+   *
+   * ROUNDED TO THE STEP THE INPUT ITSELF USES. Dividing by sixty and binding
+   * the result renders whatever the float is: 1939 seconds drew
+   * "32.3166666666667" in a box whose step is 0.5, reported live with a
+   * screenshot. Two decimals is finer than the control and still a number a
+   * person can read. Jockora-2mu.
+   */
   private toMinutes(seconds: number | undefined): number {
-    return seconds ? seconds / 60 : 0;
+    return seconds ? Math.round((seconds / 60) * 100) / 100 : 0;
+  }
+
+  /** Close the add dialog, taking whatever was half-typed with it. */
+  closeAdd(): void {
+    this.adding.set(false);
+    this.clearAddForm();
+  }
+
+  /**
+   * Empty the add form. ALL OF IT.
+   *
+   * ONE PLACE, because it is now reached two ways -- a successful Add and a
+   * dismissed dialog -- and a form that keeps last time's brief is how a
+   * station gets created from a description nobody meant to reuse.
+   *
+   * EVERY FIELD, not the four the success path used to clear. While the form
+   * was a permanent fieldset the leftovers were at least on screen beside the
+   * empty name box; behind an "Add a station" button they are not. The genre
+   * and mood ticks are the worst of them -- they live inside a details element
+   * that is closed again here, so a second station made after a described one
+   * inherited its genres, moods, tempo and length with nothing on screen
+   * saying so, and the operator only found out from the track count.
+   */
+  private clearAddForm(): void {
+    this.name.set('');
+    this.brief.set('');
+    this.genres.set([]);
+    this.moods.set([]);
+    this.yearMin.set(0);
+    this.yearMax.set(0);
+    this.tempoMin.set(0);
+    this.tempoMax.set(0);
+    this.lengthMin.set(0);
+    this.lengthMax.set(0);
+    this.derived.set(null);
+    this.manualOpen.set(false);
+    this.abandonDescribe();
   }
 
   add(): void {
@@ -840,11 +984,8 @@ export class Stations {
             `Added with ${made.tracks} tracks. It is off the dial until you press Enable.` +
               this.moodHint(made.tracks),
           );
-          this.name.set('');
-          this.brief.set('');
-          this.yearMin.set(0);
-          this.yearMax.set(0);
-          this.derived.set(null);
+          this.clearAddForm();
+          this.adding.set(false);
           this.load();
         },
         error: (e: { error?: { error?: string } }) =>

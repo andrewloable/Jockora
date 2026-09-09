@@ -99,7 +99,15 @@ func TestParityChecklistComplete(t *testing.T) {
 
 	// Deleting a behaviour is a decision. Making it by marking rows DROPPED
 	// until the checklist is empty is not.
-	if dropped > 3 {
+	//
+	// THE CEILING TRACKS REAL DECISIONS AND IS RAISED ONE AT A TIME, never to
+	// make room in advance. It went from three to four on 2026-09-09 for the
+	// DJ transcript, which the developer asked for in as many words; the
+	// argument is in that row's reason column, where a person looking for the
+	// missing paragraph will find it. If this number ever moves without a row
+	// naming who decided and why, that is the drift this whole file exists to
+	// stop.
+	if dropped > 4 {
 		t.Errorf("%d rows are DROPPED; parity means carrying behaviour over, not writing it off", dropped)
 	}
 }

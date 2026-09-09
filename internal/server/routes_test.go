@@ -159,9 +159,13 @@ func TestRouteMatrixAnonymous(t *testing.T) {
 
 func TestRouteMatrixListener(t *testing.T) {
 	s := matrixServer(t)
-	listener := listenerCookie(t, s)
 
 	for _, e := range matrix {
+		// A FRESH SESSION PER ROUTE. /logout genuinely ends a session now
+		// (Jockora-e9a.66), so one cookie shared across the matrix meant every
+		// route after it answered 401 -- the matrix testing its own side
+		// effect rather than each route's rule.
+		listener := listenerCookie(t, s)
 		rec := as(t, s, e.verb(), e.requestPath(), e.body, listener)
 		switch e.role {
 		case auth.RoleAdmin:
@@ -180,9 +184,10 @@ func TestRouteMatrixListener(t *testing.T) {
 
 func TestRouteMatrixAdmin(t *testing.T) {
 	s := matrixServer(t)
-	admin := adminCookie(t, s)
 
 	for _, e := range matrix {
+		// Fresh per route, for the reason above.
+		admin := adminCookie(t, s)
 		rec := as(t, s, e.verb(), e.requestPath(), e.body, admin)
 		// An operator may do anything a listener may. The reverse is the whole
 		// point of having roles.

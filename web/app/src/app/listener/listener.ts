@@ -18,6 +18,11 @@ import { Player } from './player.component';
   template: `
     <header data-masthead>
       <h1>Jockora</h1>
+      <!-- THE SHARED DEVICE IS THE INTENDED ONE: a household tablet, or a
+           phone handed to somebody else. Accounts are admin-created, a listener
+           cannot change their own password, and a session lasts thirty days --
+           so before this, whoever signed in stayed signed in. Jockora-e9a.66. -->
+      <button type="button" data-sign-out (click)="signOut()">Sign out</button>
       <app-theme-toggle />
     </header>
     <app-player [src]="hls()" />
@@ -53,5 +58,11 @@ export class Listener {
   onTuned(event: { station: DialStation; hls: string }): void {
     this.station.set(event.station);
     this.hls.set(event.hls);
+  }
+
+  /** End this session and go back to the login page. See Admin.signOut. */
+  signOut(): void {
+    const leave = () => void this.router.navigate(['/login']);
+    this.api.logout().subscribe({ next: leave, error: leave });
   }
 }

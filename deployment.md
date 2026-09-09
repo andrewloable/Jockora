@@ -388,6 +388,37 @@ ERROR lines                                           0
   `ring.Occupancy()`; proven by test, **not yet proven by ear**. Listen through a
   few boundaries next time the station is up.
 
+### What the 2026-09-09 deploy verified (migration 14)
+
+The dialog round: six console forms moved into a shared platform `<dialog>`,
+server-side session revocation, dial and rescan polling, and the seven review
+fixes that followed. Rollback image `jockora:rollback-20260909`, backup
+`jockora.db.pre-migration-14-20260909` (6692864 bytes).
+
+Verified, all reads:
+
+- `jockora:v0.2` up, **0 ERROR lines, 0 unexpected WARN lines** — the
+  `SERVING WITHOUT AUTH` LAN warning did not even appear this time.
+- `health` all three `ok`.
+- **`schema_version` 14** and the `revoked_sessions` table present, so signing
+  out now ends the session server-side rather than only clearing the cookie.
+- **`bpm` is populated for all 7595 playable tracks.** It was blank before: the
+  analyser only selected tracks with a NULL loudness, so a library measured
+  before BPM was wired could never fill. That is `Jockora-ffh` landing, and it
+  is what makes the tempo filter mean anything on this box.
+- **Enrichment reads `7595 of 7595, 100%, running`.** It reported
+  `7595 of 7696 (98.7%) paused` before; the 101 that never resolved are no
+  longer counted in the total.
+- The shipped console **is** this build: `main-JPUGOL7D.js` and the lazy
+  `chunk-GLTZLOF7.js` at 81241 bytes match the local `ng build` byte for byte,
+  and the chunk carries `data-form-dialog`, `data-dialog-close`,
+  `data-add-open`, `Discard your changes` and `Discard my tags`.
+
+**The audio path is NOT verified.** Nobody was listening, `now` was null, so no
+encoder ran and no break was placed — exactly the gap §4 warns about. This
+deploy is verified as far as the schema, the process and the served assets, and
+no further. `Jockora-8om` is still unheard.
+
 ## 6. Rolling back
 
 ```sh

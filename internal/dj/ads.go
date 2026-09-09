@@ -138,8 +138,15 @@ func (a Ad) Validate() error {
 	// rejects "Comfort Zone" / "The station plays synthwave, alternative,
 	// electronic, ambient." on the only ground that matters: nobody hearing it
 	// would learn the name of anything.
-	if !strings.Contains(strings.ToLower(script), strings.ToLower(firstWord(brand))) {
+	if anchor := brandAnchor(brand); !strings.Contains(strings.ToLower(script), anchor) {
 		return fmt.Errorf("dj: the advert never says the name %q", brand)
+	}
+	// THE MODEL READING ITS OWN INPUT BACK. Checked after the name, because a
+	// script that echoes the fence usually contains the brand words too and
+	// would otherwise be reported as a naming failure the retry cannot fix.
+	if m := briefLabelEcho.FindString(script); m != "" {
+		return fmt.Errorf("dj: the advert repeats the brief back instead of selling: %q; "+
+			"write what a listener hears, not the labels of the form", strings.TrimSpace(m))
 	}
 	if n := len(strings.Fields(script)); n < MinAdWords {
 		return fmt.Errorf("dj: advert is %d words, too short to be one", n)
@@ -317,6 +324,69 @@ func firstWord(s string) string {
 	}
 	return s
 }
+
+// brandStopWords are words that carry no identity.
+//
+// Short, and only the ones that actually turn up at the front of a name: this
+// is not a general stop list, it is the set that made brandAnchor pick a word
+// no advert could fail to contain.
+var brandStopWords = map[string]bool{
+	"a": true, "an": true, "the": true, "and": true, "or": true, "of": true,
+	"for": true, "with": true, "at": true, "to": true, "in": true, "on": true,
+	"by": true, "my": true, "our": true, "your": true, "is": true, "it": true,
+}
+
+// brandAnchor is the word an advert must actually contain to have named its
+// business.
+//
+// NOT THE FIRST WORD, which is what this was and what let a whole advert
+// through as its own prompt. The operator wrote the brand "a burger ad with the
+// humor of a gta 5 advertisement"; firstWord returned "a"; and since every
+// English sentence contains an "a", the one check that is supposed to
+// distinguish an advert from a fragment of the prompt passed on the string
+// "Brand: a burger ad, about a beef burger food". Jockora-g1k, reproduced
+// before it was changed.
+//
+// NOT THE WHOLE BRAND EITHER, and that is why this is a single word rather than
+// a substring test. A model legitimately re-spells a name -- "Harrow and Fen"
+// for "Harrow & Fen" is good copy -- and demanding the exact string would
+// refuse it four times and hand the operator an error for writing that was
+// fine.
+//
+// So: the FIRST word that is not a stop word. First, not longest -- the longest
+// was tried and the existing suite refused it within a minute: "Nordhaven
+// Mattresses" anchors on "mattresses", the advert says "Nordhaven. Sleep like
+// it is your idea.", and three good adverts were rejected for never naming
+// themselves. A name leads with the part that identifies it and follows with
+// the category, so the first distinctive word is the one that survives a
+// re-spelling and the one the copy actually repeats.
+//
+// Falls back to the first word when a brand is nothing but stop words and
+// punctuation, which preserves exactly what this did before for every brand
+// where the two agree -- and they agree for every brand that does not begin
+// with an article.
+func brandAnchor(brand string) string {
+	for _, w := range strings.Fields(strings.ToLower(brand)) {
+		if w = strings.Trim(w, `.,;:!?"'()[]&-`); w != "" && !brandStopWords[w] {
+			return w
+		}
+	}
+	return strings.ToLower(firstWord(brand))
+}
+
+// briefLabelEcho matches a script that restates the brief's own field labels.
+//
+// THE PROMPT WRITES THESE LABELS. buildAdBriefPrompt fences the operator's
+// words as "Brand: ..." and "About: ...", and a model with nothing to say
+// copies the fence back out. That is what came back live: "Brand: a burger ad,
+// about a beef burger food", which is not an advert in any sense -- it is the
+// input with a colon in it.
+//
+// Anchored to a label followed by a colon, or the pair of labels in one
+// sentence, so ordinary copy is untouched: an advert may perfectly well say
+// "ask about our burgers".
+var briefLabelEcho = regexp.MustCompile(
+	`(?i)(^\s*(brand|about|delivery|product)\s*:|\bbrand\b[^.!?]{0,40}\babout\b)`)
 
 // degenerateRun catches a model that has fallen into a loop.
 //

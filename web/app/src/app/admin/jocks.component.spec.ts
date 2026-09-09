@@ -37,6 +37,11 @@ describe('Jocks', () => {
     ctrl.expectOne('/admin/jocks').flush(jocks);
     ctrl.expectOne('/admin/voices').flush({ voices: ['am_fenrir', 'af_heart'] });
     fixture.detectChanges();
+    // THE FORM IS BEHIND A BUTTON since Jockora-e9a.60 moved it into a dialog.
+    // It used to be always on screen, which is the precondition every test
+    // below was written against.
+    (fixture.nativeElement.querySelector('[data-add-open]') as HTMLButtonElement).click();
+    fixture.detectChanges();
     return fixture;
   }
 
@@ -135,6 +140,12 @@ describe('Jocks', () => {
     fixture.nativeElement.querySelector('[data-cancel]').click();
     fixture.detectChanges();
     expect(fixture.componentInstance.editing()).toBe(false);
+    // The form is GONE, not merely emptied: since Jockora-e9a.60 it lives in a
+    // dialog, and backing out closes it.
+    expect(fixture.nativeElement.querySelector('[data-jock-form]')).toBeNull();
+    // Reopened, it starts blank rather than holding the jock just abandoned.
+    (fixture.nativeElement.querySelector('[data-add-open]') as HTMLButtonElement).click();
+    fixture.detectChanges();
     expect((fixture.nativeElement.querySelector('[data-id]') as HTMLInputElement).value).toBe('');
   });
 
@@ -189,6 +200,9 @@ describe('Jocks', () => {
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('sidecar');
 
+    // The form is in a dialog now, so a save has to be reached through it.
+    (fixture.nativeElement.querySelector('[data-add-open]') as HTMLButtonElement).click();
+    fixture.detectChanges();
     fixture.nativeElement.querySelector('[data-save]').click();
     ctrl.expectOne('/admin/jocks').flush(null, { status: 500, statusText: 'Error' });
     fixture.detectChanges();
@@ -276,6 +290,24 @@ describe('Jocks', () => {
       fixture.nativeElement.querySelector('[data-preview]').click();
       ctrl.expectOne('/admin/voices/preview').flush(new Blob(['b']));
       fixture.detectChanges();
+
+      expect(paused).toBe(1);
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:fake');
+    });
+
+    it('stops when the operator leaves the jocks section', () => {
+      // THE SECTIONS ARE A SWITCH, so leaving Jocks destroys this component --
+      // and a preview left playing goes on talking over a console that no
+      // longer shows the jock it belongs to, holding its blob until the tab
+      // closes. The dial and the rescan poller stop themselves for the same
+      // reason; this one did not.
+      const fixture = withVoice();
+      fixture.nativeElement.querySelector('[data-preview]').click();
+      ctrl.expectOne('/admin/voices/preview').flush(new Blob(['a']));
+      fixture.detectChanges();
+      expect(played).toEqual(['blob:fake']);
+
+      fixture.destroy();
 
       expect(paused).toBe(1);
       expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:fake');
@@ -528,5 +560,22 @@ describe('Jocks', () => {
       expect(help).not.toBeNull();
       expect(help.previousElementSibling).toBe(control);
     }
+  });
+
+  it('edit dialog dismissing the jock form forgets what was half-typed', () => {
+    const fixture = mounted();
+    type(fixture, '[data-name]', 'Rosa Del Fierro');
+    expect((fixture.nativeElement.querySelector('[data-id]') as HTMLInputElement).value).toBe(
+      'rosa_del_fierro',
+    );
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-jock-form]')).toBeNull();
+
+    // Reopened it is blank, rather than holding a persona nobody meant to keep.
+    (fixture.nativeElement.querySelector('[data-add-open]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect((fixture.nativeElement.querySelector('[data-name]') as HTMLInputElement).value).toBe('');
   });
 });

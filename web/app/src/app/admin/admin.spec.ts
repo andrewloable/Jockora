@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, vi, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
+import { Router, provideRouter } from '@angular/router';
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { Admin } from './admin';
@@ -25,7 +26,7 @@ describe('Admin', () => {
   beforeEach(async () => {
     await TestBed.configureTestingModule({
       imports: [Admin],
-      providers: [provideHttpClient(), provideHttpClientTesting()],
+      providers: [provideHttpClient(), provideHttpClientTesting(), provideRouter([])],
     }).compileComponents();
     ctrl = TestBed.inject(HttpTestingController);
   });
@@ -93,6 +94,21 @@ describe('Admin', () => {
     });
   }
 
+  /**
+   * Open whatever add form this section has, so the audit can see inside it.
+   *
+   * The add forms moved into dialogs in Jockora-e9a.60, which means an audit
+   * that only walks the tabs stops looking at half the console's controls
+   * without saying so.
+   */
+  function openEveryForm(fixture: { nativeElement: HTMLElement; detectChanges(): void }) {
+    for (const button of [...fixture.nativeElement.querySelectorAll('[data-add-open]')]) {
+      (button as HTMLButtonElement).click();
+      fixture.detectChanges();
+      settle(fixture);
+    }
+  }
+
   /** How a failure names the offender, since an unlabelled control has no name. */
   const describeControl = (c: Element) =>
     `<${c.tagName.toLowerCase()} ${[...c.attributes]
@@ -122,6 +138,10 @@ describe('Admin', () => {
       settle(fixture);
       // The playlist editor needs a station picked before it mounts at all.
       settle(fixture);
+      // AND THE ADD FORMS ARE BEHIND A BUTTON since Jockora-e9a.60 moved them
+      // into dialogs. Without this the audit silently stops seeing them, which
+      // would turn a passing sweep into proof of nothing.
+      openEveryForm(fixture);
       const controls = [...fixture.nativeElement.querySelectorAll('input, select, textarea')];
       counted += controls.length;
       offenders.push(...unnamed(fixture.nativeElement).map((c) => `${section}: ${describeControl(c)}`));
@@ -146,6 +166,7 @@ describe('Admin', () => {
       fixture.detectChanges();
       settle(fixture);
       settle(fixture);
+      openEveryForm(fixture);
       selects += fixture.nativeElement.querySelectorAll('select').length;
       offenders.push(
         ...unnamed(fixture.nativeElement)
@@ -155,6 +176,60 @@ describe('Admin', () => {
     }
     expect(selects).toBeGreaterThan(4);
     expect(offenders).toEqual([]);
+  });
+
+  // ------------------------------------------------------- Jockora-e9a.66 --
+  //
+  // Nothing in either app signed a person out. A search for logout, signOut and
+  // sign out across the listener and the console returned exactly one hit, and
+  // it was a MESSAGE rather than a control: users.component telling the
+  // operator a user "stays signed in until they sign out" -- an instruction to
+  // do something the interface did not offer.
+  //
+  // Accounts are admin-created with no self-registration, the intended device
+  // is a shared one, and a session lasts thirty days.
+
+  it('sign out ends the session and returns to the login page', async () => {
+    const fixture = mounted();
+    const nav: unknown[][] = [];
+    const router = TestBed.inject(Router);
+    vi.spyOn(router, 'navigate').mockImplementation((c: readonly unknown[]) => {
+      nav.push([...c]);
+      return Promise.resolve(true);
+    });
+
+    const out = fixture.nativeElement.querySelector('[data-sign-out]') as HTMLButtonElement;
+    expect(out).not.toBeNull();
+    // BESIDE THE NAME IT ENDS. The masthead already says whose session it is.
+    expect(out.closest('[data-masthead]')).not.toBeNull();
+
+    out.click();
+    // SERVER-SIDE, so a copy of the cookie stops working too -- not merely
+    // forgotten in this browser.
+    const req = ctrl.expectOne('/logout');
+    expect(req.request.method).toBe('POST');
+    req.flush(null);
+    await Promise.resolve();
+    fixture.detectChanges();
+
+    expect(nav).toEqual([['/login']]);
+  });
+
+  it('sign out lands on the login page even when the server refuses', async () => {
+    // A session that cannot be ended server-side must still be dropped here,
+    // or the operator is stuck signed in on a device they are handing over.
+    const fixture = mounted();
+    const nav: unknown[][] = [];
+    vi.spyOn(TestBed.inject(Router), 'navigate').mockImplementation((c: readonly unknown[]) => {
+      nav.push([...c]);
+      return Promise.resolve(true);
+    });
+
+    (fixture.nativeElement.querySelector('[data-sign-out]') as HTMLButtonElement).click();
+    ctrl.expectOne('/logout').error(new ProgressEvent('failed'));
+    await Promise.resolve();
+    fixture.detectChanges();
+    expect(nav).toEqual([['/login']]);
   });
 
   it('opens on the overview', () => {

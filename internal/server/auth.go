@@ -49,6 +49,14 @@ type Users interface {
 	EnableUser(ctx context.Context, id int64) error
 	DeleteUser(ctx context.Context, id int64) error
 	SetPassword(ctx context.Context, id int64, pwHash string) error
+
+	// Signing out. A session is a stateless HMAC token with a thirty-day life,
+	// so clearing the cookie ends it on that device and nowhere else -- a
+	// copied cookie went on authenticating for up to a month. These are what
+	// stop it. Jockora-e9a.66.
+	RevokeSession(ctx context.Context, sid string, expires time.Time) error
+	SessionRevoked(ctx context.Context, sid string) (bool, error)
+	SweepRevokedSessions(ctx context.Context, now time.Time) error
 }
 
 // SetAuth wires sign-in. Without it every authenticated route refuses.
@@ -121,7 +129,29 @@ func (s *Server) serveLogin(w http.ResponseWriter, r *http.Request) {
 
 // serveLogout clears the cookie. It never fails: signing out has to work even
 // when the session is already gone.
+// serveLogout ends the session, not just the cookie.
+//
+// THE TOKEN OUTLIVES THE COOKIE. Sessions are stateless and last thirty days,
+// so telling the browser to drop it left a copy able to authenticate for a
+// month. That was a deliberate choice while nothing offered a sign-out control
+// at all; Jockora-e9a.66 added the control, which made it reachable.
+//
+// The cookie is cleared even when the revocation cannot be written. Refusing to
+// sign out because a write failed leaves the operator signed in on a device
+// they are trying to hand over, which is worse than the residual risk.
 func (s *Server) serveLogout(w http.ResponseWriter, r *http.Request) {
+	if sess, _, err := s.session(r); err == nil && sess.SID != "" && s.users != nil {
+		if err := s.users.RevokeSession(r.Context(), sess.SID, sess.Expires); err != nil {
+			s.log.Warn("signing out did not revoke the session server-side", "err", err)
+		}
+		// HOUSEKEEPING ON THE RARE ACTION, rather than a goroutine and a
+		// schedule for a table that gains a row per sign-out. A revocation only
+		// has to outlive the token it names, and the server is the half that
+		// owns a clock. Failure here costs nothing but a few stale rows.
+		if err := s.users.SweepRevokedSessions(r.Context(), s.now()); err != nil {
+			s.log.Warn("old sign-outs were not swept", "err", err)
+		}
+	}
 	http.SetCookie(w, s.cookie(r, "", -1))
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -170,6 +200,16 @@ func (s *Server) session(r *http.Request) (auth.Session, store.User, error) {
 	sess, err := s.signer.Verify(c.Value)
 	if err != nil {
 		return auth.Session{}, store.User{}, err
+	}
+	// SIGNED OUT IS SIGNED OUT, checked before the account is even read: a
+	// token whose sign-in was ended must not authenticate, however valid its
+	// signature still is.
+	revoked, err := s.users.SessionRevoked(r.Context(), sess.SID)
+	if err != nil {
+		return auth.Session{}, store.User{}, err
+	}
+	if revoked {
+		return auth.Session{}, store.User{}, errors.New("server: session signed out")
 	}
 	user, err := s.users.GetUserByID(r.Context(), sess.UserID)
 	if err != nil {

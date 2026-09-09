@@ -21,9 +21,10 @@ export const POLL_MS = 4000;
     @if (breakLabel(); as b) {
       <p data-nextbreak>{{ b }}</p>
     }
-    @if (transcript()) {
-      <p data-transcript>“{{ transcript() }}”</p>
-    }
+    <!-- WHAT THE DJ SAID IS NOT PRINTED. Asked for 2026-09-09: radio is heard,
+         and a transcript under the player turns a break into something to read
+         along with. The signal stays -- it is what the thumbs-down has to rate,
+         and this component owns the poll that carries it. Jockora-do2. -->
   `,
 })
 export class NowPlayingView implements OnDestroy {

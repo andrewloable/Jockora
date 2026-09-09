@@ -1,5 +1,5 @@
 import { Component, OnDestroy, computed, inject, signal } from '@angular/core';
-import { AdminApi, LogRecord } from '../api/api';
+import { AdminApi, LogRecord, serverSaid } from '../api/api';
 
 /**
  * What the server is doing.
@@ -231,8 +231,8 @@ export class Logs implements OnDestroy {
         this.recorded.set(level);
         this.said.set(`Recording ${level.toLowerCase()} and above.`);
       },
-      error: (e: { error?: { error?: string } }) =>
-        this.said.set(e.error?.error ?? 'Could not change what is recorded.'),
+      error: (e: unknown) =>
+        this.said.set(serverSaid(e, 'Could not change what is recorded.')),
     });
   }
 
@@ -255,8 +255,7 @@ export class Logs implements OnDestroy {
           error: () => this.said.set('Cleared, but the log could not be re-read.'),
         });
       },
-      error: (e: { error?: { error?: string } }) =>
-        this.said.set(e.error?.error ?? 'Could not clear the log.'),
+      error: (e: unknown) => this.said.set(serverSaid(e, 'Could not clear the log.')),
     });
   }
 

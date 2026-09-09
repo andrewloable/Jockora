@@ -1,4 +1,5 @@
 import { Component, inject, signal } from '@angular/core';
+import { Router } from '@angular/router';
 import { AdminApi, Api, Me, Station } from '../api/api';
 import { Overview } from './overview.component';
 import { Sources } from './sources.component';
@@ -45,6 +46,12 @@ type Section = (typeof sections)[number];
       @if (me(); as who) {
         <p data-whoami>
           Signed in as <strong>{{ who.name }}</strong> ({{ who.role }})
+          <!-- WHERE THE SESSION IS ALREADY NAMED. Nothing in either app signed
+               anybody out before this; the only mention of signing out in the
+               whole console was a MESSAGE telling the operator a user "stays
+               signed in until they sign out", which is an instruction to do
+               something the interface did not offer. Jockora-e9a.66. -->
+          <button type="button" data-sign-out (click)="signOut()">Sign out</button>
         </p>
       }
       <app-theme-toggle />
@@ -115,6 +122,7 @@ type Section = (typeof sections)[number];
 export class Admin {
   private readonly api = inject(AdminApi);
   private readonly listener = inject(Api);
+  private readonly router = inject(Router);
 
   readonly sections = sections;
   readonly me = signal<Me | null>(null);
@@ -155,5 +163,21 @@ export class Admin {
 
   pick(event: Event): void {
     this.picked.set(Number((event.target as HTMLSelectElement).value));
+  }
+
+  /**
+   * End this session and go back to the login page.
+   *
+   * THE SERVER CALL IS THE POINT. A session is a stateless token with a
+   * thirty-day life, so forgetting it here would leave a copy of the cookie
+   * working for a month; /logout revokes it. Jockora-e9a.66.
+   *
+   * The page changes either way: a session that could not be ended server-side
+   * must still be dropped here, or the operator is stuck signed in on a device
+   * they are trying to hand over.
+   */
+  signOut(): void {
+    const leave = () => void this.router.navigate(['/login']);
+    this.listener.logout().subscribe({ next: leave, error: leave });
   }
 }

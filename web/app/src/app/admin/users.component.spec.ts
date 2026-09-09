@@ -28,6 +28,11 @@ describe('Users', () => {
     const fixture = TestBed.createComponent(Users);
     ctrl.expectOne('/admin/users').flush(list);
     fixture.detectChanges();
+    // THE CREATE FORM IS BEHIND A BUTTON since Jockora-e9a.60 moved it into a
+    // dialog. It used to be always on screen, which is what every test below
+    // was written against -- including the ones that check it stays empty.
+    (fixture.nativeElement.querySelector('[data-add-open]') as HTMLButtonElement).click();
+    fixture.detectChanges();
     return fixture;
   }
 
@@ -87,7 +92,11 @@ describe('Users', () => {
     ctrl.expectOne('/admin/users').flush(people);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('not stored');
-    // Cleared, so the next create cannot silently reuse it.
+    // A SUCCESSFUL CREATE CLOSES THE DIALOG since Jockora-e9a.60, and reopening
+    // it starts blank -- so the next create cannot silently reuse the password.
+    expect(fixture.nativeElement.querySelector('[data-new-account]')).toBeNull();
+    (fixture.nativeElement.querySelector('[data-add-open]') as HTMLButtonElement).click();
+    fixture.detectChanges();
     expect((fixture.nativeElement.querySelector('[data-password]') as HTMLInputElement).value).toBe(
       '',
     );
@@ -168,6 +177,9 @@ describe('Users', () => {
       'read the accounts',
     );
 
+    // The create form is in a dialog now, so Create has to be reached through it.
+    (fixture.nativeElement.querySelector('[data-add-open]') as HTMLButtonElement).click();
+    fixture.detectChanges();
     fixture.nativeElement.querySelector('[data-add]').click();
     ctrl.expectOne('/admin/users').flush(null, { status: 500, statusText: 'Error' });
     fixture.detectChanges();
@@ -202,6 +214,70 @@ describe('Users', () => {
     );
   });
 
+  it('server words the role goes back to listener after an admin is created', () => {
+    const fixture = mounted();
+    type(fixture, '[data-name]', 'second');
+    type(fixture, '[data-password]', 'a long enough password');
+    type(fixture, '[data-role]', 'admin');
+    (fixture.nativeElement.querySelector('[data-add]') as HTMLButtonElement).click();
+    const made = ctrl.expectOne('/admin/users');
+    expect(made.request.body.role).toBe('admin');
+    made.flush({ id: 3 });
+    ctrl.expectOne('/admin/users').flush(people);
+    fixture.detectChanges();
+
+    (fixture.nativeElement.querySelector('[data-add-open]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    type(fixture, '[data-name]', 'third');
+    type(fixture, '[data-password]', 'a long enough password');
+    (fixture.nativeElement.querySelector('[data-add]') as HTMLButtonElement).click();
+
+    // NOT ADMIN. Role is the privilege decision on this form, and an operator
+    // who just made an admin would make another one by not touching a box.
+    expect(ctrl.expectOne('/admin/users').request.body.role).toBe('listener');
+  });
+
+  // ------------------------------------------------- what the server said --
+  // The handlers refuse in two shapes and the console read one at a time:
+  // users_api writes twelve text/plain refusals through http.Error and nine
+  // JSON ones through writeFieldError. Both of these were measured wrong.
+
+  it("server words names the taken name rather than a sentence of its own", () => {
+    const fixture = mounted();
+    type(fixture, '[data-name]', 'guest');
+    type(fixture, '[data-password]', 'a long enough password');
+    (fixture.nativeElement.querySelector('[data-add]') as HTMLButtonElement).click();
+    // A DUPLICATE NAME IS text/plain: http.Error, not writeFieldError. The
+    // console printed its own generic line instead, so the operator was told
+    // nothing about which of the two boxes to change.
+    ctrl.expectOne('/admin/users').flush('that name is taken\n', {
+      status: 409,
+      statusText: 'Conflict',
+    });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain(
+      'that name is taken',
+    );
+  });
+
+  it("server words says which field a save was refused for, not object Object", () => {
+    const fixture = mounted();
+    fixture.nativeElement.querySelectorAll('[data-edit]')[0].click();
+    fixture.detectChanges();
+    type(fixture, '[data-edit-name]', '');
+    (fixture.nativeElement.querySelector('[data-save]') as HTMLButtonElement).click();
+    // A REFUSED FIELD IS JSON. Read as text it stringified to "[object
+    // Object]", which is the console telling an operator nothing twice over.
+    ctrl.expectOne('/admin/users/1').flush(
+      { field: 'name', error: 'a name is required' },
+      { status: 400, statusText: 'Bad Request' },
+    );
+    fixture.detectChanges();
+    const said = fixture.nativeElement.querySelector('[data-said]').textContent;
+    expect(said).toContain('a name is required');
+    expect(said).not.toContain('object Object');
+  });
+
   it('labels its columns', () => {
     // A grid of bare values makes the reader infer what each column is from
     // whatever the first row happens to contain -- and "rock" in a column of
@@ -211,6 +287,104 @@ describe('Users', () => {
     expect(head).toContain('Role');
     expect(head).toContain('Status');
     expect(head).toContain('Actions');
+  });
+
+  // ------------------------------------------------------- Jockora-e9a.62 --
+  //
+  // ONE password signal was bound to BOTH forms. The New account fieldset is
+  // always rendered and the reset fieldset appears beside it, so typing a new
+  // password for an existing user silently filled the create form with it --
+  // and Cancel did not clear it, because it only closed the reset form.
+  //
+  // REPRODUCED IN A BROWSER before it was fixed: type SECRET-FOR-USER-A into
+  // the reset field, press Cancel, and the new-account password field still
+  // holds SECRET-FOR-USER-A. Both are type=password, so it renders as dots in a
+  // form nobody is looking at. The next account created gets that password, and
+  // the operator hands over a different one.
+
+  it('password field keeps the reset form separate from the create form', () => {
+    // ONE FIXTURE, BOTH FORMS, one after the other. They used to be on screen
+    // together bound to the same signal; since Jockora-e9a.60 they are separate
+    // dialogs and cannot both be open, so the leak shows on the way BACK rather
+    // than side by side. The signals are still what makes them independent.
+    const fixture = mounted();
+    type(fixture, '[data-password]', 'for-the-new-account');
+
+    (fixture.nativeElement.querySelector('[data-reset]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    type(fixture, '[data-new-password]', 'SECRET-FOR-USER-A');
+
+    // THE TYPING GOES TO ONE SIGNAL ONLY. That is the independence this fix is
+    // about, and with one shared signal the create form would now hold
+    // SECRET-FOR-USER-A.
+    expect(fixture.componentInstance.newPassword()).toBe('SECRET-FOR-USER-A');
+    expect(fixture.componentInstance.password()).toBe('');
+
+    // AND THE RESET'S PASSWORD NEVER REACHES THE CREATE FORM.
+    (fixture.nativeElement.querySelector('[data-cancel-reset]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('[data-add-open]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect((fixture.nativeElement.querySelector('[data-password]') as HTMLInputElement).value).toBe(
+      '',
+    );
+  });
+
+  it('password field leaves nothing behind when a reset is cancelled', () => {
+    const fixture = mounted();
+    const resets = () =>
+      [...fixture.nativeElement.querySelectorAll('[data-reset]')] as HTMLButtonElement[];
+    resets()[0].click();
+    fixture.detectChanges();
+    type(fixture, '[data-new-password]', 'SECRET-FOR-USER-A');
+
+    (fixture.nativeElement.querySelector('[data-cancel-reset]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-reset-form]')).toBeNull();
+    // CANCEL DROPS IT, rather than leaving a password for one account sitting
+    // in memory behind a closed form.
+    expect(fixture.componentInstance.newPassword()).toBe('');
+    expect(fixture.componentInstance.password()).toBe('');
+  });
+
+  it('password field does not carry one account password into another reset', () => {
+    // SWITCHING DIRECTLY, without cancelling in between -- the path Cancel's
+    // own clearing does not cover, and the one that would show user A's
+    // password in user B's form.
+    const fixture = mounted();
+    const resets = () =>
+      [...fixture.nativeElement.querySelectorAll('[data-reset]')] as HTMLButtonElement[];
+    resets()[0].click();
+    fixture.detectChanges();
+    type(fixture, '[data-new-password]', 'SECRET-FOR-USER-A');
+
+    resets()[1].click();
+    fixture.detectChanges();
+    const reopened = fixture.nativeElement.querySelector('[data-new-password]') as HTMLInputElement;
+    expect(reopened.value).toBe('');
+    expect(fixture.componentInstance.newPassword()).toBe('');
+  });
+
+  it('password field keeps what was typed when a reset fails', () => {
+    const fixture = mounted();
+    (fixture.nativeElement.querySelector('[data-reset]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    type(fixture, '[data-new-password]', 'SECRET-FOR-USER-A');
+    (fixture.nativeElement.querySelector('[data-save-password]') as HTMLButtonElement).click();
+    ctrl
+      .expectOne((r) => r.url.includes('/password'))
+      .flush({ error: 'that password is too short' }, { status: 400, statusText: 'Bad Request' });
+    fixture.detectChanges();
+
+    // THE FORM STAYS OPEN AND KEEPS IT. The usual failure is the server saying
+    // the password is too short, which is the worst possible moment to make
+    // somebody retype a long one. It cannot reach the create form any more --
+    // that is what the separate signal is for, and it is asserted here too.
+    expect(fixture.nativeElement.querySelector('[data-reset-form]')).not.toBeNull();
+    const still = fixture.nativeElement.querySelector('[data-new-password]') as HTMLInputElement;
+    expect(still.value).toBe('SECRET-FOR-USER-A');
+    expect(fixture.componentInstance.password()).toBe('');
+    expect(fixture.nativeElement.querySelector('[data-said]')!.textContent).toContain('too short');
   });
 
   describe('editing an account', () => {
@@ -303,5 +477,32 @@ describe('Users', () => {
     expect(
       fixture.nativeElement.querySelector('[data-remove]').getAttribute('data-danger'),
     ).not.toBeNull();
+  });
+
+  it('edit dialog dismissing the create form takes its password with it', () => {
+    const fixture = mounted();
+    type(fixture, '[data-name]', 'rosa');
+    type(fixture, '[data-password]', 'a-secret-for-rosa');
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-new-account]')).toBeNull();
+
+    // A PASSWORD LEFT IN A CLOSED FORM is the whole family of bug this and
+    // Jockora-e9a.62 are about, so dismissing clears it rather than hiding it.
+    expect(fixture.componentInstance.password()).toBe('');
+    expect(fixture.componentInstance.name()).toBe('');
+  });
+
+  it('edit dialog dismissing a reset takes its password with it', () => {
+    const fixture = mounted();
+    (fixture.nativeElement.querySelector('[data-reset]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    type(fixture, '[data-new-password]', 'SECRET-FOR-USER-A');
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-reset-form]')).toBeNull();
+    expect(fixture.componentInstance.newPassword()).toBe('');
   });
 });

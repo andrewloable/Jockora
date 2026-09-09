@@ -1,6 +1,7 @@
 import { DecimalPipe } from '@angular/common';
-import { Component, effect, inject, input, signal, untracked } from '@angular/core';
+import { Component, computed, effect, inject, input, signal, untracked } from '@angular/core';
 import { AdminApi, Diff, PlaylistTrack, TrackTags } from '../api/api';
+import { FormDialog } from './form-dialog';
 
 /** The cap a dossier itself carries, enforced here so a doomed save is not sent. */
 export const MAX_TAGS = 5;
@@ -15,7 +16,7 @@ export const PAGE = 50;
 @Component({
   selector: 'app-playlist',
   standalone: true,
-  imports: [DecimalPipe],
+  imports: [FormDialog, DecimalPipe],
   template: `
     <h2>Playlist</h2>
     <p data-count>{{ total() }} tracks</p>
@@ -96,9 +97,47 @@ export const PAGE = 50;
               </button>
             </td>
           </tr>
-          @if (editing() === track.track_id) {
-            <tr data-tag-editor>
-              <td colspan="8">
+        } @empty {
+          <!-- LOADING AND EMPTY ARE NOT THE SAME THING and both drew a table
+               with no rows, so a slow first paint told a new operator their
+               library was empty. Jockora-e9a.50. -->
+          <tr>
+            <td colspan="8">
+              @if (!loaded()) {
+                <span data-loading>Loading…</span>
+              } @else if (!failed()) {
+                <span data-empty
+                  ><strong>This station matched no tracks.</strong> Widen its genre or mood, or
+                  check that enrichment has reached this part of the library.</span
+                >
+              }
+            </td>
+          </tr>
+        }
+      </tbody>
+    </table>
+
+    <button type="button" data-prev [disabled]="offset() === 0" (click)="page(-1)">Previous</button>
+    <button
+      type="button"
+      data-next
+      [disabled]="offset() + tracks().length >= total()"
+      (click)="page(1)"
+    >
+      Next
+    </button>
+    <button type="button" data-regenerate (click)="regenerate()">Regenerate</button>
+
+    <!-- THE TAG EDITOR IS A DIALOG TOO, and not nested: the playlist table it
+         opens from is the page itself, not something already in a dialog, so
+         the DO NOT about two dialogs deep does not apply. Jockora-e9a.60. -->
+    <app-form-dialog
+      [title]="editingTrack() ? 'Tags for ' + editingTrack()!.title : ''"
+      [open]="editing() !== null"
+      (closed)="editing.set(null)"
+    >
+      @if (editingTrack(); as track) {
+        <fieldset data-tag-editor>
                 <!-- Checkboxes, not a multi-select: picking several
                    non-contiguous values with ctrl-click is a keyboard trick
                    nobody can see. The ticked boxes ARE the readout. -->
@@ -135,44 +174,25 @@ export const PAGE = 50;
                 @if (track.overridden) {
                   <!-- Only when there IS an edit to undo. Offering it otherwise
                      promises the enrichment can be restored over itself. -->
-                  <button type="button" data-revert-tags (click)="revertTags(track)">
-                    Use the enrichment's tags
+                  <!-- DESTRUCTIVE, AND IT SAYS SO. This discards the
+                       operator's own tags on the server, in an editor where
+                       every other change waits for Save -- and it used to look
+                       identical to the safe button beside it and read like a
+                       view toggle. Jockora-e9a.65, under the rule
+                       Jockora-e9a.48 set for the rest of the console. -->
+                  <button
+                    type="button"
+                    data-revert-tags
+                    data-danger
+                    (click)="revertTags(track)"
+                  >
+                    Discard my tags
                   </button>
                 }
                 <small data-tag-note>Regenerate to move it between stations.</small>
-              </td>
-            </tr>
-          }
-        } @empty {
-          <!-- LOADING AND EMPTY ARE NOT THE SAME THING and both drew a table
-               with no rows, so a slow first paint told a new operator their
-               library was empty. Jockora-e9a.50. -->
-          <tr>
-            <td colspan="8">
-              @if (!loaded()) {
-                <span data-loading>Loading…</span>
-              } @else if (!failed()) {
-                <span data-empty
-                  ><strong>This station matched no tracks.</strong> Widen its genre or mood, or
-                  check that enrichment has reached this part of the library.</span
-                >
-              }
-            </td>
-          </tr>
-        }
-      </tbody>
-    </table>
-
-    <button type="button" data-prev [disabled]="offset() === 0" (click)="page(-1)">Previous</button>
-    <button
-      type="button"
-      data-next
-      [disabled]="offset() + tracks().length >= total()"
-      (click)="page(1)"
-    >
-      Next
-    </button>
-    <button type="button" data-regenerate (click)="regenerate()">Regenerate</button>
+        </fieldset>
+      }
+    </app-form-dialog>
     <p data-said>{{ said() }}</p>
   `,
 })
@@ -202,6 +222,17 @@ export class Playlist {
 
   /** The track whose tags are open for editing, by id. */
   readonly editing = signal<number | null>(null);
+
+  /**
+   * The track being tagged, or null.
+   *
+   * The editor left the table in Jockora-e9a.60, so it can no longer read the
+   * track out of the row it sat in. Derived rather than copied: a copy would go
+   * stale the moment the page refreshed under it.
+   */
+  readonly editingTrack = computed(
+    () => this.tracks().find((t) => t.track_id === this.editing()) ?? null,
+  );
   readonly genres = signal<string[]>([]);
   readonly moods = signal<string[]>([]);
   /**
@@ -283,6 +314,17 @@ export class Playlist {
   }
 
   revertTags(track: PlaylistTrack): void {
+    // ASKED, and it names what is lost rather than saying "are you sure". The
+    // operator's tags go from the SERVER on this click, with no undo, so this
+    // is the last moment anything can stop it.
+    if (
+      !confirm(
+        `Discard your tags for ${track.title} and go back to what the enrichment decided? ` +
+          `Your edit cannot be recovered.`,
+      )
+    ) {
+      return;
+    }
     this.api.revertTrackTags(track.track_id).subscribe({
       next: (t) => this.applyTags(track, t, 'Back to what the enrichment decided.'),
       error: () => this.said.set('Could not undo that edit.'),

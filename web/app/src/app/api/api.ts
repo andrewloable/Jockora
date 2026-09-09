@@ -2,6 +2,29 @@ import { HttpClient } from '@angular/common/http';
 import { Injectable, inject } from '@angular/core';
 import { Observable } from 'rxjs';
 
+/**
+ * What the server said went wrong, in either shape it uses.
+ *
+ * THE SERVER SPEAKS TWO WAYS and the console only ever understood one of them
+ * at a time. http.Error writes the sentence as text/plain, so the failure
+ * arrives with error set to the string; writeFieldError writes JSON, so it
+ * arrives as an object with the sentence one level down. Every admin handler
+ * mixes both -- users_api alone has twelve of the first and nine of the second
+ * -- and a reader written for one silently mangles the other.
+ *
+ * Measured, not guessed. Refusing a duplicate account name is text/plain, and
+ * a reader expecting JSON replaced "that name is taken" with a generic
+ * sentence that told the operator nothing. Refusing a blank name is JSON, and a
+ * reader expecting text put "[object Object]" on the screen.
+ *
+ * The trim is for http.Error, which appends a newline.
+ */
+export function serverSaid(e: unknown, fallback: string): string {
+  const body = (e as { error?: unknown } | null | undefined)?.error;
+  const said = typeof body === 'string' ? body : (body as { error?: unknown } | null)?.error;
+  return typeof said === 'string' && said.trim() ? said.trim() : fallback;
+}
+
 /** One position on the dial, as /stations.json reports it. */
 export interface DialStation {
   /** False while the station is still filling up as enrichment runs. */

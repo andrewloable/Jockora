@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
-import { Api } from './api';
+import { Api, serverSaid } from './api';
 
 describe('Api', () => {
   let api: Api;
@@ -66,5 +66,34 @@ describe('Api', () => {
     const req = http.expectOne('/feedback');
     expect(req.request.body).toEqual({ station_id: 3, verdict: 'down' });
     req.flush(null);
+  });
+});
+
+// Jockora review: the server speaks two ways and the console understood one at
+// a time. Measured against the real handlers -- users_api alone writes twelve
+// text/plain refusals and nine JSON ones.
+describe('serverSaid', () => {
+  it('reads the sentence http.Error wrote as text, newline and all', () => {
+    // Refusing a duplicate account name takes this route. The console used to
+    // replace it with a generic line that told the operator nothing.
+    expect(serverSaid({ error: 'that name is taken\n' }, 'fallback')).toBe('that name is taken');
+  });
+
+  it('reads the sentence writeFieldError wrote as JSON', () => {
+    // Refusing a blank name takes this route, and a reader expecting text put
+    // "[object Object]" on the screen.
+    expect(serverSaid({ error: { field: 'name', error: 'a name is required' } }, 'fallback')).toBe(
+      'a name is required',
+    );
+  });
+
+  it('falls back when the failure carried no sentence at all', () => {
+    // A dropped connection has no body, and a 500 from a handler that did not
+    // write one has an object with nothing in it.
+    expect(serverSaid({}, 'fallback')).toBe('fallback');
+    expect(serverSaid({ error: {} }, 'fallback')).toBe('fallback');
+    expect(serverSaid({ error: '   ' }, 'fallback')).toBe('fallback');
+    expect(serverSaid({ error: { error: 42 } }, 'fallback')).toBe('fallback');
+    expect(serverSaid(null, 'fallback')).toBe('fallback');
   });
 });

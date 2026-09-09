@@ -428,3 +428,79 @@ func TestAdsCheckDeliveryOnlyRefusesTheEcho(t *testing.T) {
 		t.Errorf("good copy refused: %v", err)
 	}
 }
+
+// Jockora-g1k. Reported live with a screenshot: brand "a burger ad with the
+// humor of a gta 5 advertisement", about "a beef burger food", and the advert
+// box came back holding "Brand: a burger ad, about a beef burger food" -- the
+// model reading its own input back, 44 characters of it.
+//
+// Ad.Validate has the check that is supposed to guarantee an advert names its
+// business, and its own comment calls it the cheapest thing that separates an
+// advert from a fragment of the prompt. It tested the FIRST word of the brand.
+// Here that word is "a", every English sentence contains one, and the check
+// passed on anything at all.
+
+func TestAdBrandAnchorIgnoresLeadingStopWords(t *testing.T) {
+	for _, c := range []struct{ brand, want string }{
+		{"a burger ad with the humor of a gta 5 advertisement", "burger"},
+		{"The Cat & Fiddle", "cat"},
+		// UNCHANGED FOR EVERY BRAND THAT DOES NOT LEAD WITH AN ARTICLE, which
+		// is what makes this safe: these are exactly what firstWord returned.
+		{"Stillwater Ceramics", "stillwater"},
+		{"Nordhaven Mattresses", "nordhaven"},
+		{"Harrow & Fen", "harrow"},
+		// Nothing but stop words falls back rather than returning empty, which
+		// would match every script ever written.
+		{"the a of", "the"},
+	} {
+		if got := brandAnchor(c.brand); got != c.want {
+			t.Errorf("brandAnchor(%q) = %q, want %q", c.brand, got, c.want)
+		}
+	}
+}
+
+func TestAdBrandRefusesAnAdvertThatNamesNothing(t *testing.T) {
+	// The brand leads with "a", so the old check passed on any sentence. This
+	// script never says "burger" and must now be refused.
+	ad := Ad{ID: "x", Brand: "a burger ad with the humor of a gta 5 advertisement",
+		Script: "It is a thing, and a good one, and a fine thing at that."}
+	if err := ad.Validate(); err == nil {
+		t.Fatal("accepted an advert that never names the product; the brand check " +
+			"is what separates an advert from a fragment of the prompt")
+	}
+}
+
+func TestAdBrandRefusesTheBriefReadBack(t *testing.T) {
+	// THE EXACT SCREENSHOT. buildAdBriefPrompt fences the operator's words as
+	// "Brand: ..." and "About: ...", and a model with nothing to say copies
+	// the fence back out.
+	in := AdBrief{
+		Brand:    "a burger ad with the humor of a gta 5 advertisement",
+		About:    "a beef burger food",
+		Delivery: "comedic aggressive funny",
+	}
+	ad := Ad{ID: "x", Brand: in.Brand, Script: "Brand: a burger ad, about a beef burger food"}
+	err := ad.Validate()
+	if err == nil {
+		t.Fatal("accepted the brief read back as the advert")
+	}
+	if !strings.Contains(err.Error(), "repeats the brief back") {
+		t.Errorf("refused for the wrong reason: %v -- the retry is told what was "+
+			"wrong, so the message has to name the actual failure", err)
+	}
+	// And the check that has the brief in scope agrees there is nothing else
+	// wrong with it, so the naming is genuinely what refuses this.
+	if err := checkAgainstBrief(ad.Script, in); err != nil {
+		t.Errorf("checkAgainstBrief also refused it (%v); that is fine but it "+
+			"means this test is not proving what it says it proves", err)
+	}
+}
+
+func TestAdBrandStillAcceptsOrdinaryCopyMentioningAbout(t *testing.T) {
+	// The echo pattern must not fire on real writing. "Ask about" is ordinary.
+	ad := Ad{ID: "x", Brand: "Stillwater Ceramics",
+		Script: "Stillwater Ceramics. Ask about the winter glazes before they are gone."}
+	if err := ad.Validate(); err != nil {
+		t.Errorf("refused ordinary copy: %v", err)
+	}
+}

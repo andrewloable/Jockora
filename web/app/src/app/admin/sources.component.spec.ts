@@ -1,8 +1,8 @@
-import { describe, expect, it, beforeEach, vi } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
-import { Sources } from './sources.component';
+import { Sources, SCAN_POLL_MS } from './sources.component';
 
 const sources = [
   { id: 1, kind: 'folder', locator: '/music', enabled: true },
@@ -17,6 +17,7 @@ describe('Sources', () => {
     // written before they did is still testing what happens after the answer.
     // The tests about the QUESTION stub it themselves.
     vi.stubGlobal('confirm', () => true);
+    vi.useFakeTimers();
     await TestBed.configureTestingModule({
       imports: [Sources],
       providers: [provideHttpClient(), provideHttpClientTesting()],
@@ -24,9 +25,17 @@ describe('Sources', () => {
     ctrl = TestBed.inject(HttpTestingController);
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
   function mounted() {
     const fixture = TestBed.createComponent(Sources);
     ctrl.expectOne('/admin/sources').flush(sources);
+    fixture.detectChanges();
+    // THE FORM IS BEHIND A BUTTON since Jockora-e9a.60 moved it into a dialog.
+    (fixture.nativeElement.querySelector('[data-add-open]') as HTMLButtonElement).click();
     fixture.detectChanges();
     return fixture;
   }
@@ -269,5 +278,92 @@ describe('Sources', () => {
     expect(
       fixture.nativeElement.querySelector('[data-remove]').getAttribute('data-danger'),
     ).not.toBeNull();
+  });
+
+  // ------------------------------------------------------- Jockora-e9a.64 --
+  //
+  // pollProgress called the endpoint EXACTLY ONCE. Its comment said progress
+  // rides on now.json "which the page already polls elsewhere" -- but that
+  // polling is on the LISTENER page, not this one. So Rescan said "Scanning.
+  // Progress appears below", one snapshot of the count appeared, and it never
+  // moved again. On a large library the operator watches a frozen number and
+  // cannot tell a running scan from a finished one.
+
+  it('stale view follows a rescan to completion and then stops', () => {
+    const fixture = mounted();
+    fixture.nativeElement.querySelector('[data-rescan]').click();
+    ctrl.expectOne('/admin/rescan').flush({});
+    ctrl.expectOne((r) => r.url.includes('/now.json')).flush({
+      rescan: { running: true, found: 10, skipped: 0, missing: 0 },
+    });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-progress]').textContent).toContain('10');
+
+    // IT MOVES.
+    vi.advanceTimersByTime(SCAN_POLL_MS);
+    ctrl.expectOne((r) => r.url.includes('/now.json')).flush({
+      rescan: { running: true, found: 240, skipped: 2, missing: 0 },
+    });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-progress]').textContent).toContain('240');
+
+    // AND IT STOPS when the scan does, rather than polling a finished answer
+    // for as long as the tab is open.
+    vi.advanceTimersByTime(SCAN_POLL_MS);
+    ctrl.expectOne((r) => r.url.includes('/now.json')).flush({
+      rescan: { running: false, found: 512, skipped: 3, missing: 1 },
+    });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-progress]').textContent).toContain(
+      'Last scan',
+    );
+
+    vi.advanceTimersByTime(SCAN_POLL_MS * 3);
+    ctrl.expectNone((r) => r.url.includes('/now.json'));
+  });
+
+  it('stale view asks nothing while no scan is running', () => {
+    // An idle scanner should make no requests at all.
+    mounted();
+    vi.advanceTimersByTime(SCAN_POLL_MS * 3);
+    ctrl.expectNone((r) => r.url.includes('/now.json'));
+  });
+
+  it('stale view leaves no timer behind when the page goes away', () => {
+    const fixture = mounted();
+    fixture.nativeElement.querySelector('[data-rescan]').click();
+    ctrl.expectOne('/admin/rescan').flush({});
+    ctrl.expectOne((r) => r.url.includes('/now.json')).flush({
+      rescan: { running: true, found: 10, skipped: 0, missing: 0 },
+    });
+    fixture.detectChanges();
+
+    fixture.destroy();
+    vi.advanceTimersByTime(SCAN_POLL_MS * 3);
+    ctrl.expectNone((r) => r.url.includes('/now.json'));
+  });
+
+  it('edit dialog dismissing the source form takes its credentials with it', () => {
+    const fixture = mounted();
+    const set = (sel: string, v: string) => {
+      const el = fixture.nativeElement.querySelector(sel) as HTMLInputElement | HTMLSelectElement;
+      el.value = v;
+      el.dispatchEvent(new Event(el.tagName === 'SELECT' ? 'change' : 'input'));
+      fixture.detectChanges();
+    };
+    set('[data-kind]', 'subsonic');
+    set('[data-locator]', 'http://nas:4533');
+    set('[data-username]', 'andrew');
+    set('[data-password]', 'a-real-credential');
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-source-form]')).toBeNull();
+
+    // A CREDENTIAL LEFT IN A CLOSED FORM is a credential nobody can see and
+    // nobody meant to keep.
+    expect(fixture.componentInstance.password()).toBe('');
+    expect(fixture.componentInstance.locator()).toBe('');
+    expect(fixture.componentInstance.username()).toBe('');
   });
 });

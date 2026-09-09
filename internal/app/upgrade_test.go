@@ -75,6 +75,7 @@ func v01Fixture(t *testing.T) string {
 		// that creates it fail on "table already exists" -- loud, and meant to
 		// be. Add to this list when you add a table.
 		`DROP TABLE log_records`,
+		`DROP TABLE revoked_sessions`,
 		`ALTER TABLE tracks DROP COLUMN source_id`,
 		`ALTER TABLE tracks DROP COLUMN missing_at`,
 		`ALTER TABLE tracks DROP COLUMN genre`,

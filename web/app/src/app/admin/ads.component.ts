@@ -1,6 +1,7 @@
 import { Component, computed, inject, signal } from '@angular/core';
 import { Observable } from 'rxjs';
-import { Ad, AdminApi } from '../api/api';
+import { Ad, AdminApi, serverSaid } from '../api/api';
+import { FormDialog } from './form-dialog';
 
 /** The slot. dj.MaxAdChars, and the reason the counter exists at all. */
 const maxScript = 360;
@@ -23,6 +24,7 @@ const maxDelivery = 200;
 @Component({
   selector: 'app-ads',
   standalone: true,
+  imports: [FormDialog],
   template: `
     <h2>Ads</h2>
 
@@ -79,8 +81,15 @@ const maxDelivery = 200;
          below it. The fieldset is a wrapping flex row, which suited a row of
          short inputs and put all four of these on one line with their helper
          text flowing between them. -->
-    <fieldset data-ad-form>
-      <legend>{{ editing() ? 'Edit ' + editing()!.brand : 'New advert' }}</legend>
+    <button type="button" data-add-open (click)="adding.set(true)">Write an advert</button>
+    <app-form-dialog
+      [title]="editing() ? 'Edit ' + editing()!.brand : 'New advert'"
+      [open]="adding() || editing() !== null"
+      (closed)="reset()"
+    >
+      @if (adding() || editing()) {
+        <fieldset data-ad-form>
+          <legend>{{ editing() ? 'Edit ' + editing()!.brand : 'New advert' }}</legend>
 
       <label>
         Product or brand name
@@ -118,26 +127,34 @@ const maxDelivery = 200;
         <small>How the DJ should read it. The advert never says this word itself.</small>
       </label>
 
-      <!-- DISABLED WHILE BLANK AND WHILE IN FLIGHT, and it says which. A live
-           model call takes seconds on a local model, and an unlabelled button
-           that does nothing reads as broken. -->
-      <button
-        type="button"
-        data-write
-        [disabled]="writing() || !brand().trim() || !about().trim()"
-        (click)="write()"
-      >
-        {{ writing() ? 'Writing…' : 'Write it' }}
-      </button>
-      @if (writing()) {
-        <!-- WHY IT IS SLOW, in the words the station brief uses. Enrichment is
-             serial and shares the model, so a blurb written mid-enrichment
-             queues behind a dossier pass. -->
-        <small data-writing-note
-          >Asking the model. If this is slow, enrichment may be running — you can pause it on the
-          Overview.</small
+      <!-- WITH THE BOX IT FILLS. It used to sit between the Delivery helper
+           text and The advert label, belonging to neither by position -- the
+           same defect as the station form's Describe it. Jockora-e9a.61.
+           DISABLED WHILE BLANK AND WHILE IN FLIGHT, and it says which: a live
+           model call takes seconds, and an unlabelled button that does nothing
+           reads as broken. -->
+      <div data-field data-write-action>
+        Write the advert
+        <button
+          type="button"
+          data-write
+          [disabled]="writing() || !brand().trim() || !about().trim()"
+          (click)="write()"
         >
-      }
+          {{ writing() ? 'Writing…' : 'Write it' }}
+        </button>
+        @if (writing()) {
+          <!-- WHY IT IS SLOW, in the words the station brief uses. Enrichment is
+               serial and shares the model, so a blurb written mid-enrichment
+               queues behind a dossier pass. -->
+          <small data-writing-note
+            >Asking the model. If this is slow, enrichment may be running — you can pause it on
+            the Overview.</small
+          >
+        } @else {
+          <small>Reads the three boxes above and fills the one below.</small>
+        }
+      </div>
 
       <label>
         The advert
@@ -166,11 +183,13 @@ const maxDelivery = 200;
         <small data-brand-warning>{{ w }}</small>
       }
 
-      <button type="button" data-save (click)="save()">Save</button>
-      @if (editing()) {
-        <button type="button" data-cancel (click)="reset()">Cancel</button>
+          <div data-form-actions>
+            <button type="button" data-save (click)="save()">Save</button>
+            <button type="button" data-cancel (click)="reset()">Cancel</button>
+          </div>
+        </fieldset>
       }
-    </fieldset>
+    </app-form-dialog>
 
     <p data-said>{{ said() }}</p>
   `,
@@ -192,7 +211,11 @@ export class Ads {
   readonly script = signal('');
   readonly warning = signal('');
   readonly writing = signal(false);
+  /** Whether the New advert dialog is open. */
+  readonly adding = signal(false);
   readonly editing = signal<Ad | null>(null);
+  /** Which write the form is waiting for. See write(). */
+  private writeSeq = 0;
   readonly said = signal('');
 
   /** Code points, which is what the server counts. */
@@ -232,28 +255,62 @@ export class Ads {
     return isNaN(d.getTime()) ? 'never' : d.toLocaleString();
   }
 
-  /** Draft a blurb. SAVES NOTHING, and never clears what the operator typed. */
+  /**
+   * Draft a blurb. SAVES NOTHING, and never clears what the operator typed.
+   *
+   * THE ANSWER HAS TO PROVE IT STILL APPLIES. A slow response used to land in
+   * whichever advert was open when it returned: start a blurb for brand A,
+   * press Edit on advert B while it works, and A's copy arrived in B's form --
+   * then Save overwrote B with copy about A. The window is wide by this form's
+   * own account, since it warns that writing queues behind enrichment.
+   *
+   * A sequence number rather than an unsubscribe, because the same counter also
+   * answers "is a write for THIS form still running", which is what the
+   * Writing… label and the disabled button were getting wrong. Jockora-e9a.63.
+   */
   write(): void {
+    const seq = ++this.writeSeq;
     this.said.set('');
     this.warning.set('');
     this.writing.set(true);
     this.api.writeAd(this.brand(), this.about(), this.delivery()).subscribe({
       next: (w) => {
+        if (seq !== this.writeSeq) {
+          return;
+        }
         this.writing.set(false);
         this.script.set(w.script);
         this.warning.set(w.warning ?? '');
       },
-      error: (e: { error?: { error?: string } }) => {
+      error: (e: unknown) => {
+        // A FAILURE IS STALE THE SAME WAY. A message about another advert's
+        // request, on this advert's form, is the same defect wearing different
+        // clothes.
+        if (seq !== this.writeSeq) {
+          return;
+        }
         this.writing.set(false);
         // THE SERVER'S OWN SENTENCE. Every one of them -- 503, 502, 504 -- was
         // written to be read, and they name what to do next. The form is left
         // exactly as it was: the operator was not wrong.
-        this.said.set(String(e.error?.error ?? 'Could not write that advert.'));
+        this.said.set(serverSaid(e, 'Could not write that advert.'));
       },
     });
   }
 
+  /**
+   * Abandon any write in flight, because the form no longer holds what it was
+   * asked for. Bumping the counter is what makes the answer stale.
+   */
+  private abandonWrite(): void {
+    this.writeSeq++;
+    this.writing.set(false);
+  }
+
   edit(ad: Ad): void {
+    this.abandonWrite();
+    // NEVER BOTH AT ONCE.
+    this.adding.set(false);
     this.editing.set(ad);
     this.brand.set(ad.brand);
     this.about.set(ad.brief);
@@ -264,6 +321,8 @@ export class Ads {
   }
 
   reset(): void {
+    this.abandonWrite();
+    this.adding.set(false);
     this.editing.set(null);
     this.brand.set('');
     this.about.set('');
@@ -298,8 +357,8 @@ export class Ads {
         this.reset();
         this.load();
       },
-      error: (e: { error?: { error?: string } }) =>
-        this.said.set(String(e.error?.error ?? 'Could not save that advert.')),
+      error: (e: unknown) =>
+        this.said.set(serverSaid(e, 'Could not save that advert.')),
     });
   }
 

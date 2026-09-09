@@ -202,11 +202,19 @@ describe('LLM', () => {
   it('says why a model was refused, in the model own words', () => {
     // The two failures met live were "ignored the JSON schema" and "spent its
     // budget reasoning". Neither is guessable from "something went wrong".
+    //
+    // THE KEY IS "error", WHICH IS WHAT THE SERVER ACTUALLY WRITES. This
+    // fixture said "message" and so did the component, so the two agreed with
+    // each other and disagreed with writeFieldError -- which writes
+    // {field, error} and is the only thing llm_api.go uses for a refusal.
+    // The test passed, and every real failure showed the generic sentence
+    // while the server's own reason was on the wire and thrown away. A test
+    // that shares the code's mistake cannot see it. Jockora-gq6.
     const fixture = mounted();
     pick(fixture, 'openrouter');
     fixture.nativeElement.querySelector('[data-llm-test]').click();
     ctrl.expectOne('/admin/llm/test').flush(
-      { field: 'model', message: 'that model ignored the JSON schema' },
+      { field: 'model', error: 'that model ignored the JSON schema' },
       {
         status: 400,
         statusText: 'Bad Request',

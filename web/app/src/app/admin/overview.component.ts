@@ -1,6 +1,6 @@
 import { Component, OnDestroy, inject, signal } from '@angular/core';
 import { DecimalPipe } from '@angular/common';
-import { AdminApi, ImportReport } from '../api/api';
+import { AdminApi, ImportReport, serverSaid } from '../api/api';
 
 /**
  * What the station knows about itself, and the two things worth changing
@@ -434,7 +434,7 @@ export class Overview implements OnDestroy {
       },
       // The SERVER'S OWN WORDS: it refuses a cadence outside its range and
       // says why, and repeating that is more use than "failed".
-      error: (e: { error?: string }) => this.said.set(String(e.error ?? 'Could not set that.')),
+      error: (e: unknown) => this.said.set(serverSaid(e, 'Could not set that.')),
     });
   }
 

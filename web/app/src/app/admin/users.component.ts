@@ -1,5 +1,6 @@
 import { Component, inject, signal } from '@angular/core';
-import { AdminApi, User } from '../api/api';
+import { AdminApi, User, serverSaid } from '../api/api';
+import { FormDialog } from './form-dialog';
 
 /**
  * The accounts. Admin-created, always: there is no self-registration route
@@ -8,6 +9,7 @@ import { AdminApi, User } from '../api/api';
 @Component({
   selector: 'app-users',
   standalone: true,
+  imports: [FormDialog],
   template: `
     <h2>People</h2>
     <table data-users>
@@ -71,8 +73,11 @@ import { AdminApi, User } from '../api/api';
       </tbody>
     </table>
 
-    <fieldset>
-      <legend>New account</legend>
+    <button type="button" data-add-open (click)="adding.set(true)">Create an account</button>
+    <app-form-dialog [title]="'New account'" [open]="adding()" (closed)="closeAdd()">
+      @if (adding()) {
+        <fieldset data-new-account>
+          <legend>New account</legend>
       <label>
         Name
         <input data-name [value]="name()" (input)="name.set(value($event))" />
@@ -96,27 +101,37 @@ import { AdminApi, User } from '../api/api';
           <option value="admin">admin</option>
         </select>
       </label>
-      <div data-form-actions>
-        <button type="button" data-add (click)="add()">Create</button>
-      </div>
-    </fieldset>
+          <div data-form-actions>
+            <button type="button" data-add (click)="add()">Create</button>
+          </div>
+        </fieldset>
+      }
+    </app-form-dialog>
 
-    @if (resetting(); as user) {
-      <fieldset data-reset-form>
-        <legend>New password for {{ user.name }}</legend>
+    <app-form-dialog
+      [title]="resetting() ? 'New password for ' + resetting()!.name : ''"
+      [open]="resetting() !== null"
+      (closed)="cancelReset()"
+    >
+      @if (resetting(); as user) {
+        <fieldset data-reset-form>
+          <legend>New password for {{ user.name }}</legend>
         <label>
           New password
           <input
             data-new-password
             type="password"
-            [value]="password()"
-            (input)="password.set(value($event))"
+            [value]="newPassword()"
+            (input)="newPassword.set(value($event))"
           />
         </label>
-        <button type="button" data-save-password (click)="savePassword(user)">Set</button>
-        <button type="button" data-cancel-reset (click)="resetting.set(null)">Cancel</button>
-      </fieldset>
-    }
+          <div data-form-actions>
+            <button type="button" data-save-password (click)="savePassword(user)">Set</button>
+            <button type="button" data-cancel-reset (click)="cancelReset()">Cancel</button>
+          </div>
+        </fieldset>
+      }
+    </app-form-dialog>
 
     <p data-said>{{ said() }}</p>
   `,
@@ -144,7 +159,24 @@ export class Users {
    */
   readonly failed = signal(false);
   readonly name = signal('');
+  /**
+   * The NEW ACCOUNT form's password, and only that form's.
+   *
+   * ONE SIGNAL PER FORM. Both fieldsets used to share this one, and the create
+   * fieldset is always rendered -- so typing a new password for an existing
+   * user filled the create form with it, in a type=password box rendering dots
+   * in a form nobody was looking at. Cancel did not clear it, so the next
+   * account created got that password and the operator handed over a different
+   * one. Jockora-e9a.62.
+   *
+   * Clearing on cancel would have patched the exit and left the two fields
+   * mirroring each other while both were open, which is its own confusion.
+   */
   readonly password = signal('');
+  /** Whether the New account dialog is open. */
+  readonly adding = signal(false);
+  /** The RESET form's new password. Separate on purpose; see above. */
+  readonly newPassword = signal('');
   readonly role = signal('listener');
 
   // The row being edited, by id, so opening a second closes the first.
@@ -204,8 +236,7 @@ export class Users {
         this.editing.set(null);
         this.load();
       },
-      error: (e: { error?: string }) =>
-        this.said.set(String(e.error ?? 'Could not save that account.')),
+      error: (e: unknown) => this.said.set(serverSaid(e, 'Could not save that account.')),
     });
   }
 
@@ -220,12 +251,10 @@ export class Users {
           this.said.set(
             `Created ${this.name()}. Give them that password; it is not stored anywhere readable.`,
           );
-          this.name.set('');
-          this.password.set('');
+          this.closeAdd();
           this.load();
         },
-        error: (e: { error?: { error?: string } }) =>
-          this.said.set(String(e.error?.error ?? 'Could not create that account.')),
+        error: (e: unknown) => this.said.set(serverSaid(e, 'Could not create that account.')),
       });
   }
 
@@ -238,20 +267,51 @@ export class Users {
   }
 
   reset(user: User): void {
-    this.password.set('');
+    // NEVER BOTH AT ONCE -- and closed the same way Escape closes it, so a
+    // password half-typed into the create form does not linger behind a dialog
+    // the operator has moved away from.
+    this.closeAdd();
+    this.newPassword.set('');
     this.said.set('');
     this.resetting.set(user);
   }
 
+  /**
+   * Close the New account dialog, taking whatever was half-typed with it.
+   *
+   * The password especially: it is a secret meant for one account, and a form
+   * that keeps it is how the next account gets created with it.
+   */
+  closeAdd(): void {
+    this.adding.set(false);
+    this.name.set('');
+    this.password.set('');
+    // BACK TO THE SAFE ONE. Role is the privilege decision on this form, and
+    // carrying the last account's choice into the next means an operator who
+    // just made an admin makes another one by not touching a box. Listener is
+    // what a new account should be unless somebody says otherwise.
+    this.role.set('listener');
+  }
+
+  /** Close the reset form, taking its password with it. */
+  cancelReset(): void {
+    this.newPassword.set('');
+    this.resetting.set(null);
+  }
+
   savePassword(user: User): void {
-    this.api.resetPassword(user.id, this.password()).subscribe({
+    this.api.resetPassword(user.id, this.newPassword()).subscribe({
       next: () => {
         this.resetting.set(null);
-        this.password.set('');
+        this.newPassword.set('');
         this.said.set(`Password changed. ${user.name} stays signed in until they sign out.`);
       },
-      error: (e: { error?: { error?: string } }) =>
-        this.said.set(String(e.error?.error ?? 'Could not change that password.')),
+      // KEPT ON A FAILURE, deliberately. The reset form stays open, so the
+      // password is still in its own field where the operator can correct it --
+      // and the usual failure is the server saying it is too short, which is
+      // the worst moment to make somebody retype a long one. It cannot reach
+      // the create form any more; that is what the separate signal is for.
+      error: (e: unknown) => this.said.set(serverSaid(e, 'Could not change that password.')),
     });
   }
 
@@ -266,8 +326,7 @@ export class Users {
       next: () => this.load(),
       // 409 is the server refusing to delete the last admin. Shown as it
       // came: a console that swallows it looks broken.
-      error: (e: { error?: { error?: string } }) =>
-        this.said.set(String(e.error?.error ?? 'Could not delete that account.')),
+      error: (e: unknown) => this.said.set(serverSaid(e, 'Could not delete that account.')),
     });
   }
 }

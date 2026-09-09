@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { Component, signal } from '@angular/core';
 import { provideHttpClient } from '@angular/common/http';
@@ -327,12 +327,18 @@ describe('Playlist tag editing', () => {
   let ctrl: HttpTestingController;
 
   beforeEach(async () => {
+    // DEFAULT: yes. Discarding an operator's tags asks now (Jockora-e9a.65),
+    // and every test written before it did is still testing what happens after
+    // the answer. The tests about the QUESTION stub it themselves.
+    vi.stubGlobal('confirm', () => true);
     await TestBed.configureTestingModule({
       imports: [Host],
       providers: [provideHttpClient(), provideHttpClientTesting()],
     }).compileComponents();
     ctrl = TestBed.inject(HttpTestingController);
   });
+
+  afterEach(() => vi.unstubAllGlobals());
 
   const vocab = {
     genres: ['rock', 'grunge', 'synthwave', 'pop', 'jazz', 'folk'],
@@ -473,6 +479,85 @@ describe('Playlist tag editing', () => {
     ctrl.expectOne('/admin/tracks/1/tags').flush(null, { status: 500, statusText: 'Error' });
     fixture.detectChanges();
     expect(said()).toContain('Could not undo that edit');
+  });
+
+  // -------------------------------------------------------- Jockora-e9a.65 --
+  //
+  // "Use the enrichment's tags" issued the DELETE on click: no confirmation, no
+  // preview of what it would restore, no undo, and the operator's own tags gone
+  // from the server. In an editor where every other change waits for Save, and
+  // in a console whose rule since Jockora-e9a.48 is that a destructive control
+  // asks first and looks distinct.
+  //
+  // The guard around it is correct and stays -- it is only offered when there
+  // IS an edit to undo -- but that guarantees it is only ever shown when it has
+  // something of the operator's to destroy.
+
+  /** Open the editor on a track that already carries a hand-made edit. */
+  function overridden() {
+    const fixture = open(0);
+    tick(fixture, '[data-edit-genres]', 'synthwave');
+    fixture.nativeElement.querySelector('[data-save-tags]').click();
+    ctrl
+      .expectOne('/admin/tracks/1/tags')
+      .flush({ genres: ['synthwave'], moods: [], overridden: true });
+    fixture.detectChanges();
+    fixture.nativeElement.querySelectorAll('[data-tags]')[0].click();
+    fixture.detectChanges();
+    return fixture;
+  }
+
+  it('edit dialog names the track being tagged and closes on Escape', () => {
+    const fixture = open(0);
+    // THE ROW SCROLLING AWAY STOPS MATTERING once the dialog says which track
+    // it is -- and the editor left the table entirely, so nothing else does.
+    expect(fixture.nativeElement.querySelector('[data-dialog-title]').textContent).toContain(
+      'One',
+    );
+    expect(fixture.nativeElement.querySelector('[data-tag-editor]')!.closest('table')).toBeNull();
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-tag-editor]')).toBeNull();
+    // NOTHING SAVED: dismissing is not a quiet Save.
+    ctrl.expectNone((r) => r.method === 'PUT');
+  });
+
+  it('revert tags asks before discarding an operator edit', () => {
+    const asked: string[] = [];
+    vi.stubGlobal('confirm', (q: string) => {
+      asked.push(q);
+      return true;
+    });
+    const fixture = overridden();
+    fixture.nativeElement.querySelector('[data-revert-tags]').click();
+
+    expect(asked).toHaveLength(1);
+    // IT NAMES WHAT IS LOST, rather than asking "are you sure".
+    expect(asked[0].toLowerCase()).toContain('discard');
+    ctrl
+      .expectOne((r) => r.method === 'DELETE')
+      .flush({ genres: ['rock', 'grunge'], moods: ['angsty'], overridden: false });
+  });
+
+  it('revert tags leaves the edit alone when the prompt is dismissed', () => {
+    vi.stubGlobal('confirm', () => false);
+    const fixture = overridden();
+    fixture.nativeElement.querySelector('[data-revert-tags]').click();
+
+    // NOTHING LEFT THE BROWSER. The operator's tags are still on the server,
+    // and the editor still shows them.
+    ctrl.expectNone((r) => r.method === 'DELETE');
+  });
+
+  it('revert tags looks like the destructive control it is', () => {
+    // Jockora-e9a.48: a destructive control is visually distinct, and this one
+    // looked identical to the safe button beside it.
+    const fixture = overridden();
+    const button = fixture.nativeElement.querySelector('[data-revert-tags]') as HTMLElement;
+    expect(button.hasAttribute('data-danger')).toBe(true);
+    // And its words say what happens, rather than reading like a view toggle.
+    expect(button.textContent!.toLowerCase()).toContain('discard');
   });
 });
 

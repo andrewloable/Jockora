@@ -182,12 +182,80 @@ func TestAuthzLogoutClearsCookie(t *testing.T) {
 		t.Errorf("logout did not clear the cookie: %+v", cleared)
 	}
 
-	// The old cookie still verifies -- signing it out is the browser's job --
-	// so what matters is that the browser was told to drop it.
 	if me := withCookie(t, s, http.MethodGet, "/me", nil); me.Code != http.StatusUnauthorized {
 		t.Errorf("/me with no cookie = %d, want 401", me.Code)
 	}
 	_ = c
+}
+
+// TestAuthzLogoutEndsTheSessionServerSide REVERSES a decision this file used to
+// record: "the old cookie still verifies -- signing it out is the browser's
+// job". That was defensible while nothing in either app offered a sign-out
+// control, so the weakness was unreachable. Jockora-e9a.66 added the control,
+// and a session is a stateless token with a THIRTY-DAY life -- so a copy taken
+// from a shared device went on working for a month after the person handed it
+// back. Which is the case the control exists for.
+func TestAuthzLogoutEndsTheSessionServerSide(t *testing.T) {
+	s, _, _ := authServer(t)
+	c := sessionCookie(t, login(t, s, "andrew", "correct horse battery"))
+	if me := withCookie(t, s, http.MethodGet, "/me", c); me.Code != http.StatusOK {
+		t.Fatalf("/me before signing out = %d", me.Code)
+	}
+
+	// Signed out WITH the cookie, the way a browser sends it.
+	if rec := withCookie(t, s, http.MethodPost, "/logout", c); rec.Code != http.StatusNoContent {
+		t.Fatalf("logout = %d", rec.Code)
+	}
+
+	// THE OLD COOKIE IS THE WHOLE POINT: a copy kept by somebody else must stop
+	// working, not merely be dropped by the browser that asked.
+	if me := withCookie(t, s, http.MethodGet, "/me", c); me.Code != http.StatusUnauthorized {
+		t.Errorf("/me with the signed-out cookie = %d, want 401", me.Code)
+	}
+}
+
+// TestAuthzLogoutLeavesOtherDevicesAlone: revoked by SID, not by account. A
+// household shares one account across two devices by design -- presence counts
+// them separately -- so signing out on a phone must not sign out the tablet.
+func TestAuthzLogoutLeavesOtherDevicesAlone(t *testing.T) {
+	s, _, _ := authServer(t)
+	phone := sessionCookie(t, login(t, s, "andrew", "correct horse battery"))
+	tablet := sessionCookie(t, login(t, s, "andrew", "correct horse battery"))
+
+	if withCookie(t, s, http.MethodPost, "/logout", phone).Code != http.StatusNoContent {
+		t.Fatal("logout failed")
+	}
+	if me := withCookie(t, s, http.MethodGet, "/me", phone); me.Code != http.StatusUnauthorized {
+		t.Errorf("the phone is still signed in: %d", me.Code)
+	}
+	if me := withCookie(t, s, http.MethodGet, "/me", tablet); me.Code != http.StatusOK {
+		t.Errorf("signing out one device signed out the other: %d", me.Code)
+	}
+}
+
+// TestAuthzLogoutClearsTheCookieEvenWhenRevokingFails: refusing to sign out
+// because a write failed leaves somebody signed in on a device they are trying
+// to hand over, which is worse than the residual risk.
+func TestAuthzLogoutClearsTheCookieEvenWhenRevokingFails(t *testing.T) {
+	s, _, clk := authServer(t)
+	c := sessionCookie(t, login(t, s, "andrew", "correct horse battery"))
+	signer, err := auth.NewSigner([]byte(testKey), clk.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetAuth(signer, fakeUsers{
+		user:      store.User{ID: 1, Name: "andrew", Role: auth.RoleAdmin},
+		revokeErr: errors.New("the database went away"),
+	})
+
+	rec := withCookie(t, s, http.MethodPost, "/logout", c)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("logout = %d", rec.Code)
+	}
+	cleared := sessionCookie(t, rec)
+	if cleared == nil || cleared.MaxAge >= 0 || cleared.Value != "" {
+		t.Errorf("the cookie was not cleared: %+v", cleared)
+	}
 }
 
 // TestAuthzDisabledAfterLoginIs401: revoking access must take effect on the
@@ -378,8 +446,11 @@ func TestAuthzRejectsGarbage(t *testing.T) {
 // fakeUsers lets a test hand back an account the database could not hold, so
 // the defences against a corrupt row are reachable.
 type fakeUsers struct {
-	user store.User
-	err  error
+	user       store.User
+	err        error
+	revoked    bool
+	revokedErr error
+	revokeErr  error
 }
 
 func (f fakeUsers) GetUserByName(context.Context, string) (store.User, error) {
@@ -411,6 +482,21 @@ func (f fakeUsers) DeleteUser(context.Context, int64) error {
 }
 func (f fakeUsers) SetPassword(context.Context, int64, string) error {
 	return errors.New("not implemented by this fake")
+}
+
+// Signing out. revoked is what SessionRevoked answers, so a test can put a
+// session on either side of the line without a store.
+func (f fakeUsers) RevokeSession(context.Context, string, time.Time) error {
+	if f.revokeErr != nil {
+		return f.revokeErr
+	}
+	return nil
+}
+func (f fakeUsers) SessionRevoked(context.Context, string) (bool, error) {
+	return f.revoked, f.revokedErr
+}
+func (f fakeUsers) SweepRevokedSessions(context.Context, time.Time) error {
+	return f.revokeErr
 }
 
 // failingWriter is a ResponseWriter whose body cannot be written, which is what

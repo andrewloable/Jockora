@@ -16,9 +16,11 @@ exists under `web/app/src` and a spec name that appears in it, or be marked
 `DROPPED` with a reason. **A forgotten behaviour fails CI rather than a
 memory** — which is the whole reason the checklist is a table and not prose.
 
-Two rows are `DROPPED`. Both are deliberate and both are argued in the reason
-column: neither is an oversight, and neither is a behaviour a person can still
-reach.
+Four rows are `DROPPED`. All are deliberate and all are argued in the reason
+column: none is an oversight, and none is a behaviour a person can still
+reach. (This paragraph said *two* while the table held three, which is exactly
+the drift the row cap in `parity_test.go` exists to catch — count the rows, do
+not trust the sentence.)
 
 | page | line | behaviour | spec file | spec name |
 |---|---|---|---|---|
@@ -27,8 +29,8 @@ reach.
 | index.html | 55 | `#status` — what the page says before anybody has tuned | listener/listener.spec.ts | shows the player, the dial and what is on air |
 | index.html | 61 | `#dial` — the station list a person picks from | listener/dial.component.spec.ts | renders what a person picks a station by |
 | index.html | 65 | `#jocks` — a jock picker | DROPPED | Listeners pick stations, never jocks. A station IS a genre plus one jock, chosen by the admin; the dial is the listener's whole UI. The API behind this control (Jocks, SetJock) was removed in row 13, so the control had nothing left to call. |
-| index.html | 70 | `#nowplaying` — the track on air | listener/now-playing.component.spec.ts | renders the track and the transcript |
-| index.html | 71 | `#transcript` — what the DJ just said | listener/now-playing.component.spec.ts | renders the track and the transcript |
+| index.html | 70 | `#nowplaying` — the track on air | listener/now-playing.component.spec.ts | renders the track, and does not print what the DJ said |
+| index.html | 71 | `#transcript` — what the DJ just said | DROPPED | Removed on the developer's instruction, 2026-09-09: radio is heard, and printing the break under the player turns something the DJ says into something the listener reads along with. The break itself is unchanged and still airs. What the paragraph displayed is still fetched, still emitted, and still reaches the thumbs-down one component sideways, which has nothing to rate without it -- so no behaviour was lost with the element, only its display. Jockora-do2. |
 <!-- Row 76 MOVED PAGE rather than being dropped, Jockora-e9a.47. The dossier
      count was operator telemetry rendered to LISTENERS: "Enriched 3649 of 7595
      (48%)" in monospace under the DJ transcript, a library-wide figure nobody
