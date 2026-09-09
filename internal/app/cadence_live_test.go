@@ -62,3 +62,55 @@ func TestLiveCadenceFallsBackToTheConfiguredOne(t *testing.T) {
 		t.Errorf("cadence = %v, want the configured 7", got)
 	}
 }
+
+// TestLiveOverlapIsWhatTheOverviewReports: the lead-in, on the cadence's own
+// terms. Found reviewing Jockora-ugw -- the configured default was applied only
+// inside the branch that runs when a store exists, so a deployment without one
+// reported and used zero however the flag was set.
+func TestLiveOverlapIsWhatTheOverviewReports(t *testing.T) {
+	s := openUpgraded(t, v01Fixture(t))
+	pipe := &station.Pipeline{Cadence: station.NewCadence(4)}
+	cfg := testConfig(t)
+	cfg.BreakOverlapS = 2.5
+	a := &App{
+		opts:       Options{Library: &Library{Store: s}, Breaks: pipe},
+		cfg:        cfg,
+		log:        quietLogger(),
+		overlap:    cfg.BreakOverlapS,
+		overlapSet: true,
+	}
+
+	if got := a.Overview().(map[string]any)["break_overlap_s"]; got != 2.5 {
+		t.Fatalf("break_overlap_s = %v, want the configured 2.5", got)
+	}
+	if err := a.SetBreakOverlap(1); err != nil {
+		t.Fatalf("SetBreakOverlap: %v", err)
+	}
+	if got := a.Overview().(map[string]any)["break_overlap_s"]; got != 1.0 {
+		t.Errorf("break_overlap_s = %v, want the operator's 1", got)
+	}
+	// AND THE PIPELINE ACTUALLY HAS IT, not just the number the console shows.
+	if got := pipe.Overlap(); got != 1 {
+		t.Errorf("the pipeline is on %v, so the console and the DJ disagree", got)
+	}
+
+	// ZERO IS A CHOICE, not an absent setting: it means never start before the
+	// boundary. A non-zero test for "has anybody chosen" would make it the one
+	// value an operator cannot pick.
+	if err := a.SetBreakOverlap(0); err != nil {
+		t.Fatalf("SetBreakOverlap(0): %v", err)
+	}
+	if got := a.Overview().(map[string]any)["break_overlap_s"]; got != 0.0 {
+		t.Errorf("break_overlap_s = %v, want the operator's 0", got)
+	}
+
+	// REFUSED, and the range said out loud rather than silently clamped: an
+	// operator who types 20 has misunderstood the setting, and a clamp would
+	// hide that behind a number they did not choose.
+	if err := a.SetBreakOverlap(MaxBreakOverlapS + 1); err == nil {
+		t.Error("an overlap past the ceiling was accepted")
+	}
+	if err := a.SetBreakOverlap(-1); err == nil {
+		t.Error("a negative overlap was accepted")
+	}
+}

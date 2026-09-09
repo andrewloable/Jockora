@@ -114,6 +114,31 @@ const REFRESH_MS = 10_000;
         </label>
         <button type="button" data-set-cadence (click)="saveCadence()">Set</button>
       </p>
+      <p>
+        <!-- THE SENTENCE IS THE LABEL, like the cadence above it. -->
+        <label data-inline-field>
+          Start talking
+          <input
+            data-overlap
+            type="number"
+            min="0"
+            max="6"
+            step="0.5"
+            [value]="overlap()"
+            (input)="editOverlap(+$any($event.target).value)"
+          />
+          seconds before the song ends.
+        </label>
+        <button type="button" data-set-overlap (click)="saveOverlap()">Set</button>
+        <!-- WHAT IT CANNOT DO, said where the number is set. An operator who
+             asks for six seconds on a library with no measured outros gets
+             none, and without this the setting looks broken rather than
+             bounded. Jockora-ugw. -->
+        <small data-overlap-note
+          >Never over singing: each break is capped by the outgoing track's measured instrumental
+          tail, so a song that ends on a vocal gets no overlap at all.</small
+        >
+      </p>
       <p data-dj-line>
         {{ num('said_lines') | number }} lines spoken so far · {{ num('adverts') | number }} adverts
         in the pool.
@@ -412,8 +437,34 @@ export class Overview implements OnDestroy {
         if (typeof n === 'number' && !this.editingCadence) {
           this.cadence.set(n);
         }
+        // The same rule for the same reason: the server owns it, and the
+        // operator's own typing wins until the server has taken it.
+        const v = (o as Record<string, unknown>)['break_overlap_s'];
+        if (typeof v === 'number' && !this.editingOverlap) {
+          this.overlap.set(v);
+        }
       },
       error: () => this.said.set('Could not read the overview.'),
+    });
+  }
+
+  /** How far before a transition the DJ starts, in seconds. */
+  readonly overlap = signal(3);
+  // True between the operator typing an overlap and the server accepting it.
+  private editingOverlap = false;
+
+  editOverlap(seconds: number): void {
+    this.editingOverlap = true;
+    this.overlap.set(seconds);
+  }
+
+  saveOverlap(): void {
+    this.api.setBreakOverlap(this.overlap()).subscribe({
+      next: () => {
+        this.editingOverlap = false;
+        this.said.set('Overlap set. It takes effect from the next break.');
+      },
+      error: (e: unknown) => this.said.set(serverSaid(e, 'Could not set that.')),
     });
   }
 

@@ -6,6 +6,7 @@ package station
 import (
 	"context"
 	"log/slog"
+	"math"
 	"os"
 	"sync"
 
@@ -83,10 +84,15 @@ type Boundary struct {
 // time, and Cadence.SlotAt advances state -- declining to generate would then
 // silently consume the slot and the break would never air anywhere.
 type Pipeline struct {
-	Cadence   *Cadence
-	Lookahead *Lookahead
-	Length    LengthCheck
-	Queue     *sched.Queue
+	Cadence *Cadence
+	// OverlapSeconds is how far BEFORE a transition the DJ may start talking,
+	// when the outgoing track has an instrumental tail to talk over. Zero
+	// keeps every break starting exactly at the boundary, which is what this
+	// did before Jockora-ugw. Read and written under mu; see SetOverlap.
+	OverlapSeconds float64
+	Lookahead      *Lookahead
+	Length         LengthCheck
+	Queue          *sched.Queue
 	// Writer is the same BreakWriter LengthCheck writes through. Held here so
 	// each boundary's track context can be applied at GENERATION time.
 	Writer      *BreakWriter
@@ -153,6 +159,55 @@ func (p *Pipeline) SetCadence(c *Cadence) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.Cadence = c
+}
+
+// SetOverlap changes how far into the outgoing outro the DJ starts talking.
+//
+// GUARDED LIKE THE CADENCE AND FOR THE SAME REASON: this is written by an admin
+// HTTP handler and read on the generation path. The comment above SetCadence
+// records that reading an unguarded field there raced with every console
+// change, and that the race was reintroduced once by a line placed directly
+// above the comment warning about it.
+func (p *Pipeline) SetOverlap(seconds float64) {
+	if seconds < 0 {
+		seconds = 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.OverlapSeconds = seconds
+}
+
+// Overlap is the configured lead-in, read under the lock.
+func (p *Pipeline) Overlap() float64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.OverlapSeconds
+}
+
+// leadIn is how far before the boundary THIS break should start.
+//
+// PLACEMENT DECIDES WHETHER, THE MEASUREMENT DECIDES HOW FAR. Only a break
+// placed on the outgoing tail or spanning the transition belongs before the
+// boundary at all: a ramp break is about the incoming record and starting it
+// early would put it over the outgoing vocal, which is the whole thing the
+// placement rules exist to prevent.
+//
+// BOUNDED BY THE MEASURED OUTRO, never a flat number. The design's GTA rule is
+// that a break never lands over a vocal, and cur.OutroS is the only thing that
+// knows where the singing stops. A track with no usable measurement gets no
+// lead-in and behaves exactly as it did before this existed -- silence about it
+// is correct, because an unmeasured outro is the normal case on a library the
+// enricher has not reached.
+func leadIn(placement mix.Placement, cur *Track, overlap float64) float64 {
+	if overlap <= 0 || cur == nil || !cur.usableRamp() {
+		return 0
+	}
+	switch placement {
+	case mix.PlacementOutro, mix.PlacementSpan:
+		return min(overlap, cur.OutroS)
+	default:
+		return 0
+	}
 }
 
 func (p *Pipeline) Announce(b Boundary) bool {
@@ -270,9 +325,21 @@ func (p *Pipeline) generate(ctx context.Context, now float64, b Boundary) (bool,
 		p.log().Info("break dropped", "boundary", b.Index, "reason", rendered.Reason, "elapsed", elapsed)
 		return false, nil
 	}
-	if !p.Lookahead.InTime(now, b.InsertionAt, elapsed) {
+	// THE DEADLINE IS WHEN THE BREAK STARTS, NOT WHEN THE TRACK ENDS.
+	//
+	// A break placed on the outgoing outro now begins up to OverlapSeconds
+	// BEFORE the boundary, so it has to be ready that much sooner. Checked
+	// against the boundary instead, a break could pass this and then be handed
+	// to the queue at a sample the mixer had already played -- rejected there,
+	// deleted, and reported as "break rejected by the scheduler" rather than as
+	// the late generation it actually was. Jockora-ugw introduced the lead-in;
+	// this is the deadline moving with it.
+	leadS := leadIn(rendered.Placement, b.Cur, p.Overlap())
+	startsAt := b.InsertionAt - leadS
+	if !p.Lookahead.InTime(now, startsAt, elapsed) {
 		p.log().Warn("break generated too late", "boundary", b.Index, "elapsed", elapsed,
-			"available", b.InsertionAt-now, "p95", p.Lookahead.P95(), "recommended_t", p.Lookahead.RecommendedT())
+			"available", startsAt-now, "lead_in_s", leadS,
+			"p95", p.Lookahead.P95(), "recommended_t", p.Lookahead.RecommendedT())
 		_ = os.Remove(rendered.Path)
 		return false, nil
 	}
@@ -287,8 +354,26 @@ func (p *Pipeline) generate(ctx context.Context, now float64, b Boundary) (bool,
 		_ = os.Remove(rendered.Path)
 		return false, nil
 	}
+	// THE BREAK STARTS BEFORE THE BOUNDARY WHEN IT IS ABOUT THE OUTGOING TRACK.
+	//
+	// This is the half of placement that was never implemented. The splice
+	// position is fixed at announce time, and sched.Entry carries a Placement
+	// string that nothing reads -- so outro and span granted a bigger word
+	// budget and then spent all of it AFTER the transition, which is how a
+	// break sized for a window straddling the boundary ends up entirely on one
+	// side of it. Jockora-ugw.
+	//
+	// NEVER EARLIER THAN THE MIXER HAS ALREADY REACHED. The queue refuses an
+	// entry at or before what it has drained and the mixer clamps to its own
+	// position, but arriving there with a negative offset would be this code
+	// asking for something impossible and calling the refusal someone else's
+	// problem.
+	at := b.InsertionSample - int64(leadS*mix.SampleRate)
+	if at < 0 {
+		at = 0
+	}
 	if err := queue.Enqueue(sched.Entry{
-		AfterSample: b.InsertionSample,
+		AfterSample: at,
 		Action:      sched.ActionSpliceAudio,
 		Path:        rendered.Path,
 		Placement:   rendered.Placement.String(),
@@ -321,6 +406,7 @@ func (p *Pipeline) generate(ctx context.Context, now float64, b Boundary) (bool,
 	p.log().Info("break text",
 		"boundary", b.Index,
 		"placement", rendered.Placement.String(),
+		"starts_before_boundary_s", math.Round(leadS*10)/10,
 		"just_played", song(b.CurArtist, b.CurTitle),
 		"coming_up", song(b.NextArtist, b.NextTitle),
 		"before_that", song(b.PrevArtist, b.PrevTitle),

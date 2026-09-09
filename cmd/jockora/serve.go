@@ -166,8 +166,13 @@ func buildStationBreaks(cfg *config.Config, lib *app.Library, log *slog.Logger,
 		Writer: writer,
 		// THIS is where config.BreakEveryNTracks finally has a consumer. It was
 		// parsed, env-mapped and defaulted since the spine and read by nothing.
-		Cadence:   station.NewCadence(cfg.BreakEveryNTracks),
-		Lookahead: station.NewLookahead(0),
+		Cadence: station.NewCadence(cfg.BreakEveryNTracks),
+		// AND THE LEAD-IN, on the same line of reasoning: the flag is the
+		// startup default and this is where a pipeline gets it. Bounded by each
+		// track's measured outro at use, so a high value is never a break over
+		// a vocal -- it just stops being reached on short tails.
+		OverlapSeconds: cfg.BreakOverlapS,
+		Lookahead:      station.NewLookahead(0),
 		Length: station.LengthCheck{
 			// The DJ, wrapped so one break slot in four becomes an advert when
 			// the pack carries a pool. An advert then travels the SAME ladder a

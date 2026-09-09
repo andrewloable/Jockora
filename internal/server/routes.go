@@ -74,6 +74,7 @@ func (s *Server) Routes() []Route {
 		{Path: "/admin/voices", Role: auth.RoleAdmin, H: s.serveVoices},
 		{Method: http.MethodPost, Path: "/admin/voices/preview", Role: auth.RoleAdmin, H: s.serveVoicePreview},
 		{Method: http.MethodPost, Path: "/admin/cadence", Role: auth.RoleAdmin, H: adminWrite},
+		{Method: http.MethodPost, Path: "/admin/overlap", Role: auth.RoleAdmin, H: adminWrite},
 		{Method: http.MethodPost, Path: "/admin/enriching", Role: auth.RoleAdmin, H: adminWrite},
 		{Method: http.MethodPost, Path: "/admin/rescan", Role: auth.RoleAdmin, H: s.serveRescan},
 		// THE FIRST NON-HLS STREAMING ENDPOINT. /admin/logs/stream is SSE and

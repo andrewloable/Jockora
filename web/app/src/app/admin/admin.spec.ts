@@ -410,4 +410,21 @@ describe('Admin', () => {
     fixture.detectChanges();
     expect(fixture.nativeElement.textContent).toContain('Language model');
   });
+
+  // Jockora-9xk. The helper being tested does not prove either route root CALLS
+  // it -- removing the call from the component killed nothing until this
+  // existed, which is the same wiring gap main.go's LevelVar test was written
+  // for on the Go side.
+  it('the console points the browser tab at its own mark', () => {
+    const link = document.createElement('link');
+    link.rel = 'icon';
+    link.href = 'placeholder.svg';
+    document.head.appendChild(link);
+    try {
+      mounted();
+      expect(link.getAttribute('href')).toBe('icon-admin.svg');
+    } finally {
+      link.remove();
+    }
+  });
 });

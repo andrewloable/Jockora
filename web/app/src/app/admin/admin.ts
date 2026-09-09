@@ -1,5 +1,6 @@
 import { Component, inject, signal } from '@angular/core';
 import { Router } from '@angular/router';
+import { ADMIN_ICON, setFavicon } from '../favicon';
 import { AdminApi, Api, Me, Station } from '../api/api';
 import { Overview } from './overview.component';
 import { Sources } from './sources.component';
@@ -131,6 +132,9 @@ export class Admin {
   readonly picked = signal<number | null>(null);
 
   constructor() {
+    // THE CONSOLE'S OWN MARK, so a tab strip holding both halves of the product
+    // is readable at a glance. Jockora-9xk.
+    setFavicon(ADMIN_ICON);
     // WHO IS SIGNED IN, from the server rather than from anything the page
     // could guess. It also proves the session is live: a stale cookie shows
     // nobody instead of showing a name that is no longer true.

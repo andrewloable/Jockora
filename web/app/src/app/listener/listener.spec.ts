@@ -159,4 +159,21 @@ describe('Listener', () => {
     fixture.detectChanges();
     expect(navigate).toHaveBeenCalledWith(['/login']);
   });
+
+  // Jockora-9xk. The helper being tested does not prove either route root CALLS
+  // it -- removing the call from the component killed nothing until this
+  // existed, which is the same wiring gap main.go's LevelVar test was written
+  // for on the Go side.
+  it('the listener points the browser tab at its own mark', () => {
+    const link = document.createElement('link');
+    link.rel = 'icon';
+    link.href = 'placeholder.svg';
+    document.head.appendChild(link);
+    try {
+      mounted();
+      expect(link.getAttribute('href')).toBe('icon.svg');
+    } finally {
+      link.remove();
+    }
+  });
 });

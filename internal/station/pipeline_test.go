@@ -498,3 +498,154 @@ func TestBreakTextNamesAnAbsentRecordRatherThanLeavingItBlank(t *testing.T) {
 		}
 	}
 }
+
+// TestOverlapStartsTheBreakBeforeTheBoundary: Jockora-ugw. Placement used to
+// set a word budget and a label and never a position, so a break sized for a
+// window straddling the transition was spliced entirely after it.
+func TestOverlapStartsTheBreakBeforeTheBoundary(t *testing.T) {
+	// A four-second outro on the outgoing track and a three-second setting: the
+	// break should start three seconds early, not four and not zero.
+	clk := clock.NewFake(time.Unix(1_700_000_000, 0))
+	p, _, q := newPipeline(t, clk, 20*time.Second, 6.0)
+	p.SetOverlap(3)
+
+	at := 240.0
+	for i := 1; i <= 4; i++ {
+		p.Announce(Boundary{
+			// A LONG OUTRO AND NO USABLE RAMP, so the placement chooser picks
+			// the outro rather than the ramp -- a ramp break is about the
+			// incoming record and must NOT start early.
+			Index: i, Cur: lrcTrack(0, 20), Next: lrcTrack(0, 4),
+			InsertionAt: float64(i) * 60, InsertionSample: int64(float64(i) * 60 * mix.SampleRate),
+		})
+	}
+	if _, err := p.Tick(context.Background(), at-150); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	entries := q.DrainDue(1 << 62)
+	if len(entries) != 1 {
+		t.Fatalf("got %d scheduled entries, want 1", len(entries))
+	}
+	boundary := int64(at * mix.SampleRate)
+	want := boundary - int64(3*mix.SampleRate)
+	if entries[0].AfterSample != want {
+		t.Errorf("spliced at %d, want %d (%g seconds before the boundary at %d)",
+			entries[0].AfterSample, want, 3.0, boundary)
+	}
+	if entries[0].Placement != "outro" {
+		t.Errorf("placement = %q, want outro", entries[0].Placement)
+	}
+}
+
+func TestOverlapNeverExceedsTheMeasuredOutro(t *testing.T) {
+	// THE GTA RULE. A flat lead-in on a track whose instrumental tail is one
+	// second talks over the singing, which is the defect Jockora-8om was filed
+	// for. The measurement caps the setting, never the other way round.
+	for _, c := range []struct {
+		name    string
+		outro   float64
+		overlap float64
+		want    float64
+	}{
+		{"setting is the smaller", 20, 3, 3},
+		{"outro is the smaller", 1, 3, 1},
+		{"no overlap configured", 20, 0, 0},
+	} {
+		got := leadIn(mix.PlacementOutro, lrcTrack(0, c.outro), c.overlap)
+		if got != c.want {
+			t.Errorf("%s: leadIn = %g, want %g", c.name, got, c.want)
+		}
+	}
+	// AN UNMEASURED OUTRO GETS NOTHING. Most of a library is unmeasured until
+	// the enricher reaches it, and guessing there is exactly how a break lands
+	// over a vocal.
+	if got := leadIn(mix.PlacementOutro, &Track{DurationS: 200}, 3); got != 0 {
+		t.Errorf("an unmeasured outro gave a lead-in of %g, want 0", got)
+	}
+	// AND NEITHER DOES A NUMBER NOBODY TRUSTS. This is the case the zero test
+	// above cannot see: a track can carry an outro of twenty seconds at a
+	// confidence usableRamp rejects -- a guess from a duration heuristic rather
+	// than synced lyrics or analysis. min() would happily return three seconds
+	// of it. Dropping the confidence check survives every other assertion here,
+	// which is how this case came to be written.
+	guessed := &Track{DurationS: 200, OutroS: 20, RampConfidence: enrich.ConfidenceNone}
+	if got := leadIn(mix.PlacementOutro, guessed, 3); got != 0 {
+		t.Errorf("an untrusted outro measurement gave a lead-in of %g, want 0", got)
+	}
+	if got := leadIn(mix.PlacementOutro, nil, 3); got != 0 {
+		t.Errorf("a nil track gave a lead-in of %g, want 0", got)
+	}
+}
+
+func TestOverlapOnlyAppliesToBreaksAboutTheOutgoingTrack(t *testing.T) {
+	// A RAMP BREAK INTRODUCES THE INCOMING RECORD. Starting it early would put
+	// it over the outgoing track's ending -- announcing the next song over the
+	// end of the last one, which is precisely Jockora-8om.
+	for placement, want := range map[mix.Placement]float64{
+		mix.PlacementRamp:    0,
+		mix.PlacementBetween: 0,
+		mix.PlacementOutro:   3,
+		mix.PlacementSpan:    3,
+	} {
+		if got := leadIn(placement, lrcTrack(0, 20), 3); got != want {
+			t.Errorf("%s: leadIn = %g, want %g", placement, got, want)
+		}
+	}
+}
+
+func TestOverlapIsClampedAndReadable(t *testing.T) {
+	p := &Pipeline{}
+	p.SetOverlap(-1)
+	if got := p.Overlap(); got != 0 {
+		t.Errorf("a negative overlap was kept as %g; it must clamp to 0", got)
+	}
+	p.SetOverlap(2.5)
+	if got := p.Overlap(); got != 2.5 {
+		t.Errorf("Overlap() = %g, want 2.5", got)
+	}
+}
+
+// TestOverlapDeadlineMovesWithTheLeadIn: found reviewing Jockora-ugw.
+//
+// The lead-in moved WHERE a break is spliced and left the timing check pointed
+// at the boundary, so a break that finished after its own start time still
+// passed InTime -- and was then handed to the queue at a sample the mixer had
+// already played. The queue refuses that, so the break was deleted and reported
+// as "break rejected by the scheduler": a late generation wearing the costume
+// of a scheduler fault, on exactly the breaks nearest the edge.
+func TestOverlapDeadlineMovesWithTheLeadIn(t *testing.T) {
+	clk := clock.NewFake(time.Unix(1_700_000_000, 0))
+	var logged bytes.Buffer
+	// Generation takes 8 seconds; the boundary is 10 seconds away; the break
+	// starts 3 seconds before it. So it finishes at +8 against a start at +7
+	// and is late -- while against the boundary at +10 it would look fine.
+	p, _, q := newPipeline(t, clk, 8*time.Second, 6.0)
+	p.SetOverlap(3)
+	p.Log = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	at := 240.0
+	for i := 1; i <= 4; i++ {
+		p.Announce(Boundary{
+			Index: i, Cur: lrcTrack(0, 20), Next: lrcTrack(0, 4),
+			InsertionAt: float64(i) * 60, InsertionSample: int64(float64(i) * 60 * mix.SampleRate),
+		})
+	}
+	if _, err := p.Tick(context.Background(), at-10); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if got := len(q.DrainDue(1 << 62)); got != 0 {
+		t.Errorf("%d entries reached the scheduler; a break that cannot start on time "+
+			"must be dropped as late, not handed over to be refused", got)
+	}
+	out := logged.String()
+	if !strings.Contains(out, "break generated too late") {
+		t.Errorf("the drop was not reported as late generation:\n%s", out)
+	}
+	// AND THE LINE SAYS HOW MUCH OF THE DEADLINE THE LEAD-IN TOOK, or the next
+	// person tuning the lookahead cannot see why the budget shrank.
+	if !strings.Contains(out, "lead_in_s=3") {
+		t.Errorf("the late line does not carry the lead-in:\n%s", out)
+	}
+}

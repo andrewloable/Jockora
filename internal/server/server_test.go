@@ -429,6 +429,7 @@ func post(t *testing.T, s *Server, path, body string, header ...string) *httptes
 
 type fakeAdmin struct {
 	cadence   int
+	overlap   float64
 	enriching bool
 	said      string
 	err       error
@@ -440,6 +441,13 @@ func (f *fakeAdmin) SetCadence(n int) error {
 		return f.err
 	}
 	f.cadence = n
+	return nil
+}
+func (f *fakeAdmin) SetBreakOverlap(seconds float64) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.overlap = seconds
 	return nil
 }
 func (f *fakeAdmin) SetEnriching(on bool) (string, error) {

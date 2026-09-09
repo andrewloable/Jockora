@@ -93,6 +93,10 @@ type Config struct {
 	SegmentSeconds    int // HLS target segment duration
 	ListSize          int // HLS playlist window, in segments
 	BreakEveryNTracks int // schedule a DJ break after this many tracks
+	// BreakOverlapS is how far into the outgoing track's instrumental tail the
+	// DJ may start talking. Bounded by the measured outro at use, so a track
+	// that ends on a vocal is never talked over however high this is set.
+	BreakOverlapS float64
 
 	CrossfadeSeconds float64 // default crossfade length at a track boundary
 
@@ -177,6 +181,8 @@ func LoadArgs(args []string, register func(*flag.FlagSet)) (*Config, error) {
 	fs.IntVar(&c.SegmentSeconds, "segment-seconds", 4, "HLS segment duration")
 	fs.IntVar(&c.ListSize, "list-size", 10, "HLS playlist window, in segments")
 	fs.IntVar(&c.BreakEveryNTracks, "break-every-n-tracks", 4, "tracks between DJ breaks")
+	fs.Float64Var(&c.BreakOverlapS, "break-overlap", 3,
+		"seconds the DJ may start before a transition, capped by the outgoing track's measured outro")
 
 	fs.Float64Var(&c.CrossfadeSeconds, "crossfade-seconds", 2.0, "crossfade length at a track boundary")
 

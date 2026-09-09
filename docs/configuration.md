@@ -79,7 +79,26 @@ credentials. That is the same trust boundary as the password in your config.
 |---|---|---|
 | `-persona` | — | A `.toml` card, or a **directory** to pick from by what the library sounds like. |
 | `-break-every-n-tracks` | `4` | **The knob most likely to be wrong.** See below. |
+| `-break-overlap` | `3` | Seconds the DJ may start talking *before* the song ends. See below. |
 | `-station` | — | Which station to broadcast. |
+
+### Talking over the outro
+
+`-break-overlap` is how far into the outgoing track's instrumental tail the DJ
+may start. Three seconds by default, and the console has the same control on the
+Overview page — the stored value outranks this flag, because a setting an
+operator chose must survive a restart.
+
+**It is capped by the music, not by you.** The break never starts earlier than
+the outgoing track's *measured* instrumental outro, so a song that ends on a
+vocal gets no overlap at all whatever this is set to. A track the enricher has
+not reached yet, or whose outro was only guessed at rather than derived from
+synced lyrics or analysis, also gets none. Setting this to six on a library with
+no measured outros changes nothing, and that is the design rather than a fault.
+
+It applies only to breaks placed on the outgoing track or spanning the
+transition. A break that introduces the *incoming* record never starts early —
+that would announce the next song over the end of the last one.
 
 ### JockPacks
 
@@ -210,6 +229,23 @@ historical reasons and changing them is not supported.
 | `-listen-addr` | `127.0.0.1:8080` | HTTP bind address. |
 | `-log-format` | inferred | `text`, `json`, or empty to infer — JSON when stdout is not a terminal. |
 | `-allow-lan` | off | **Required for any non-loopback bind.** Accounts guard the stream and the APIs; there is no TLS. |
+| `-session-key` | generated | Secret that signs session cookies, 32 bytes or more. See below. |
+
+### The session key
+
+`-session-key`, or `JOCKORA_SESSION_KEY`, is the secret every sign-in cookie is
+signed with. **Leave it empty and Jockora generates one on first run and keeps
+it in the database**, which is the right answer for a single host: sessions then
+survive restarts with nothing for you to store.
+
+Set it yourself when the database is not the only copy of your state — restoring
+an older backup would otherwise roll the key back and sign everybody out, and
+two Jockoras sharing one library cannot verify each other's cookies without it.
+Prefer the environment variable: a flag is visible in the process list to every
+user on the machine.
+
+Changing it signs out every session immediately, which is also the blunt way to
+do that on purpose.
 
 ## Coverage sampling
 

@@ -253,6 +253,12 @@ type App struct {
 	// without a lock all over this package, and writing it from an HTTP
 	// handler is a race this code has already met once -- see SetCadence.
 	cadence int
+	// overlap is the operator's live lead-in, and overlapSet says whether they
+	// have chosen one. A BOOL RATHER THAN A ZERO TEST: zero is a legitimate
+	// choice here -- it means never start before the boundary -- so treating it
+	// as unset would make it the one value an operator cannot pick.
+	overlap    float64
+	overlapSet bool
 
 	// stallUntil pauses the feeder, for the fault injection GATE 2 requires.
 	// Guarded because the signal handler and the feeder are different goroutines.
@@ -387,6 +393,15 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 		lastBreaks: map[int64]*server.LastBreak{},
 		breaks:     map[int64]*stationBreaks{},
 		cadence:    cfg.BreakEveryNTracks,
+		// BESIDE THE CADENCE AND FOR THE SAME REASON. This was set inside the
+		// accounts branch, which only runs when a store exists -- so on the
+		// spike path, in tests, and on any deployment without accounts, the
+		// -break-overlap flag was parsed, defaulted and read by nothing, and
+		// every station started at the boundary. Exactly the shape of the note
+		// on the Cadence line in serve.go, which records that
+		// BreakEveryNTracks was parsed and read by nothing since the spine.
+		overlap:    cfg.BreakOverlapS,
+		overlapSet: true,
 		level:      opts.Level,
 		// HERE, NOT IN Run, and the reason is a race the detector never saw.
 		// Run starts the HTTP server and only forty lines later reached the
@@ -528,6 +543,10 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 		// chosen, that choice is the setting, and a restart must not quietly
 		// undo it.
 		a.applyStoredCadence(context.Background(), opts.Breaks)
+		// The stored lead-in outranks the configured one, exactly as the
+		// cadence above does. The configured default is applied where the
+		// pipeline is built, not here.
+		a.applyStoredOverlap(context.Background(), opts.Breaks)
 
 		a.tracker = presence.New(clock.Real{}, ListenerGrace)
 		// THE MANAGER IS BUILT BEFORE SetStations, and the order is not
@@ -616,6 +635,34 @@ func (a *App) applyStoredCadence(ctx context.Context, breaks *station.Pipeline) 
 	a.log.Info("break cadence restored", "every_n_tracks", n)
 }
 
+// applyStoredOverlap restores the operator's chosen lead-in at startup.
+//
+// Silent about a database that has never had one, which is the normal case:
+// the configured default then stands, exactly as it does for the cadence.
+func (a *App) applyStoredOverlap(ctx context.Context, breaks *station.Pipeline) {
+	if a.opts.Library == nil || a.opts.Library.Store == nil {
+		return
+	}
+	raw, ok, err := a.opts.Library.Store.Setting(ctx, overlapSetting)
+	if err != nil || !ok {
+		return
+	}
+	v, convErr := strconv.ParseFloat(raw, 64)
+	if convErr != nil || v < 0 || v > MaxBreakOverlapS {
+		a.log.Warn("stored break overlap is not usable; keeping the configured one",
+			"stored", raw, "using", a.cfg.BreakOverlapS)
+		return
+	}
+	if breaks != nil {
+		breaks.SetOverlap(v)
+	}
+	// Startup, before any goroutine exists, so correcting the config default
+	// here is safe in the way an HTTP handler never is.
+	a.cfg.BreakOverlapS = v
+	a.setLiveOverlap(v)
+	a.log.Info("break overlap restored", "seconds", v)
+}
+
 // cadenceSetting is where the operator's break cadence lives.
 //
 // IT HAS TO OUTLIVE A RESTART. It is a decision an operator makes about how
@@ -624,6 +671,20 @@ func (a *App) applyStoredCadence(ctx context.Context, breaks *station.Pipeline) 
 // said, and the operator's setting was gone with nothing to say so. Reported
 // after it went back to 4 twice.
 const cadenceSetting = "break_cadence"
+
+// overlapSetting is where the operator's break lead-in lives, and it outlives a
+// restart for exactly the reason the cadence does: it is a decision about how
+// the station sounds, and a setting that silently reverts to the compose file
+// on every restart is one the operator has to remember to redo, and will not.
+const overlapSetting = "break_overlap"
+
+// MaxBreakOverlapS caps the lead-in an operator may ask for.
+//
+// Six seconds is the same ceiling mix.MaxFadeFrames puts on a crossfade, and
+// for the same reason: past that a transition stops reading as a transition.
+// The measured outro caps it further at use, so this is only a guard against a
+// number nobody meant to type.
+const MaxBreakOverlapS = 6.0
 
 // sessionKey resolves the secret that signs listener sessions.
 //
@@ -781,6 +842,13 @@ func (a *App) breaksFor(id int64) *stationBreaks {
 		if n := a.cadence; n > 0 {
 			pipeline.SetCadence(station.NewCadence(n))
 		}
+		// AND THE LEAD-IN, for the same reason and read under the same lock.
+		// overlapSet rather than a non-zero test: zero is a legitimate choice
+		// -- it is "never start before the boundary" -- and treating it as
+		// unset would make that the one setting an operator cannot pick.
+		if a.overlapSet {
+			pipeline.SetOverlap(a.overlap)
+		}
 		a.breaks[id] = br
 		return br
 	}
@@ -797,6 +865,31 @@ func (a *App) setLiveCadence(n int) {
 	a.breaksMu.Lock()
 	a.cadence = n
 	a.breaksMu.Unlock()
+}
+
+// setLiveOverlap records the operator's chosen lead-in for stations not yet
+// built. Same reason as the cadence: a station that comes up an hour later must
+// sound like the one they configured, not like the compose file.
+func (a *App) setLiveOverlap(seconds float64) {
+	a.breaksMu.Lock()
+	a.overlap = seconds
+	a.overlapSet = true
+	a.breaksMu.Unlock()
+}
+
+// liveOverlap is the lead-in in force, for the status payload.
+func (a *App) liveOverlap() float64 {
+	if v, ok := a.liveOverlapSetting(); ok {
+		return v
+	}
+	return a.cfg.BreakOverlapS
+}
+
+// liveOverlapSetting is that choice, and whether anybody has made one.
+func (a *App) liveOverlapSetting() (float64, bool) {
+	a.breaksMu.Lock()
+	defer a.breaksMu.Unlock()
+	return a.overlap, a.overlapSet
 }
 
 // liveCadenceSetting is that choice, or zero if nobody has made one.
@@ -2197,6 +2290,7 @@ func (a *App) Overview() any {
 	out["adverts"] = countOf(ctx, db, `SELECT count(*) FROM ads`)
 	out["feedback"] = recentFeedback(ctx, db)
 	out["cadence"] = a.liveCadence()
+	out["break_overlap_s"] = a.liveOverlap()
 	out["enriching"] = a.enrichmentRunning()
 	if why := a.enrichmentTrouble(); why != "" {
 		out["enrichment_stopped"] = why
@@ -2378,6 +2472,36 @@ func recentFeedback(ctx context.Context, db *sql.DB) []map[string]any {
 // The deferred month named this the single most likely thing to be
 // misconfigured, and until now changing it meant editing a compose file and
 // restarting the station.
+// SetBreakOverlap changes how far into the outgoing outro the DJ starts.
+//
+// The measured outro caps this at use, so a high value does not put a break
+// over a vocal -- it only stops being reached on tracks with a short tail.
+func (a *App) SetBreakOverlap(seconds float64) error {
+	if seconds < 0 || seconds > MaxBreakOverlapS {
+		return fmt.Errorf("overlap must be between 0 and %g seconds, got %g",
+			MaxBreakOverlapS, seconds)
+	}
+	if !a.hasDJ() {
+		return fmt.Errorf("no DJ is running")
+	}
+	a.setLiveOverlap(seconds)
+	a.eachBreaks(func(_ int64, br *stationBreaks) {
+		br.pipeline.SetOverlap(seconds)
+	})
+	if a.opts.Breaks != nil {
+		a.opts.Breaks.SetOverlap(seconds)
+	}
+	// WRITTEN DOWN, not just applied, for the reason recorded on cadenceSetting.
+	if a.opts.Library != nil && a.opts.Library.Store != nil {
+		if err := a.opts.Library.Store.SetSetting(context.Background(), overlapSetting,
+			strconv.FormatFloat(seconds, 'g', -1, 64)); err != nil {
+			a.log.Warn("break overlap changed but could not be saved", "err", err)
+		}
+	}
+	a.log.Info("break overlap changed", "seconds", seconds)
+	return nil
+}
+
 func (a *App) SetCadence(n int) error {
 	if n < 1 || n > 100 {
 		return fmt.Errorf("cadence must be between 1 and 100 tracks, got %d", n)

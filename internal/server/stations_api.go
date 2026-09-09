@@ -127,7 +127,7 @@ type stationView struct {
 	// interesting value here, and a count that vanishes when it is nought is a
 	// count the console has to guess at.
 	Listeners int `json:"listeners"`
-	Tracks  int      `json:"tracks"`
+	Tracks    int `json:"tracks"`
 	// What the operator asked for, and the bounds it became.
 	Brief   string `json:"brief,omitempty"`
 	YearMin int    `json:"year_min,omitempty"`
@@ -258,7 +258,7 @@ func (s *Server) viewOfStation(ctx context.Context, st store.Station) (stationVi
 		Genres: station.SplitList(st.Genre), Moods: station.SplitList(st.Mood),
 		JockID: st.JockID, Enabled: st.Enabled, Tracks: len(ids),
 		Listeners: s.listeners(st.ID),
-		Brief: st.Brief, YearMin: st.YearMin, YearMax: st.YearMax,
+		Brief:     st.Brief, YearMin: st.YearMin, YearMax: st.YearMax,
 		TempoMin: st.TempoMin, TempoMax: st.TempoMax,
 		DurationMinS: st.DurationMinS, DurationMaxS: st.DurationMaxS}
 	if ok, warn := station.CheckThreshold(len(ids)); !ok {

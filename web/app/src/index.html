@@ -6,7 +6,10 @@
     <base href="/" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <link rel="icon" type="image/x-icon" href="favicon.ico" />
+    <!-- SVG, and one file rather than a set of sizes: the mark is two shapes
+         and scales exactly. The console swaps this for icon-admin.svg at
+         runtime so an operator with both tabs open can tell them apart. -->
+    <link rel="icon" type="image/svg+xml" href="icon.svg" />
   </head>
   <body>
     <app-root></app-root>

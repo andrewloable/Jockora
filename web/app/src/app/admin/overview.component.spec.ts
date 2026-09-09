@@ -775,4 +775,54 @@ describe('Overview', () => {
       '250 of 500',
     );
   });
+
+  // Jockora-ugw: how far into the outgoing song the DJ starts talking.
+  it('the DJ overlap is set, and the server owns the number', () => {
+    const fixture = mounted();
+    const box = fixture.nativeElement.querySelector('[data-overlap]') as HTMLInputElement;
+    box.value = '2.5';
+    box.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('[data-set-overlap]') as HTMLButtonElement).click();
+
+    const req = ctrl.expectOne('/admin/overlap');
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual({ overlap: 2.5 });
+    req.flush(null);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('Overlap set');
+  });
+
+  it('the DJ overlap repeats the server refusal rather than its own', () => {
+    const fixture = mounted();
+    (fixture.nativeElement.querySelector('[data-set-overlap]') as HTMLButtonElement).click();
+    ctrl.expectOne('/admin/overlap').flush('overlap must be between 0 and 6 seconds, got 9\n', {
+      status: 400,
+      statusText: 'Bad Request',
+    });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain(
+      'between 0 and 6 seconds',
+    );
+  });
+
+  it('the DJ overlap shows what the server has, not a hardcoded default', () => {
+    // THE CADENCE BESIDE IT WAS REPORTED FOR EXACTLY THIS, TWICE: the field was
+    // a hardcoded 4 that never read the answer, so an operator whose setting
+    // the server had stored, applied and logged reloaded the page and saw the
+    // default -- indistinguishable from the setting having been lost. The
+    // second report came after the storage half was already fixed.
+    const fixture = mounted({ library: { tracks: 1, enriched: 1 }, break_overlap_s: 1.5 });
+    expect((fixture.nativeElement.querySelector('[data-overlap]') as HTMLInputElement).value).toBe(
+      '1.5',
+    );
+  });
+
+  it('the DJ overlap says what it cannot do, beside the number', () => {
+    // An operator who asks for six seconds on a library with no measured
+    // outros gets none, and without this the setting looks broken.
+    const note = mounted().nativeElement.querySelector('[data-overlap-note]');
+    expect(note).not.toBeNull();
+    expect(note.textContent).toContain('measured');
+  });
 });

@@ -21,6 +21,10 @@ type Admin interface {
 	Overview() any
 	// SetCadence changes how many tracks pass between breaks.
 	SetCadence(n int) error
+	// SetBreakOverlap changes how far into the outgoing track's instrumental
+	// tail the DJ starts talking. Capped by the measured outro at use, so a
+	// track that ends on a vocal is never talked over whatever this is set to.
+	SetBreakOverlap(seconds float64) error
 	// SetEnriching pauses or resumes the background enrichment worker.
 	// SetEnriching pauses or resumes, and SAYS WHICH THING IT DID: resuming a
 	// worker that gave up restarts it, resuming a paused one only unpauses it,
@@ -59,8 +63,9 @@ func (s *Server) serveAdminWrite(w http.ResponseWriter, r *http.Request, path st
 	}
 
 	var body struct {
-		Cadence   *int  `json:"cadence"`
-		Enriching *bool `json:"enriching"`
+		Cadence   *int     `json:"cadence"`
+		Overlap   *float64 `json:"overlap"`
+		Enriching *bool    `json:"enriching"`
 	}
 	if !s.decode(w, r, &body) {
 		return
@@ -73,6 +78,15 @@ func (s *Server) serveAdminWrite(w http.ResponseWriter, r *http.Request, path st
 			return
 		}
 		if err := s.admin.SetCadence(*body.Cadence); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	case "/admin/overlap":
+		if body.Overlap == nil {
+			http.Error(w, `expected {"overlap": seconds}`, http.StatusBadRequest)
+			return
+		}
+		if err := s.admin.SetBreakOverlap(*body.Overlap); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

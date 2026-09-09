@@ -57,6 +57,7 @@ var matrix = []expectation{
 		body: `{"voice":"am_fenrir"}`},
 	{path: "/admin/voices", role: auth.RoleAdmin},
 	{method: http.MethodPost, path: "/admin/cadence", role: auth.RoleAdmin, body: `{"cadence":8}`},
+	{method: http.MethodPost, path: "/admin/overlap", role: auth.RoleAdmin, body: `{"overlap":3}`},
 	{method: http.MethodPost, path: "/admin/enriching", role: auth.RoleAdmin, body: `{"enriching":true}`},
 	{method: http.MethodPost, path: "/admin/rescan", role: auth.RoleAdmin},
 	{path: "/admin/users", sample: "/admin/users", role: auth.RoleAdmin},

@@ -176,3 +176,26 @@ func TestLogLevelDefaultIsWarn(t *testing.T) {
 		t.Error("main still creates a bare LevelVar, whose zero value is info")
 	}
 }
+
+// TestServeGivesThePipelineTheConfiguredOverlap: found reviewing Jockora-ugw.
+//
+// The configured lead-in was applied only inside the branch that runs when a
+// store exists, so on the spike path, in tests and on any deployment without
+// accounts the -break-overlap flag was parsed, defaulted and read by nothing --
+// every station started at the boundary and the flag looked broken. The Cadence
+// line two lines above it carries a comment about exactly this: config.
+// BreakEveryNTracks was parsed, env-mapped and read by nothing since the spine.
+//
+// serve() opens a store and starts a server, so it cannot be called from here.
+// Reading the source is what is left, and it is the trade main.go's own
+// LevelVar test and test/console_css_test.go already make.
+func TestServeGivesThePipelineTheConfiguredOverlap(t *testing.T) {
+	src, err := os.ReadFile("serve.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "OverlapSeconds: cfg.BreakOverlapS") {
+		t.Error("the pipeline is built without the configured lead-in, so -break-overlap " +
+			"is parsed and read by nothing and every break starts at the boundary")
+	}
+}

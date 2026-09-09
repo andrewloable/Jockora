@@ -99,6 +99,51 @@ func TestPerStationWriterIsOnePerStation(t *testing.T) {
 	}
 }
 
+// TestPerStationInheritsTheBreakOverlap: found reviewing Jockora-ugw, where a
+// mutation removing the configured default from the App literal killed nothing.
+//
+// THE LEAD-IN IS ONE SETTING FOR THE WHOLE DIAL, exactly as the cadence is. A
+// station built after the operator chose -- or before anybody chose, on the
+// configured default -- would otherwise start every break at the boundary while
+// the console reported the number they asked for.
+func TestPerStationInheritsTheBreakOverlap(t *testing.T) {
+	a, _ := perStationApp(t, map[int64]string{1: "sunny"})
+	a.cfg.BreakOverlapS = 2.5
+	a.overlap, a.overlapSet = 2.5, true
+
+	if got := a.breaksFor(1).pipeline.Overlap(); got != 2.5 {
+		t.Errorf("a station starts on overlap %g, want the configured 2.5", got)
+	}
+
+	if err := a.SetBreakOverlap(1.5); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.breaksFor(9).pipeline.Overlap(); got != 1.5 {
+		t.Errorf("a station built later runs on overlap %g, want the operator's 1.5", got)
+	}
+
+	// ZERO IS A CHOICE AND MUST BE INHERITED AS ONE.
+	//
+	// THE FACTORY HANDS BACK A NON-ZERO DEFAULT HERE ON PURPOSE, because that
+	// is the only arrangement in which this assertion can fail: with a factory
+	// that builds pipelines at zero, "the operator chose 0" and "nobody applied
+	// anything" produce the same number and a non-zero test for whether anybody
+	// has chosen survives. Falsification caught exactly that.
+	inner := a.opts.NewBreaks
+	a.opts.NewBreaks = func(id int64) (*station.Pipeline, *station.BreakWriter) {
+		pipe, w := inner(id)
+		pipe.OverlapSeconds = 4
+		return pipe, w
+	}
+	if err := a.SetBreakOverlap(0); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.breaksFor(11).pipeline.Overlap(); got != 0 {
+		t.Errorf("a station built after the operator chose 0 runs on %g, want 0 -- "+
+			"their choice must beat the compiled-in default", got)
+	}
+}
+
 func TestPerStationWriterEachHearsItsOwnJock(t *testing.T) {
 	a, _ := perStationApp(t, map[int64]string{1: "sunny", 2: "dutch"})
 	ctx := context.Background()

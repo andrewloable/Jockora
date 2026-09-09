@@ -1,5 +1,6 @@
 import { Component, inject, signal } from '@angular/core';
 import { Router } from '@angular/router';
+import { LISTENER_ICON, setFavicon } from '../favicon';
 import { Api, DialStation } from '../api/api';
 import { Dial } from './dial.component';
 import { Feedback } from './feedback.component';
@@ -43,6 +44,10 @@ export class Listener {
   readonly transcript = signal('');
 
   constructor() {
+    // THE LISTENER'S MARK. index.html already ships it, so this only matters
+    // coming BACK from the console in the same tab -- which is exactly what an
+    // operator does after checking something. Jockora-9xk.
+    setFavicon(LISTENER_ICON);
     // Ask who we are before anything else. A listener whose session expired
     // while the tab was open should meet the login form rather than a dial
     // that silently fails to load.

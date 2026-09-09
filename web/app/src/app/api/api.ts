@@ -342,6 +342,10 @@ export class AdminApi {
     return this.http.post<void>('/admin/cadence', { cadence: n });
   }
 
+  setBreakOverlap(seconds: number): Observable<void> {
+    return this.http.post<void>('/admin/overlap', { overlap: seconds });
+  }
+
   setEnriching(on: boolean): Observable<{ said: string }> {
     return this.http.post<{ said: string }>('/admin/enriching', { enriching: on });
   }
