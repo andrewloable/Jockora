@@ -231,8 +231,7 @@ export class Logs implements OnDestroy {
         this.recorded.set(level);
         this.said.set(`Recording ${level.toLowerCase()} and above.`);
       },
-      error: (e: unknown) =>
-        this.said.set(serverSaid(e, 'Could not change what is recorded.')),
+      error: (e: unknown) => this.said.set(serverSaid(e, 'Could not change what is recorded.')),
     });
   }
 

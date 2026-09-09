@@ -92,9 +92,7 @@ export class FormDialog {
   }
 
   private dialog(): HTMLDialogElement {
-    return (this.host.nativeElement as HTMLElement).querySelector(
-      'dialog',
-    ) as HTMLDialogElement;
+    return (this.host.nativeElement as HTMLElement).querySelector('dialog') as HTMLDialogElement;
   }
 
   /**

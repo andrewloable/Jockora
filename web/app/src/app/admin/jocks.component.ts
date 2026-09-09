@@ -1,5 +1,6 @@
 import { Component, OnDestroy, inject, signal } from '@angular/core';
 import { AdminApi, Jock, serverSaid } from '../api/api';
+import { TableView } from './table-view';
 import { FormDialog } from './form-dialog';
 
 /**
@@ -37,22 +38,55 @@ const blank = (): Jock => ({
   imports: [FormDialog],
   template: `
     <h2>Jocks</h2>
+    <!-- SEARCH AND SORT over the whole list, which is all in the browser.
+         Jockora-9g7. -->
+    <label data-table-search>
+      Search
+      <input
+        data-search
+        type="search"
+        placeholder="name, voice or personality"
+        [value]="view.query()"
+        (input)="view.query.set($any($event.target).value)"
+      />
+    </label>
     <table data-jocks>
       <thead>
         <tr>
-          <th>Name</th>
-          <th>Voice</th>
-          <th>Good for</th>
+          <th [attr.aria-sort]="view.ariaSort('name')">
+            <button type="button" data-sort="name" (click)="view.toggle('name')">
+              Name <span data-sort-marker>{{ view.marker('name') }}</span>
+            </button>
+          </th>
+          <th [attr.aria-sort]="view.ariaSort('voice')">
+            <button type="button" data-sort="voice" (click)="view.toggle('voice')">
+              Voice <span data-sort-marker>{{ view.marker('voice') }}</span>
+            </button>
+          </th>
+          <th [attr.aria-sort]="view.ariaSort('goodfor')">
+            <button type="button" data-sort="goodfor" (click)="view.toggle('goodfor')">
+              Good for <span data-sort-marker>{{ view.marker('goodfor') }}</span>
+            </button>
+          </th>
           <!-- THE TWO FIELDS THAT DECIDE HOW A DJ SOUNDS, and the whole point
                of a persona in this product. They were invisible here, so
                telling two jocks apart meant opening Edit on each in turn. -->
-          <th>Speech style</th>
-          <th>Personality</th>
+          <th [attr.aria-sort]="view.ariaSort('speech')">
+            <button type="button" data-sort="speech" (click)="view.toggle('speech')">
+              Speech style <span data-sort-marker>{{ view.marker('speech') }}</span>
+            </button>
+          </th>
+          <th [attr.aria-sort]="view.ariaSort('personality')">
+            <button type="button" data-sort="personality" (click)="view.toggle('personality')">
+              Personality <span data-sort-marker>{{ view.marker('personality') }}</span>
+            </button>
+          </th>
+          <!-- NOT SORTABLE: a column of buttons has no order. -->
           <th>Actions</th>
         </tr>
       </thead>
       <tbody>
-        @for (jock of jocks(); track jock.id) {
+        @for (jock of view.shown(); track jock.id) {
           <tr>
             <td data-label="Name">{{ jock.name }}</td>
             <td data-label="Voice">{{ jock.voice_id }}</td>
@@ -111,79 +145,79 @@ const blank = (): Jock => ({
       @if (adding() || editing()) {
         <fieldset data-jock-form>
           <legend>{{ editing() ? 'Edit ' + draft().id : 'New jock' }}</legend>
-      <!-- THE NAME COMES FIRST, because it is the only thing on this form an
+          <!-- THE NAME COMES FIRST, because it is the only thing on this form an
            operator actually has in mind. The id follows FROM it. -->
-      <label>
-        Name
-        <input
-          data-name
-          placeholder="Sunny Marchetti"
-          [value]="draft().name"
-          (input)="setName($event)"
-        />
-        <small>What the DJ is called on air, and what the identifier is made from.</small>
-      </label>
-      <!-- DERIVED, NOT DEMANDED. This used to be the first field, a free-text
+          <label>
+            Name
+            <input
+              data-name
+              placeholder="Sunny Marchetti"
+              [value]="draft().name"
+              (input)="setName($event)"
+            />
+            <small>What the DJ is called on air, and what the identifier is made from.</small>
+          </label>
+          <!-- DERIVED, NOT DEMANDED. This used to be the first field, a free-text
            box whose placeholder was the word "id", asking a person to invent a
            stable machine key with no stated rules and no sign of what happens
            if it collides. It is still editable -- somebody who cares can set
            it -- but somebody who does not never has to look. -->
-      <label>
-        Identifier
-        <input data-id [value]="draft().id" (input)="setId($event)" [readOnly]="editing()" />
-        <small>{{
-          editing()
-            ? 'Fixed once a jock exists: stations and persona files refer to it.'
-            : 'Made from the name. Change it if you want a different one.'
-        }}</small>
-      </label>
-      <label>
-        Voice
-        <select data-voice (change)="set('voice_id', $event)">
-          <option value="" [selected]="!draft().voice_id">— voice —</option>
-          @for (voice of voices(); track voice) {
-            <option [value]="voice" [selected]="voice === draft().voice_id">{{ voice }}</option>
-          }
-        </select>
-        <small>Which speech voice reads this jock's breaks.</small>
-      </label>
-      <!-- THE SAME SHAPE AS A FIELD, so it lines up with the controls beside it
+          <label>
+            Identifier
+            <input data-id [value]="draft().id" (input)="setId($event)" [readOnly]="editing()" />
+            <small>{{
+              editing()
+                ? 'Fixed once a jock exists: stations and persona files refer to it.'
+                : 'Made from the name. Change it if you want a different one.'
+            }}</small>
+          </label>
+          <label>
+            Voice
+            <select data-voice (change)="set('voice_id', $event)">
+              <option value="" [selected]="!draft().voice_id">— voice —</option>
+              @for (voice of voices(); track voice) {
+                <option [value]="voice" [selected]="voice === draft().voice_id">{{ voice }}</option>
+              }
+            </select>
+            <small>Which speech voice reads this jock's breaks.</small>
+          </label>
+          <!-- THE SAME SHAPE AS A FIELD, so it lines up with the controls beside it
            rather than sitting below them. A bare button has no label header, and
            the fieldset aligns on the bottom of each box -- so without this the
            button hung 12px low. It cannot be a real label: a button is itself
            labelable, so a label wrapping one is invalid. -->
-      <div data-field>
-        Preview
-        <button
-          type="button"
-          data-preview
-          [disabled]="!draft().voice_id || previewing() !== null"
-          (click)="preview(draft().voice_id)"
-        >
-          {{ previewing() === draft().voice_id ? 'Speaking…' : 'Hear it' }}
-        </button>
-        <small>Speaks one line, so you hear it before you save.</small>
-      </div>
-      <label>
-        Speech style
-        <input
-          data-style
-          placeholder="clipped, no filler, never repeats a phrase"
-          [value]="draft().speech_style"
-          (input)="set('speech_style', $event)"
-        />
-        <small>How they talk. The listener hears this more than anything else here.</small>
-      </label>
-      <label>
-        Personality
-        <input
-          data-personality
-          placeholder="dry, fond of the records, unimpressed by everything else"
-          [value]="draft().personality"
-          (input)="set('personality', $event)"
-        />
-        <small>Who they are. The persona card is ground truth and never drifts.</small>
-      </label>
+          <div data-field>
+            Preview
+            <button
+              type="button"
+              data-preview
+              [disabled]="!draft().voice_id || previewing() !== null"
+              (click)="preview(draft().voice_id)"
+            >
+              {{ previewing() === draft().voice_id ? 'Speaking…' : 'Hear it' }}
+            </button>
+            <small>Speaks one line, so you hear it before you save.</small>
+          </div>
+          <label>
+            Speech style
+            <input
+              data-style
+              placeholder="clipped, no filler, never repeats a phrase"
+              [value]="draft().speech_style"
+              (input)="set('speech_style', $event)"
+            />
+            <small>How they talk. The listener hears this more than anything else here.</small>
+          </label>
+          <label>
+            Personality
+            <input
+              data-personality
+              placeholder="dry, fond of the records, unimpressed by everything else"
+              [value]="draft().personality"
+              (input)="set('personality', $event)"
+            />
+            <small>Who they are. The persona card is ground truth and never drifts.</small>
+          </label>
           <div data-form-actions>
             <button type="button" data-save (click)="save()">Save</button>
             <button type="button" data-cancel (click)="reset()">Cancel</button>
@@ -199,6 +233,15 @@ export class Jocks implements OnDestroy {
   private readonly api = inject(AdminApi);
 
   readonly jocks = signal<Jock[]>([]);
+
+  /** The search box and the sortable headers. Jockora-9g7. */
+  readonly view = new TableView<Jock>(this.jocks, [
+    { key: 'name', value: (j) => j.name },
+    { key: 'voice', value: (j) => j.voice_id },
+    { key: 'goodfor', value: (j) => j.good_for_genres.join(', ') },
+    { key: 'speech', value: (j) => j.speech_style },
+    { key: 'personality', value: (j) => j.personality },
+  ]);
   /**
    * True once the first answer has arrived, success OR failure.
    *
@@ -353,8 +396,7 @@ export class Jocks implements OnDestroy {
         this.reset();
         this.load();
       },
-      error: (e: unknown) =>
-        this.said.set(serverSaid(e, 'Could not save that jock.')),
+      error: (e: unknown) => this.said.set(serverSaid(e, 'Could not save that jock.')),
     });
   }
 

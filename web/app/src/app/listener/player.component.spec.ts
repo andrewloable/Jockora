@@ -37,6 +37,109 @@ describe('Player', () => {
     return fixture;
   }
 
+  // REPRODUCTION, reported 2026-09-09: pick a station, press Listen, pick a
+  // different station -- the button still reads Stop, pressing it does nothing,
+  // and no sound comes from the new station.
+  it('player transport keeps playing when the listener changes station', () => {
+    vi.spyOn(Hls, 'isSupported').mockReturnValue(true);
+    vi.spyOn(Hls.prototype, 'loadSource').mockImplementation(() => undefined);
+    vi.spyOn(Hls.prototype, 'attachMedia').mockImplementation(() => undefined);
+    const fixture = mount();
+    const audio = fixture.nativeElement.querySelector('[data-player]') as HTMLAudioElement;
+
+    // THE ELEMENT'S OWN paused, modelled honestly: jsdom's is read-only, and
+    // the whole defect lives in WHEN it flips.
+    let paused = true;
+    Object.defineProperty(audio, 'paused', { configurable: true, get: () => paused });
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(async () => {
+      paused = false;
+      audio.dispatchEvent(new Event('play'));
+    });
+
+    fixture.componentInstance.src.set('/hls/1/live.m3u8');
+    fixture.detectChanges();
+    fixture.nativeElement.querySelector('[data-playpause]').click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-playpause]').textContent.trim()).toBe('Stop');
+    play.mockClear();
+
+    // THE SWAP, IN THE ORDER A BROWSER DOES IT. The element is still playing
+    // when the new source arrives; hls.destroy detaches the media, which runs
+    // the element's load algorithm, and THAT sets paused to true without firing
+    // a pause event. So the signal that follows the element had nothing to
+    // follow and went stale: the button kept claiming it was playing, and
+    // pressing it called pause() on an already-paused element, which does
+    // nothing. Hence "could not click listen".
+    vi.spyOn(Hls.prototype, 'destroy').mockImplementation(() => {
+      paused = true;
+    });
+    fixture.componentInstance.src.set('/hls/2/live.m3u8');
+    fixture.detectChanges();
+
+    // CHANGING STATION IS THIS PRODUCT'S ONLY ESCAPE HATCH. Somebody who was
+    // listening and picks another station is still listening.
+    expect(play).toHaveBeenCalled();
+    expect(fixture.nativeElement.querySelector('[data-playpause]').textContent.trim()).toBe('Stop');
+  });
+
+  it('player transport tells the truth when the browser refuses the new station', async () => {
+    // A REFUSED RESUME IS NOT A CRASH AND NOT A LIE. If the browser declines to
+    // carry sound across the swap, the rejection is swallowed the same way
+    // toggle() swallows it -- and the button must then say Listen, because the
+    // element really is paused. The alternative is the original bug wearing a
+    // different hat.
+    vi.spyOn(Hls, 'isSupported').mockReturnValue(true);
+    vi.spyOn(Hls.prototype, 'loadSource').mockImplementation(() => undefined);
+    vi.spyOn(Hls.prototype, 'attachMedia').mockImplementation(() => undefined);
+    const fixture = mount();
+    const audio = fixture.nativeElement.querySelector('[data-player]') as HTMLAudioElement;
+
+    let paused = true;
+    Object.defineProperty(audio, 'paused', { configurable: true, get: () => paused });
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(async () => {
+      paused = false;
+      audio.dispatchEvent(new Event('play'));
+    });
+    fixture.componentInstance.src.set('/hls/1/live.m3u8');
+    fixture.detectChanges();
+    fixture.nativeElement.querySelector('[data-playpause]').click();
+    fixture.detectChanges();
+
+    // Now the browser says no.
+    play.mockRejectedValue(new DOMException('NotAllowedError'));
+    vi.spyOn(Hls.prototype, 'destroy').mockImplementation(() => {
+      paused = true;
+    });
+    fixture.componentInstance.src.set('/hls/2/live.m3u8');
+    fixture.detectChanges();
+    await Promise.resolve();
+
+    expect(play).toHaveBeenCalled();
+    expect(fixture.nativeElement.querySelector('[data-playpause]').textContent.trim()).toBe(
+      'Listen',
+    );
+  });
+
+  it('player transport does not start playing a station nobody asked to hear', () => {
+    // The other half: tuning while STOPPED must stay stopped, or picking a
+    // station to read about it starts sound the listener did not ask for.
+    vi.spyOn(Hls, 'isSupported').mockReturnValue(true);
+    vi.spyOn(Hls.prototype, 'loadSource').mockImplementation(() => undefined);
+    vi.spyOn(Hls.prototype, 'attachMedia').mockImplementation(() => undefined);
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    const fixture = mount();
+
+    fixture.componentInstance.src.set('/hls/1/live.m3u8');
+    fixture.detectChanges();
+    fixture.componentInstance.src.set('/hls/2/live.m3u8');
+    fixture.detectChanges();
+
+    expect(play).not.toHaveBeenCalled();
+    expect(fixture.nativeElement.querySelector('[data-playpause]').textContent.trim()).toBe(
+      'Listen',
+    );
+  });
+
   // THE INVARIANT. Changing station is the escape hatch this product gives
   // instead of a skip, and that is what lets a break make a forward reference.
   it('has no skip, next or seek control', () => {

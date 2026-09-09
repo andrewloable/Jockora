@@ -1,6 +1,7 @@
 import { Component, computed, inject, signal } from '@angular/core';
 import { Observable } from 'rxjs';
 import { Ad, AdminApi, serverSaid } from '../api/api';
+import { TableView } from './table-view';
 import { FormDialog } from './form-dialog';
 
 /** The slot. dj.MaxAdChars, and the reason the counter exists at all. */
@@ -28,18 +29,47 @@ const maxDelivery = 200;
   template: `
     <h2>Ads</h2>
 
+    <!-- SEARCH AND SORT over the whole list, which is all in the browser.
+         Jockora-9g7. -->
+    <label data-table-search>
+      Search
+      <input
+        data-search
+        type="search"
+        placeholder="brand or advert copy"
+        [value]="view.query()"
+        (input)="view.query.set($any($event.target).value)"
+      />
+    </label>
     <table data-ads>
       <thead>
         <tr>
-          <th scope="col">Brand</th>
-          <th scope="col">Advert</th>
-          <th scope="col">Last aired</th>
-          <th scope="col">On air</th>
+          <th scope="col" [attr.aria-sort]="view.ariaSort('brand')">
+            <button type="button" data-sort="brand" (click)="view.toggle('brand')">
+              Brand <span data-sort-marker>{{ view.marker('brand') }}</span>
+            </button>
+          </th>
+          <th scope="col" [attr.aria-sort]="view.ariaSort('script')">
+            <button type="button" data-sort="script" (click)="view.toggle('script')">
+              Advert <span data-sort-marker>{{ view.marker('script') }}</span>
+            </button>
+          </th>
+          <th scope="col" [attr.aria-sort]="view.ariaSort('aired')">
+            <button type="button" data-sort="aired" (click)="view.toggle('aired')">
+              Last aired <span data-sort-marker>{{ view.marker('aired') }}</span>
+            </button>
+          </th>
+          <th scope="col" [attr.aria-sort]="view.ariaSort('enabled')">
+            <button type="button" data-sort="enabled" (click)="view.toggle('enabled')">
+              On air <span data-sort-marker>{{ view.marker('enabled') }}</span>
+            </button>
+          </th>
+          <!-- NOT SORTABLE: a column of buttons has no order. -->
           <th scope="col">Actions</th>
         </tr>
       </thead>
       <tbody>
-        @for (ad of ads(); track ad.id) {
+        @for (ad of view.shown(); track ad.id) {
           <tr>
             <td data-label="Brand">{{ ad.brand }}</td>
             <td data-label="Advert">{{ ad.script }}</td>
@@ -91,97 +121,99 @@ const maxDelivery = 200;
         <fieldset data-ad-form>
           <legend>{{ editing() ? 'Edit ' + editing()!.brand : 'New advert' }}</legend>
 
-      <label>
-        Product or brand name
-        <input
-          data-brand
-          placeholder="Stillwater Ceramics"
-          [value]="brand()"
-          (input)="brand.set($any($event.target).value)"
-        />
-        <small>The advert has to say this name, or it is not an advert.</small>
-      </label>
+          <label>
+            Product or brand name
+            <input
+              data-brand
+              placeholder="Stillwater Ceramics"
+              [value]="brand()"
+              (input)="brand.set($any($event.target).value)"
+            />
+            <small>The advert has to say this name, or it is not an advert.</small>
+          </label>
 
-      <label>
-        What it is about
-        <textarea
-          data-about
-          rows="3"
-          [attr.maxlength]="maxAbout"
-          placeholder="Hand-thrown mugs, made in a shed in Bacolod. Open Saturdays."
-          [value]="about()"
-          (input)="about.set($any($event.target).value)"
-        ></textarea>
-        <small>Your own words. The model writes only from what is here.</small>
-      </label>
+          <label>
+            What it is about
+            <textarea
+              data-about
+              rows="3"
+              [attr.maxlength]="maxAbout"
+              placeholder="Hand-thrown mugs, made in a shed in Bacolod. Open Saturdays."
+              [value]="about()"
+              (input)="about.set($any($event.target).value)"
+            ></textarea>
+            <small>Your own words. The model writes only from what is here.</small>
+          </label>
 
-      <label>
-        Delivery
-        <input
-          data-delivery
-          [attr.maxlength]="maxDelivery"
-          placeholder="hard sell, deadpan, warm, urgent, late-night"
-          [value]="delivery()"
-          (input)="delivery.set($any($event.target).value)"
-        />
-        <small>How the DJ should read it. The advert never says this word itself.</small>
-      </label>
+          <label>
+            Delivery
+            <input
+              data-delivery
+              [attr.maxlength]="maxDelivery"
+              placeholder="hard sell, deadpan, warm, urgent, late-night"
+              [value]="delivery()"
+              (input)="delivery.set($any($event.target).value)"
+            />
+            <small>How the DJ should read it. The advert never says this word itself.</small>
+          </label>
 
-      <!-- WITH THE BOX IT FILLS. It used to sit between the Delivery helper
+          <!-- WITH THE BOX IT FILLS. It used to sit between the Delivery helper
            text and The advert label, belonging to neither by position -- the
            same defect as the station form's Describe it. Jockora-e9a.61.
            DISABLED WHILE BLANK AND WHILE IN FLIGHT, and it says which: a live
            model call takes seconds, and an unlabelled button that does nothing
            reads as broken. -->
-      <div data-field data-write-action>
-        Write the advert
-        <button
-          type="button"
-          data-write
-          [disabled]="writing() || !brand().trim() || !about().trim()"
-          (click)="write()"
-        >
-          {{ writing() ? 'Writing…' : 'Write it' }}
-        </button>
-        @if (writing()) {
-          <!-- WHY IT IS SLOW, in the words the station brief uses. Enrichment is
+          <div data-field data-write-action>
+            Write the advert
+            <button
+              type="button"
+              data-write
+              [disabled]="writing() || !brand().trim() || !about().trim()"
+              (click)="write()"
+            >
+              {{ writing() ? 'Writing…' : 'Write it' }}
+            </button>
+            @if (writing()) {
+              <!-- WHY IT IS SLOW, in the words the station brief uses. Enrichment is
                serial and shares the model, so a blurb written mid-enrichment
                queues behind a dossier pass. -->
-          <small data-writing-note
-            >Asking the model. If this is slow, enrichment may be running — you can pause it on
-            the Overview.</small
-          >
-        } @else {
-          <small>Reads the three boxes above and fills the one below.</small>
-        }
-      </div>
+              <small data-writing-note
+                >Asking the model. If this is slow, enrichment may be running — you can pause it on
+                the Overview.</small
+              >
+            } @else {
+              <small>Reads the three boxes above and fills the one below.</small>
+            }
+          </div>
 
-      <label>
-        The advert
-        <!-- ONE TEXTAREA. Not a read-only preview with an edit button: typing
+          <label>
+            The advert
+            <!-- ONE TEXTAREA. Not a read-only preview with an edit button: typing
              over the blurb is the same gesture as accepting it. -->
-        <textarea
-          data-script
-          rows="4"
-          [value]="script()"
-          (input)="script.set($any($event.target).value)"
-        ></textarea>
-        <!-- INSIDE THE LABEL, because it describes THIS box. It used to sit
+            <textarea
+              data-script
+              rows="4"
+              [value]="script()"
+              (input)="script.set($any($event.target).value)"
+            ></textarea>
+            <!-- INSIDE THE LABEL, because it describes THIS box. It used to sit
              loose in the fieldset between the textarea and Save, at the same
              baseline as both. CODE POINTS, NOT .length: JavaScript counts
              UTF-16 units, so an emoji counts two and the console would say 340
              of 360 while the server refused. Jockora-9jo, one field over. -->
-        <small data-count [attr.data-over]="over() ? 'true' : null">
-          {{ length() }} of {{ maxScript }} characters{{ over() ? ' — too long for one slot' : '' }}
-        </small>
-      </label>
+            <small data-count [attr.data-over]="over() ? 'true' : null">
+              {{ length() }} of {{ maxScript }} characters{{
+                over() ? ' — too long for one slot' : ''
+              }}
+            </small>
+          </label>
 
-      @if (warning(); as w) {
-        <!-- AN ADVISORY, NOT AN ERROR, and deliberately not role="alert". An
+          @if (warning(); as w) {
+            <!-- AN ADVISORY, NOT AN ERROR, and deliberately not role="alert". An
              operator advertising a real company sees this every time, and a red
              box that means nothing teaches them to ignore red boxes. -->
-        <small data-brand-warning>{{ w }}</small>
-      }
+            <small data-brand-warning>{{ w }}</small>
+          }
 
           <div data-form-actions>
             <button type="button" data-save (click)="save()">Save</button>
@@ -202,6 +234,14 @@ export class Ads {
   readonly maxDelivery = maxDelivery;
 
   readonly ads = signal<Ad[]>([]);
+
+  /** The search box and the sortable headers. Jockora-9g7. */
+  readonly view = new TableView<Ad>(this.ads, [
+    { key: 'brand', value: (a) => a.brand },
+    { key: 'script', value: (a) => a.script },
+    { key: 'aired', value: (a) => a.last_aired_at ?? '' },
+    { key: 'enabled', value: (a) => (a.enabled ? 'on air' : 'off') },
+  ]);
   readonly loaded = signal(false);
   readonly failed = signal(false);
 
@@ -357,8 +397,7 @@ export class Ads {
         this.reset();
         this.load();
       },
-      error: (e: unknown) =>
-        this.said.set(serverSaid(e, 'Could not save that advert.')),
+      error: (e: unknown) => this.said.set(serverSaid(e, 'Could not save that advert.')),
     });
   }
 

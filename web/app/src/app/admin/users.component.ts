@@ -1,5 +1,6 @@
 import { Component, inject, signal } from '@angular/core';
 import { AdminApi, User, serverSaid } from '../api/api';
+import { TableView } from './table-view';
 import { FormDialog } from './form-dialog';
 
 /**
@@ -12,17 +13,42 @@ import { FormDialog } from './form-dialog';
   imports: [FormDialog],
   template: `
     <h2>People</h2>
+    <!-- SEARCH AND SORT over the whole list, which is all in the browser.
+         Jockora-9g7. -->
+    <label data-table-search>
+      Search
+      <input
+        data-search
+        type="search"
+        placeholder="name or role"
+        [value]="view.query()"
+        (input)="view.query.set($any($event.target).value)"
+      />
+    </label>
     <table data-users>
       <thead>
         <tr>
-          <th>Name</th>
-          <th>Role</th>
-          <th>Status</th>
+          <th [attr.aria-sort]="view.ariaSort('name')">
+            <button type="button" data-sort="name" (click)="view.toggle('name')">
+              Name <span data-sort-marker>{{ view.marker('name') }}</span>
+            </button>
+          </th>
+          <th [attr.aria-sort]="view.ariaSort('role')">
+            <button type="button" data-sort="role" (click)="view.toggle('role')">
+              Role <span data-sort-marker>{{ view.marker('role') }}</span>
+            </button>
+          </th>
+          <th [attr.aria-sort]="view.ariaSort('status')">
+            <button type="button" data-sort="status" (click)="view.toggle('status')">
+              Status <span data-sort-marker>{{ view.marker('status') }}</span>
+            </button>
+          </th>
+          <!-- NOT SORTABLE: a column of buttons has no order. -->
           <th>Actions</th>
         </tr>
       </thead>
       <tbody>
-        @for (user of users(); track user.id) {
+        @for (user of view.shown(); track user.id) {
           <tr [attr.data-row]="user.id">
             @if (editing() === user.id) {
               <td>
@@ -78,29 +104,29 @@ import { FormDialog } from './form-dialog';
       @if (adding()) {
         <fieldset data-new-account>
           <legend>New account</legend>
-      <label>
-        Name
-        <input data-name [value]="name()" (input)="name.set(value($event))" />
-      </label>
-      <label>
-        Password
-        <input
-          data-password
-          type="password"
-          [value]="password()"
-          (input)="password.set(value($event))"
-        />
-      </label>
-      <!-- THE PRIVILEGE DECISION ON THIS FORM, and it was an unlabelled combo
+          <label>
+            Name
+            <input data-name [value]="name()" (input)="name.set(value($event))" />
+          </label>
+          <label>
+            Password
+            <input
+              data-password
+              type="password"
+              [value]="password()"
+              (input)="password.set(value($event))"
+            />
+          </label>
+          <!-- THE PRIVILEGE DECISION ON THIS FORM, and it was an unlabelled combo
            box with no placeholder to fall back on either -- so a screen reader
            announced the choice between listener and admin as nothing at all. -->
-      <label>
-        Role
-        <select data-role [value]="role()" (change)="role.set(value($event))">
-          <option value="listener">listener</option>
-          <option value="admin">admin</option>
-        </select>
-      </label>
+          <label>
+            Role
+            <select data-role [value]="role()" (change)="role.set(value($event))">
+              <option value="listener">listener</option>
+              <option value="admin">admin</option>
+            </select>
+          </label>
           <div data-form-actions>
             <button type="button" data-add (click)="add()">Create</button>
           </div>
@@ -116,15 +142,15 @@ import { FormDialog } from './form-dialog';
       @if (resetting(); as user) {
         <fieldset data-reset-form>
           <legend>New password for {{ user.name }}</legend>
-        <label>
-          New password
-          <input
-            data-new-password
-            type="password"
-            [value]="newPassword()"
-            (input)="newPassword.set(value($event))"
-          />
-        </label>
+          <label>
+            New password
+            <input
+              data-new-password
+              type="password"
+              [value]="newPassword()"
+              (input)="newPassword.set(value($event))"
+            />
+          </label>
           <div data-form-actions>
             <button type="button" data-save-password (click)="savePassword(user)">Set</button>
             <button type="button" data-cancel-reset (click)="cancelReset()">Cancel</button>
@@ -140,6 +166,13 @@ export class Users {
   private readonly api = inject(AdminApi);
 
   readonly users = signal<User[]>([]);
+
+  /** The search box and the sortable headers. Jockora-9g7. */
+  readonly view = new TableView<User>(this.users, [
+    { key: 'name', value: (u) => u.name },
+    { key: 'role', value: (u) => u.role },
+    { key: 'status', value: (u) => (u.disabled ? 'disabled' : 'active') },
+  ]);
   /**
    * True once the first answer has arrived, success OR failure.
    *

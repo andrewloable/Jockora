@@ -362,6 +362,60 @@ func TestConsoleCSSShapesAFieldLikeALabel(t *testing.T) {
 	}
 }
 
+// TestConsoleCSSGivesTheStationFormItsRows: reported with a screenshot
+// 2026-09-09. The station dialog's fieldset is a wrapping flex row, so anything
+// without a width of its own packed into whatever gap was left -- and three
+// things that each need a row of their own did not have one.
+//
+// MEASURED BEFORE AND AFTER at 1280px. Before: the year group started at x390
+// and the length group at x571, because the Name box and the track count had
+// taken the space to their left; the by-hand picker was 243px wide wedged
+// beside "Longest (minutes)", so its summary read as that field's caption. The
+// count itself drew to the LEFT of the Name box and read as its label. After,
+// every one of them starts at x209 with the rest of the form.
+func TestConsoleCSSGivesTheStationFormItsRows(t *testing.T) {
+	css := styles(t)
+	for _, c := range []struct{ sel, why string }{
+		{"[data-derived-status]", "the model's answer packs in beside the Name box and reads as its caption"},
+		{"[data-name-field]", "the station's name floats wherever the wrap leaves room"},
+		{"[data-manual]", "two checkbox grids sit beside a number field and read as its caption"},
+	} {
+		if !strings.Contains(ruleFor(t, css, c.sel), "flex: 1 0 100%") {
+			t.Errorf("%s does not take a row of its own, so %s", c.sel, c.why)
+		}
+	}
+	// THE COUNT AND THE WARNING STACK. They are two sentences about one answer
+	// and they ran together on one line.
+	if !strings.Contains(ruleFor(t, css, "[data-derived-status] > span"), "display: block") {
+		t.Error("the track count and the low-track warning share a line")
+	}
+	// AND THE DESCRIBE BUTTON DOES NOT STRETCH. It sits beside a textarea that
+	// is already the full width of the row, so a bare flex item would grow to
+	// fill whatever is left rather than staying a button.
+	if !strings.Contains(ruleFor(t, css, "[data-brief-group] > button"), "flex: 0 0 auto") {
+		t.Error("the describe button stretches across the row beside the description")
+	}
+}
+
+// TestConsoleCSSMakesASortableHeaderAControl: Jockora-9g7. A th with a click
+// handler is not reachable by keyboard and is announced as a cell, so the
+// sortable headers are real buttons -- which then have to be stripped back to
+// header typography, or every table grows a row of grey chrome.
+func TestConsoleCSSMakesASortableHeaderAControl(t *testing.T) {
+	css := styles(t)
+	rule := ruleFor(t, css, "[data-sort]")
+	for _, want := range []string{"font: inherit", "background: none", "border: none", "text-align: left"} {
+		if !strings.Contains(rule, want) {
+			t.Errorf("a sortable header is missing %q, so it draws as a button rather than a header", want)
+		}
+	}
+	// THE ARROW KEEPS ITS SPACE. Without a reserved width, clicking a header
+	// shoves every column beside it sideways as the marker appears.
+	if !strings.Contains(ruleFor(t, css, "[data-sort-marker]"), "min-width") {
+		t.Error("the sort arrow has no reserved width, so sorting shifts the columns")
+	}
+}
+
 // TestConsoleCSSGivesADialogAPhoneShape: Jockora-e9a.60. Every add and edit
 // form used to be an in-page fieldset below the list it belonged to. Measured
 // on a 390x844 phone: tapping Edit on the first station left scrollY at 0 while

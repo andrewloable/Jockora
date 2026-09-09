@@ -233,6 +233,17 @@ func TestBriefGateLive(t *testing.T) {
 				"\n  tempo  %g..%g BPM\n  length %g..%g s",
 				brief, p.Name, p.Genres, p.Moods, p.YearMin, p.YearMax,
 				p.TempoMin, p.TempoMax, p.DurationMinS, p.DurationMaxS)
+			// THESE TWO FAIL ON A SMALL MODEL AND PASS ON THE DEPLOYED ONE,
+			// which is worth knowing before anybody edits the prompt to chase
+			// them. Measured 2026-09-09: against the 4B test model both came
+			// back unbounded no matter how the rule was worded, and three
+			// wordings produced byte-identical output. Against the deployment's
+			// llama-3.3-70b, in the console, "something to run to" derived 120
+			// to 160 BPM and 77 matching tracks, and "long ambient pieces,
+			// nothing short" derived a 5 minute floor and 10 matching tracks.
+			// So a failure here on a small model is a statement about the
+			// model, not about the prompt. Jockora-91o.
+			//
 			// READ THESE. A model that answers "something to run to" with a
 			// plausible-looking 60 to 200 has answered nothing, and no
 			// assertion catches that -- the same way an invented decade on a

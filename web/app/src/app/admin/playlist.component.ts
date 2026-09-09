@@ -138,58 +138,53 @@ export const PAGE = 50;
     >
       @if (editingTrack(); as track) {
         <fieldset data-tag-editor>
-                <!-- Checkboxes, not a multi-select: picking several
+          <!-- Checkboxes, not a multi-select: picking several
                    non-contiguous values with ctrl-click is a keyboard trick
                    nobody can see. The ticked boxes ARE the readout. -->
-                <fieldset data-edit-genres>
-                  <legend>Genre</legend>
-                  @for (g of vocab().genres; track g) {
-                    <label>
-                      <input
-                        type="checkbox"
-                        [value]="g"
-                        [checked]="genres().includes(g)"
-                        [disabled]="full(genres(), g)"
-                        (change)="genres.set(pick(vocab().genres, genres(), g, $event))"
-                      />{{ g }}
-                    </label>
-                  }
-                </fieldset>
-                <fieldset data-edit-moods>
-                  <legend>Mood</legend>
-                  @for (m of vocab().moods; track m) {
-                    <label>
-                      <input
-                        type="checkbox"
-                        [value]="m"
-                        [checked]="moods().includes(m)"
-                        [disabled]="full(moods(), m)"
-                        (change)="moods.set(pick(vocab().moods, moods(), m, $event))"
-                      />{{ m }}
-                    </label>
-                  }
-                </fieldset>
-                <button type="button" data-save-tags (click)="saveTags(track)">Save</button>
-                <button type="button" data-cancel-tags (click)="editing.set(null)">Cancel</button>
-                @if (track.overridden) {
-                  <!-- Only when there IS an edit to undo. Offering it otherwise
+          <fieldset data-edit-genres>
+            <legend>Genre</legend>
+            @for (g of vocab().genres; track g) {
+              <label>
+                <input
+                  type="checkbox"
+                  [value]="g"
+                  [checked]="genres().includes(g)"
+                  [disabled]="full(genres(), g)"
+                  (change)="genres.set(pick(vocab().genres, genres(), g, $event))"
+                />{{ g }}
+              </label>
+            }
+          </fieldset>
+          <fieldset data-edit-moods>
+            <legend>Mood</legend>
+            @for (m of vocab().moods; track m) {
+              <label>
+                <input
+                  type="checkbox"
+                  [value]="m"
+                  [checked]="moods().includes(m)"
+                  [disabled]="full(moods(), m)"
+                  (change)="moods.set(pick(vocab().moods, moods(), m, $event))"
+                />{{ m }}
+              </label>
+            }
+          </fieldset>
+          <button type="button" data-save-tags (click)="saveTags(track)">Save</button>
+          <button type="button" data-cancel-tags (click)="editing.set(null)">Cancel</button>
+          @if (track.overridden) {
+            <!-- Only when there IS an edit to undo. Offering it otherwise
                      promises the enrichment can be restored over itself. -->
-                  <!-- DESTRUCTIVE, AND IT SAYS SO. This discards the
+            <!-- DESTRUCTIVE, AND IT SAYS SO. This discards the
                        operator's own tags on the server, in an editor where
                        every other change waits for Save -- and it used to look
                        identical to the safe button beside it and read like a
                        view toggle. Jockora-e9a.65, under the rule
                        Jockora-e9a.48 set for the rest of the console. -->
-                  <button
-                    type="button"
-                    data-revert-tags
-                    data-danger
-                    (click)="revertTags(track)"
-                  >
-                    Discard my tags
-                  </button>
-                }
-                <small data-tag-note>Regenerate to move it between stations.</small>
+            <button type="button" data-revert-tags data-danger (click)="revertTags(track)">
+              Discard my tags
+            </button>
+          }
+          <small data-tag-note>Regenerate to move it between stations.</small>
         </fieldset>
       }
     </app-form-dialog>

@@ -242,7 +242,7 @@ describe('Users', () => {
   // users_api writes twelve text/plain refusals through http.Error and nine
   // JSON ones through writeFieldError. Both of these were measured wrong.
 
-  it("server words names the taken name rather than a sentence of its own", () => {
+  it('server words names the taken name rather than a sentence of its own', () => {
     const fixture = mounted();
     type(fixture, '[data-name]', 'guest');
     type(fixture, '[data-password]', 'a long enough password');
@@ -260,7 +260,7 @@ describe('Users', () => {
     );
   });
 
-  it("server words says which field a save was refused for, not object Object", () => {
+  it('server words says which field a save was refused for, not object Object', () => {
     const fixture = mounted();
     fixture.nativeElement.querySelectorAll('[data-edit]')[0].click();
     fixture.detectChanges();
@@ -268,10 +268,12 @@ describe('Users', () => {
     (fixture.nativeElement.querySelector('[data-save]') as HTMLButtonElement).click();
     // A REFUSED FIELD IS JSON. Read as text it stringified to "[object
     // Object]", which is the console telling an operator nothing twice over.
-    ctrl.expectOne('/admin/users/1').flush(
-      { field: 'name', error: 'a name is required' },
-      { status: 400, statusText: 'Bad Request' },
-    );
+    ctrl
+      .expectOne('/admin/users/1')
+      .flush(
+        { field: 'name', error: 'a name is required' },
+        { status: 400, statusText: 'Bad Request' },
+      );
     fixture.detectChanges();
     const said = fixture.nativeElement.querySelector('[data-said]').textContent;
     expect(said).toContain('a name is required');
@@ -504,5 +506,64 @@ describe('Users', () => {
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-reset-form]')).toBeNull();
     expect(fixture.componentInstance.newPassword()).toBe('');
+  });
+
+  // Jockora-9g7.
+  it('accounts table searches name, role and status', () => {
+    const fixture = mounted();
+    const search = fixture.nativeElement.querySelector('[data-search]') as HTMLInputElement;
+    const shown = () => fixture.componentInstance.view.shown().map((u) => u.name);
+    for (const [q, want] of [
+      ['andrew', ['andrew']],
+      ['listener', ['guest']],
+      // "disabled" is drawn, not stored: the column has to search what the
+      // cell says rather than the boolean behind it.
+      ['disabled', ['guest']],
+      ['active', ['andrew']],
+    ] as [string, string[]][]) {
+      search.value = q;
+      search.dispatchEvent(new Event('input'));
+      fixture.detectChanges();
+      expect(shown(), q).toEqual(want);
+    }
+  });
+
+  it('accounts table sorts by a clicked header', () => {
+    const fixture = mounted();
+    const header = fixture.nativeElement.querySelector('[data-sort="role"]') as HTMLButtonElement;
+    header.click();
+    fixture.detectChanges();
+    expect(fixture.componentInstance.view.shown().map((u) => u.role)).toEqual([
+      'admin',
+      'listener',
+    ]);
+    header.click();
+    fixture.detectChanges();
+    expect(fixture.componentInstance.view.shown().map((u) => u.role)).toEqual([
+      'listener',
+      'admin',
+    ]);
+    expect(header.closest('th')!.getAttribute('aria-sort')).toBe('descending');
+  });
+
+  it('accounts table gives every sortable header its own column', () => {
+    // COPY-PASTED HEADERS ARE THE BUG THIS CATCHES. Each one carries the key it
+    // sorts by, and a header wired to its neighbour's key looks right and sorts
+    // the wrong column -- which nothing else here would notice.
+    const fixture = mounted();
+    const headers = [
+      ...fixture.nativeElement.querySelectorAll('[data-users] thead [data-sort]'),
+    ] as HTMLButtonElement[];
+    expect(headers.length).toBe(3);
+    const keys = new Set<string>();
+    for (const h of headers) {
+      const key = h.getAttribute('data-sort')!;
+      expect(keys.has(key), `two headers claim ${key}`).toBe(false);
+      keys.add(key);
+      h.click();
+      fixture.detectChanges();
+      expect(fixture.componentInstance.view.sortKey()).toBe(key);
+      expect(h.closest('th')!.getAttribute('aria-sort')).toBe('ascending');
+    }
   });
 });

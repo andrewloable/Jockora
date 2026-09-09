@@ -578,4 +578,58 @@ describe('Jocks', () => {
     fixture.detectChanges();
     expect((fixture.nativeElement.querySelector('[data-name]') as HTMLInputElement).value).toBe('');
   });
+
+  // Jockora-9g7: a search box and sortable headers on a table the browser holds
+  // entirely.
+  it('jocks table searches every column it draws', () => {
+    const fixture = mounted();
+    const search = fixture.nativeElement.querySelector('[data-search]') as HTMLInputElement;
+    const shown = () => fixture.componentInstance.view.shown().map((j) => j.id);
+
+    // One per column, so every accessor is exercised by something a person
+    // would actually type: a voice id, a genre, the speech style, the persona.
+    for (const q of ['Dutch', 'am_fenrir', 'metal', 'LOUD', 'Shouts']) {
+      search.value = q;
+      search.dispatchEvent(new Event('input'));
+      fixture.detectChanges();
+      expect(shown(), q).toEqual(['dutch']);
+    }
+    search.value = 'nothing like this';
+    search.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    expect(shown()).toEqual([]);
+  });
+
+  it('jocks table marks the sorted header for a screen reader', () => {
+    const fixture = mounted();
+    const header = fixture.nativeElement.querySelector('[data-sort="name"]') as HTMLButtonElement;
+    expect(header.closest('th')!.getAttribute('aria-sort')).toBe('none');
+    header.click();
+    fixture.detectChanges();
+    expect(header.closest('th')!.getAttribute('aria-sort')).toBe('ascending');
+    header.click();
+    fixture.detectChanges();
+    expect(header.closest('th')!.getAttribute('aria-sort')).toBe('descending');
+  });
+
+  it('jocks table gives every sortable header its own column', () => {
+    // COPY-PASTED HEADERS ARE THE BUG THIS CATCHES. Each one carries the key it
+    // sorts by, and a header wired to its neighbour's key looks right and sorts
+    // the wrong column -- which nothing else here would notice.
+    const fixture = mounted();
+    const headers = [
+      ...fixture.nativeElement.querySelectorAll('[data-jocks] thead [data-sort]'),
+    ] as HTMLButtonElement[];
+    expect(headers.length).toBe(5);
+    const keys = new Set<string>();
+    for (const h of headers) {
+      const key = h.getAttribute('data-sort')!;
+      expect(keys.has(key), `two headers claim ${key}`).toBe(false);
+      keys.add(key);
+      h.click();
+      fixture.detectChanges();
+      expect(fixture.componentInstance.view.sortKey()).toBe(key);
+      expect(h.closest('th')!.getAttribute('aria-sort')).toBe('ascending');
+    }
+  });
 });

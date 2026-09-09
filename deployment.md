@@ -419,6 +419,41 @@ encoder ran and no break was placed — exactly the gap §4 warns about. This
 deploy is verified as far as the schema, the process and the served assets, and
 no further. `Jockora-8om` is still unheard.
 
+### What the second 2026-09-09 deploy verified (no migration)
+
+The afternoon's twelve fixes: the advert writer, the station derive schema and
+sampling temperature, the dial's listener count, the DJ transcript, and the
+error-shape work across eight console components. Rollback image
+`jockora:rollback-20260909b`.
+
+**NO MIGRATION IS CROSSED.** `CurrentSchemaVersion` is still 14 and the box was
+already on 14, so the backup is named for the schema it is a copy *of* rather
+than for a migration it precedes: `jockora.db.schema-14-20260909b`. Naming it
+`pre-migration-15` would have been a lie about what comes next.
+
+Verified, all reads:
+
+- `jockora:v0.2` up, **0 ERROR lines, 0 unexpected WARN lines**.
+- `health` all three `ok`; enrichment `7595 of 7595, 100%, running`.
+- **The served bundle is this build and the morning's is gone.**
+  `main-FMEMVWH3.js` matches the local `ng build` hash exactly, the lazy admin
+  chunk `chunk-KE2RV5MU.js` serves 81188 bytes against a local 81.19 kB, and
+  the morning's `main-JPUGOL7D.js` now **404s** — which is the check that
+  actually distinguishes a deploy from a restart.
+- **The afternoon's changes are observable in the bundle**: `data-transcript`
+  appears **0** times in main (the DJ transcript is gone), `visibilitychange`
+  appears (the dial polls while visible), and the admin chunk still carries
+  `data-form-dialog`.
+
+**The audio path is NOT verified.** `now` was null again, so no encoder ran and
+no break was placed. Verified as far as the schema, the process and the served
+assets, and no further.
+
+**And the advert and derive fixes are not verified at all.** Both are Go-side
+and neither is reachable without an admin session, so nothing here exercised
+them. `Jockora-91o` is the open question they turn on: the derive was tuned
+against the 4B test model and this box runs llama-3.3-70b.
+
 ## 6. Rolling back
 
 ```sh

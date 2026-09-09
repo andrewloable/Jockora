@@ -1,6 +1,7 @@
 import { Component, computed, inject, output, signal } from '@angular/core';
 import { AdminApi, Derived, Diff, Jock, Station, StationBody, serverSaid } from '../api/api';
 import { FormDialog } from './form-dialog';
+import { TableView } from './table-view';
 
 /**
  * The dial, from the operator's side.
@@ -11,22 +12,55 @@ import { FormDialog } from './form-dialog';
   imports: [FormDialog],
   template: `
     <h2>Stations</h2>
+    <!-- SEARCH AND SORT. This table holds every station, so both tell the truth
+         about all of them. Jockora-9g7. -->
+    <label data-table-search>
+      Search
+      <input
+        data-search
+        type="search"
+        placeholder="name, genre, mood or jock"
+        [value]="view.query()"
+        (input)="view.query.set($any($event.target).value)"
+      />
+    </label>
     <table data-stations>
       <thead>
         <tr>
-          <th>Name</th>
-          <th>Genre &middot; mood</th>
-          <th>Tracks</th>
+          <th [attr.aria-sort]="view.ariaSort('name')">
+            <button type="button" data-sort="name" (click)="view.toggle('name')">
+              Name <span data-sort-marker>{{ view.marker('name') }}</span>
+            </button>
+          </th>
+          <th [attr.aria-sort]="view.ariaSort('tags')">
+            <button type="button" data-sort="tags" (click)="view.toggle('tags')">
+              Genre &middot; mood <span data-sort-marker>{{ view.marker('tags') }}</span>
+            </button>
+          </th>
+          <th [attr.aria-sort]="view.ariaSort('tracks')">
+            <button type="button" data-sort="tracks" (click)="view.toggle('tracks')">
+              Tracks <span data-sort-marker>{{ view.marker('tracks') }}</span>
+            </button>
+          </th>
           <!-- THE ONE NUMBER THAT SAYS WHETHER A STATION IS DOING ANYTHING. A
                station streams only while it has a listener, so this is also
                the answer to "is it running". Jockora-cr7. -->
-          <th>Listeners</th>
-          <th>Jock</th>
+          <th [attr.aria-sort]="view.ariaSort('listeners')">
+            <button type="button" data-sort="listeners" (click)="view.toggle('listeners')">
+              Listeners <span data-sort-marker>{{ view.marker('listeners') }}</span>
+            </button>
+          </th>
+          <th [attr.aria-sort]="view.ariaSort('jock')">
+            <button type="button" data-sort="jock" (click)="view.toggle('jock')">
+              Jock <span data-sort-marker>{{ view.marker('jock') }}</span>
+            </button>
+          </th>
+          <!-- NOT SORTABLE: a column of buttons has no order. -->
           <th>Actions</th>
         </tr>
       </thead>
       <tbody>
-        @for (station of stations(); track station.id) {
+        @for (station of view.shown(); track station.id) {
           <tr>
             <td data-label="Name">
               {{ station.name }}
@@ -64,9 +98,7 @@ import { FormDialog } from './form-dialog';
               <button type="button" data-remove data-danger (click)="remove(station)">
                 Delete
               </button>
-              <button type="button" data-playlist (click)="playlist.emit(station)">
-                Playlist
-              </button>
+              <button type="button" data-playlist (click)="playlist.emit(station)">Playlist</button>
             </td>
           </tr>
         } @empty {
@@ -77,6 +109,17 @@ import { FormDialog } from './form-dialog';
             <td colspan="6">
               @if (!loaded()) {
                 <span data-loading>Loading…</span>
+              } @else if (stations().length) {
+                <!-- A SEARCH THAT MATCHED NOTHING IS NOT AN EMPTY DIAL, and
+                     telling an operator to add their first station when they
+                     have twelve and mistyped a name is the loading-versus-empty
+                     mistake wearing a third hat. Jockora-9g7. -->
+                <span data-no-match
+                  >No station matches “{{ view.query() }}”.
+                  <button type="button" data-clear-search (click)="view.query.set('')">
+                    Clear the search
+                  </button></span
+                >
               } @else if (!failed()) {
                 <span data-empty
                   ><strong>No stations yet.</strong> Add a station below. A station is a genre, an
@@ -102,53 +145,58 @@ import { FormDialog } from './form-dialog';
     >
       @if (editingStation(); as station) {
         <fieldset data-station-edit>
-        <legend>Edit {{ station.name }}</legend>
+          <legend>Edit {{ station.name }}</legend>
 
-        <label>
-          Name
-          <input
-            data-edit-name
-            [value]="editName()"
-            (input)="editName.set($any($event.target).value)"
-          />
-        </label>
-        <!-- WHO PRESENTS IT belongs with what it is called, not after the year,
+          <label>
+            Name
+            <input
+              data-edit-name
+              [value]="editName()"
+              (input)="editName.set($any($event.target).value)"
+            />
+          </label>
+          <!-- WHO PRESENTS IT belongs with what it is called, not after the year,
              tempo and duration filters where it read as a seventh filter.
              Jockora-e9a.61. -->
-        <label>
-          Jock
-          <select data-jock (change)="editJock.set($any($event.target).value)">
-            <option value="" [selected]="!editJock()">— no jock —</option>
-            @for (jock of jocks(); track jock.id) {
-              <option [value]="jock.id" [selected]="jock.id === editJock()">
-                {{ jock.name }}
-              </option>
-            }
-          </select>
-        </label>
+          <label>
+            Jock
+            <select data-jock (change)="editJock.set($any($event.target).value)">
+              <option value="" [selected]="!editJock()">— no jock —</option>
+              @for (jock of jocks(); track jock.id) {
+                <option [value]="jock.id" [selected]="jock.id === editJock()">
+                  {{ jock.name }}
+                </option>
+              }
+            </select>
+          </label>
 
-        <!-- The SAME description this station was made from, so an operator can
+          <!-- The SAME description this station was made from, so an operator can
              rewrite the sentence rather than reverse engineer the boxes.
              Describing again replaces what is ticked; they can adjust it or
              leave without saving. -->
-        <!-- THE DESCRIPTION AND THE BUTTON THAT READS IT are one thing, and
+          <!-- THE DESCRIPTION AND THE BUTTON THAT READS IT are one thing, and
              grouping them is what stops the button drifting into the numeric
              row below: measured at x209 y335, level with From year, acting on a
              field at y200. Jockora-e9a.61. -->
-        <div data-brief-group>
-          <label data-brief-label>
-            What is this station?
-            <textarea
-              data-edit-brief
-              rows="2"
-              [attr.maxlength]="maxBrief"
-              [value]="editBrief()"
-              (input)="editBrief.set($any($event.target).value)"
-            ></textarea>
-          </label>
-        <!-- The same field box as the add form's, for the same reason. -->
-          <div data-field>
-            Derive it
+          <div data-brief-group>
+            <label data-brief-label>
+              What is this station?
+              <textarea
+                data-edit-brief
+                rows="2"
+                [attr.maxlength]="maxBrief"
+                [value]="editBrief()"
+                (input)="editBrief.set($any($event.target).value)"
+              ></textarea>
+            </label>
+            <!-- NO SECOND NAME FOR IT. This button used to sit in a
+               [data-field] box whose heading read "Derive it" above a button
+               reading "Describe it" -- two imperatives, different verbs, for
+               one action, and the operator asked which was which. That box
+               existed only to give a bare button the same top offset as the
+               labelled controls it once sat beside on the numeric row; it now
+               sits beside a textarea in a group that aligns on the bottom
+               edge, so the box earned nothing and cost a name. -->
             <button
               type="button"
               data-edit-describe
@@ -158,123 +206,121 @@ import { FormDialog } from './form-dialog';
               {{ editDescribing() ? 'Describing…' : 'Describe it' }}
             </button>
           </div>
-        </div>
 
-
-        <!-- ONE VALUE, TWO BOXES. Grouped so a row wrap can never get between them:
+          <!-- ONE VALUE, TWO BOXES. Grouped so a row wrap can never get between them:
            measured before, Shortest sat at x951 on one row and Longest at x113
            on the next. Jockora-e9a.61. -->
-        <div data-range>
-          <label>
-            From year
-            <input
-              data-edit-year-min
-              type="number"
-              [value]="editYearMin() || ''"
-              (input)="editYearMin.set(+$any($event.target).value)"
-            />
-          </label>
-          <label>
-            To year
-            <input
-              data-edit-year-max
-              type="number"
-              [value]="editYearMax() || ''"
-              (input)="editYearMax.set(+$any($event.target).value)"
-            />
-          </label>
-        </div>
-        <!-- ONE LABEL PER BOX. A single label over a PAIR of stacked inputs
+          <div data-range>
+            <label>
+              From year
+              <input
+                data-edit-year-min
+                type="number"
+                [value]="editYearMin() || ''"
+                (input)="editYearMin.set(+$any($event.target).value)"
+              />
+            </label>
+            <label>
+              To year
+              <input
+                data-edit-year-max
+                type="number"
+                [value]="editYearMax() || ''"
+                (input)="editYearMax.set(+$any($event.target).value)"
+              />
+            </label>
+          </div>
+          <!-- ONE LABEL PER BOX. A single label over a PAIR of stacked inputs
              said nothing about which box was which -- and the tempo one read
              "Fastest and slowest" above the MIN box, so it named them
              backwards. The same four fields, in the same units, as the add
              form: an operator who opens an edit and finds them blank has lost
              them, and saving would widen the station with nothing on screen to
              say so. -->
-        <!-- The same pairing, for the same reason. -->
-        <div data-range>
-          <label>
-            Slowest (BPM)
-            <input
-              data-edit-tempo-min
-              type="number"
-              placeholder="any"
-              [value]="editTempoMin() || ''"
-              (input)="editTempoMin.set(+$any($event.target).value)"
-            />
-          </label>
-          <label>
-            Fastest (BPM)
-            <input
-              data-edit-tempo-max
-              type="number"
-              placeholder="any"
-              [value]="editTempoMax() || ''"
-              (input)="editTempoMax.set(+$any($event.target).value)"
-            />
-          </label>
-        </div>
-        <!-- And again. -->
-        <div data-range>
-          <label>
-            Shortest (minutes)
-            <input
-              data-edit-length-min
-              type="number"
-              step="0.5"
-              placeholder="any"
-              [value]="editLengthMin() || ''"
-              (input)="editLengthMin.set(+$any($event.target).value)"
-            />
-          </label>
-          <label>
-            Longest (minutes)
-            <input
-              data-edit-length-max
-              type="number"
-              step="0.5"
-              placeholder="any"
-              [value]="editLengthMax() || ''"
-              (input)="editLengthMax.set(+$any($event.target).value)"
-            />
-          </label>
-        </div>
+          <!-- The same pairing, for the same reason. -->
+          <div data-range>
+            <label>
+              Slowest (BPM)
+              <input
+                data-edit-tempo-min
+                type="number"
+                placeholder="any"
+                [value]="editTempoMin() || ''"
+                (input)="editTempoMin.set(+$any($event.target).value)"
+              />
+            </label>
+            <label>
+              Fastest (BPM)
+              <input
+                data-edit-tempo-max
+                type="number"
+                placeholder="any"
+                [value]="editTempoMax() || ''"
+                (input)="editTempoMax.set(+$any($event.target).value)"
+              />
+            </label>
+          </div>
+          <!-- And again. -->
+          <div data-range>
+            <label>
+              Shortest (minutes)
+              <input
+                data-edit-length-min
+                type="number"
+                step="0.5"
+                placeholder="any"
+                [value]="editLengthMin() || ''"
+                (input)="editLengthMin.set(+$any($event.target).value)"
+              />
+            </label>
+            <label>
+              Longest (minutes)
+              <input
+                data-edit-length-max
+                type="number"
+                step="0.5"
+                placeholder="any"
+                [value]="editLengthMax() || ''"
+                (input)="editLengthMax.set(+$any($event.target).value)"
+              />
+            </label>
+          </div>
 
-        <!-- CHECKBOXES, not a multiple select. A multiple select needs
+          <!-- CHECKBOXES, not a multiple select. A multiple select needs
              ctrl-click to pick two things that are not next to each other,
              which is a keyboard trick people do not know and cannot see. A list
              of checkboxes shows every option and its state at once, and the
              checked boxes ARE the display. -->
-        <fieldset data-edit-genre>
-          <legend>Genre</legend>
-          @for (g of vocab().genres; track g) {
-            <label>
-              <input
-                type="checkbox"
-                [value]="g"
-                [checked]="editGenres().includes(g)"
-                (change)="editGenres.set(pick(vocab().genres, editGenres(), g, $event))"
-              />{{ g }}
-            </label>
-          }
-          <small>{{ editGenres().length ? '' : 'none ticked · any genre' }}</small>
-        </fieldset>
-        <fieldset data-edit-mood>
-          <legend>Mood</legend>
-          @for (m of vocab().moods; track m) {
-            <label>
-              <input
-                type="checkbox"
-                [value]="m"
-                [checked]="editMoods().includes(m)"
-                (change)="editMoods.set(pick(vocab().moods, editMoods(), m, $event))"
-              />{{ m }}
-            </label>
-          }
-          <small>{{ editMoods().length ? '' : 'none ticked · any mood' }}</small>
-        </fieldset>
+          <fieldset data-edit-genre>
+            <legend>Genre</legend>
+            @for (g of vocab().genres; track g) {
+              <label>
+                <input
+                  type="checkbox"
+                  [value]="g"
+                  [checked]="editGenres().includes(g)"
+                  (change)="editGenres.set(pick(vocab().genres, editGenres(), g, $event))"
+                />{{ g }}
+              </label>
+            }
+            <small>{{ editGenres().length ? '' : 'none ticked · any genre' }}</small>
+          </fieldset>
+          <fieldset data-edit-mood>
+            <legend>Mood</legend>
+            @for (m of vocab().moods; track m) {
+              <label>
+                <input
+                  type="checkbox"
+                  [value]="m"
+                  [checked]="editMoods().includes(m)"
+                  (change)="editMoods.set(pick(vocab().moods, editMoods(), m, $event))"
+                />{{ m }}
+              </label>
+            }
+            <small>{{ editMoods().length ? '' : 'none ticked · any mood' }}</small>
+          </fieldset>
 
-        <!-- AT THE END OF THE FORM, with the fields they apply to. -->
+          <!-- AT THE END OF THE FORM, with the fields they apply to. -->
           <div data-form-actions>
             <button type="button" data-save (click)="save(station)">Save</button>
             <button type="button" data-cancel (click)="cancel()">Cancel</button>
@@ -289,197 +335,200 @@ import { FormDialog } from './form-dialog';
     <app-form-dialog [title]="'Add a station'" [open]="adding()" (closed)="closeAdd()">
       @if (adding()) {
         <fieldset data-station-add>
-        <legend>Add a station</legend>
+          <legend>Add a station</legend>
 
-      <!-- A STATION IS DESCRIBED, NOT TICKED. Two closed vocabularies in a
+          <!-- A STATION IS DESCRIBED, NOT TICKED. Two closed vocabularies in a
            checkbox grid is a form that makes the operator do the model's job;
            the boxes are still here, they just stop being where you start. -->
-      <!-- The description and the button that reads it are one thing; see the
+          <!-- The description and the button that reads it are one thing; see the
            edit form above. Jockora-e9a.61. -->
-      <div data-brief-group>
-        <label data-brief-label>
-          What is this station?
-          <textarea
-            data-brief
-            rows="2"
-            [attr.maxlength]="maxBrief"
-            placeholder="Late-night driving music, mostly 80s, nothing cheerful."
-            [value]="brief()"
-            (input)="brief.set($any($event.target).value)"
-          ></textarea>
-        </label>
-      <!-- THE SAME SHAPE AS A FIELD, so it lines up with the boxes beside it
-           rather than sitting low and tall against them. A bare button has no
-           label header and the fieldset aligns on the bottom of each box; this
-           is the Jockora-lph fix, applied to the form it was missed on.
-           NO DESCRIPTION, deliberately: every field on this row is bare, and a
-           box carrying one is taller, which under bottom alignment makes it
-           ride ABOVE its neighbours -- the very defect this is fixing. A row is
-           uniform or it is misaligned.
-           DISABLED WHILE BLANK AND WHILE WORKING, and it says which: a live
-           model call takes seconds, and an unlabelled button that does nothing
-           reads as broken. -->
-        <div data-field>
-          Derive it
-          <button
-            type="button"
-            data-describe
-            [disabled]="describing() || !brief().trim()"
-            (click)="describeStation()"
-          >
-            {{ describing() ? 'Describing…' : 'Describe it' }}
-          </button>
-        </div>
-      </div>
-      @if (derived(); as d) {
-        <small data-derived
-          >{{ d.tracks }} tracks match. Change anything below before saving.</small
-        >
-        @if (d.warning) {
-          <!-- THE VERDICT ON THE NUMBER, at the one moment the operator can
-               still change the brief. Without it they read "7 tracks", save,
-               and discover the station cannot be enabled at all. Advice, not a
-               refusal: twelve deep cuts is a real station. -->
-          <small role="alert" data-derived-warning>{{ d.warning }}</small>
-        }
-      }
-      @if (describing()) {
-        <!-- WHY IT IS SLOW. Enrichment is serial and pauses only on the
-             operator's own toggle, so a derive fired mid-enrichment queues
-             behind a dossier pass on the same model. Without this they watch a
-             spinner on a feature that worked yesterday. -->
-        <small data-describing-note
-          >Asking the model. If this is slow, enrichment may be running — you can pause it on the
-          Overview.</small
-        >
-      }
+          <div data-brief-group>
+            <label data-brief-label>
+              What is this station?
+              <textarea
+                data-brief
+                rows="2"
+                [attr.maxlength]="maxBrief"
+                placeholder="Late-night driving music, mostly 80s, nothing cheerful."
+                [value]="brief()"
+                (input)="brief.set($any($event.target).value)"
+              ></textarea>
+            </label>
+            <!-- ONE NAME, and it is on the button. See the edit form above.
+             DISABLED WHILE BLANK AND WHILE WORKING, and it says which: a live
+             model call takes seconds, and a button that does nothing reads as
+             broken. -->
+            <button
+              type="button"
+              data-describe
+              [disabled]="describing() || !brief().trim()"
+              (click)="describeStation()"
+            >
+              {{ describing() ? 'Describing…' : 'Describe it' }}
+            </button>
+          </div>
+          <!-- WHAT CAME BACK, AS ONE BLOCK ON ITS OWN ROW.
+           These were three loose flex items in a wrapping row, so they packed
+           in beside whatever had space: the count landed to the LEFT of the
+           Name box and read as its caption, and the low-track warning ran on
+           the same line as the count. Reported with a screenshot. They are one
+           thing -- the model's answer -- and they now say so. -->
+          @if (derived() || describing()) {
+            <p data-derived-status>
+              @if (derived(); as d) {
+                <span data-derived
+                  >{{ d.tracks }} tracks match. Change anything below before saving.</span
+                >
+                @if (d.warning) {
+                  <!-- THE VERDICT ON THE NUMBER, at the one moment the operator can
+                   still change the brief. Without it they read "7 tracks", save,
+                   and discover the station cannot be enabled at all. Advice, not
+                   a refusal: twelve deep cuts is a real station. -->
+                  <span role="alert" data-derived-warning>{{ d.warning }}</span>
+                }
+              }
+              @if (describing()) {
+                <!-- WHY IT IS SLOW. Enrichment is serial and pauses only on the
+                 operator's own toggle, so a derive fired mid-enrichment queues
+                 behind a dossier pass on the same model. Without this they watch
+                 a spinner on a feature that worked yesterday. -->
+                <span data-describing-note
+                  >Asking the model. If this is slow, enrichment may be running — you can pause it
+                  on the Overview.</span
+                >
+              }
+            </p>
+          }
 
-        <label>
-          Name
-          <input
-            data-name
-            placeholder="NIGHT ROCK"
-            [value]="name()"
-            (input)="name.set($any($event.target).value)"
-          />
-        </label>
-      <!-- One value, two boxes; see the edit form. Jockora-e9a.61. -->
-      <div data-range>
-        <label>
-          From year
-          <input
-            data-year-min
-            type="number"
-            [value]="yearMin() || ''"
-            (input)="yearMin.set(+$any($event.target).value)"
-          />
-        </label>
-        <label>
-          To year
-          <input
-            data-year-max
-            type="number"
-            [value]="yearMax() || ''"
-            (input)="yearMax.set(+$any($event.target).value)"
-          />
-        </label>
-      </div>
-      <!-- THE UNIT IS IN THE LABEL, not left to be guessed. Tempo is BPM
+          <!-- THE NAME IS WHAT THE STATION IS CALLED, so it gets a row rather
+             than whatever gap the wrap leaves. It was drawn floating in the
+             middle of the form with the track count to its left. -->
+          <label data-name-field>
+            Name
+            <input
+              data-name
+              placeholder="NIGHT ROCK"
+              [value]="name()"
+              (input)="name.set($any($event.target).value)"
+            />
+          </label>
+          <!-- One value, two boxes; see the edit form. Jockora-e9a.61. -->
+          <div data-range>
+            <label>
+              From year
+              <input
+                data-year-min
+                type="number"
+                [value]="yearMin() || ''"
+                (input)="yearMin.set(+$any($event.target).value)"
+              />
+            </label>
+            <label>
+              To year
+              <input
+                data-year-max
+                type="number"
+                [value]="yearMax() || ''"
+                (input)="yearMax.set(+$any($event.target).value)"
+              />
+            </label>
+          </div>
+          <!-- THE UNIT IS IN THE LABEL, not left to be guessed. Tempo is BPM
            because that is what tracks.bpm holds; length is MINUTES because
            nobody describes a song as 240 seconds, and the conversion to
            seconds happens in exactly one place on the way out.
 
            EMPTY MEANS UNBOUNDED and must stay empty: an input bound to a zero
            renders "0", which an operator reads as a bound they did not set. -->
-        <!-- The same pairing. -->
-        <div data-range>
-          <label>
-            Slowest (BPM)
-            <input
-              data-tempo-min
-              type="number"
-              placeholder="any"
-              [value]="tempoMin() || ''"
-              (input)="tempoMin.set(+$any($event.target).value)"
-            />
-          </label>
-          <label>
-            Fastest (BPM)
-            <input
-              data-tempo-max
-              type="number"
-              placeholder="any"
-              [value]="tempoMax() || ''"
-              (input)="tempoMax.set(+$any($event.target).value)"
-            />
-          </label>
-        </div>
-        <!-- And again. -->
-        <div data-range>
-          <label>
-            Shortest (minutes)
-            <input
-              data-length-min
-              type="number"
-              step="0.5"
-              placeholder="any"
-              [value]="lengthMin() || ''"
-              (input)="lengthMin.set(+$any($event.target).value)"
-            />
-          </label>
-          <label>
-            Longest (minutes)
-            <input
-              data-length-max
-              type="number"
-              step="0.5"
-              placeholder="any"
-              [value]="lengthMax() || ''"
-              (input)="lengthMax.set(+$any($event.target).value)"
-            />
-          </label>
-        </div>
-      <!-- [selected] per option, never [value] on the select: these options
+          <!-- The same pairing. -->
+          <div data-range>
+            <label>
+              Slowest (BPM)
+              <input
+                data-tempo-min
+                type="number"
+                placeholder="any"
+                [value]="tempoMin() || ''"
+                (input)="tempoMin.set(+$any($event.target).value)"
+              />
+            </label>
+            <label>
+              Fastest (BPM)
+              <input
+                data-tempo-max
+                type="number"
+                placeholder="any"
+                [value]="tempoMax() || ''"
+                (input)="tempoMax.set(+$any($event.target).value)"
+              />
+            </label>
+          </div>
+          <!-- And again. -->
+          <div data-range>
+            <label>
+              Shortest (minutes)
+              <input
+                data-length-min
+                type="number"
+                step="0.5"
+                placeholder="any"
+                [value]="lengthMin() || ''"
+                (input)="lengthMin.set(+$any($event.target).value)"
+              />
+            </label>
+            <label>
+              Longest (minutes)
+              <input
+                data-length-max
+                type="number"
+                step="0.5"
+                placeholder="any"
+                [value]="lengthMax() || ''"
+                (input)="lengthMax.set(+$any($event.target).value)"
+              />
+            </label>
+          </div>
+          <!-- [selected] per option, never [value] on the select: these options
            come from the vocabulary, which arrives over HTTP, and a select whose
            value is bound before its options exist silently falls back to the
            first one. -->
-      <!-- ONE details element, closed by default. This is the path a library
+          <!-- ONE details element, closed by default. This is the path a library
            with no model configured must use, so a 503 from the derive opens it
            rather than leaving the operator at a dead button. -->
-      <details data-manual [open]="manualOpen()">
-        <summary>set genres and moods by hand</summary>
-        <fieldset data-genre>
-          <legend>Genre</legend>
-          @for (g of vocab().genres; track g) {
-            <label>
-              <input
-                type="checkbox"
-                [value]="g"
-                [checked]="genres().includes(g)"
-                (change)="genres.set(pick(vocab().genres, genres(), g, $event))"
-              />{{ g }}
-            </label>
-          }
-          <small>{{ genres().length ? '' : 'none ticked · any genre' }}</small>
-        </fieldset>
-        <fieldset data-mood>
-          <legend>Mood</legend>
-          @for (m of vocab().moods; track m) {
-            <label>
-              <input
-                type="checkbox"
-                [value]="m"
-                [checked]="moods().includes(m)"
-                (change)="moods.set(pick(vocab().moods, moods(), m, $event))"
-              />{{ m }}
-            </label>
-          }
-          <small>{{ moods().length ? '' : 'none ticked · any mood' }}</small>
-        </fieldset>
-      </details>
-        <div data-form-actions>
-          <button type="button" data-add (click)="add()">Add</button>
-        </div>
+          <details data-manual [open]="manualOpen()">
+            <summary>set genres and moods by hand</summary>
+            <fieldset data-genre>
+              <legend>Genre</legend>
+              @for (g of vocab().genres; track g) {
+                <label>
+                  <input
+                    type="checkbox"
+                    [value]="g"
+                    [checked]="genres().includes(g)"
+                    (change)="genres.set(pick(vocab().genres, genres(), g, $event))"
+                  />{{ g }}
+                </label>
+              }
+              <small>{{ genres().length ? '' : 'none ticked · any genre' }}</small>
+            </fieldset>
+            <fieldset data-mood>
+              <legend>Mood</legend>
+              @for (m of vocab().moods; track m) {
+                <label>
+                  <input
+                    type="checkbox"
+                    [value]="m"
+                    [checked]="moods().includes(m)"
+                    (change)="moods.set(pick(vocab().moods, moods(), m, $event))"
+                  />{{ m }}
+                </label>
+              }
+              <small>{{ moods().length ? '' : 'none ticked · any mood' }}</small>
+            </fieldset>
+          </details>
+          <div data-form-actions>
+            <button type="button" data-add (click)="add()">Add</button>
+          </div>
         </fieldset>
       }
     </app-form-dialog>
@@ -491,6 +540,21 @@ export class Stations {
   private readonly api = inject(AdminApi);
 
   readonly stations = signal<Station[]>([]);
+
+  /**
+   * The search box and the sortable headers.
+   *
+   * Every station is in the browser already, so this filters and orders the
+   * whole dial rather than a page of it -- which is exactly why the playlist
+   * does not get one. Jockora-9g7.
+   */
+  readonly view = new TableView<Station>(this.stations, [
+    { key: 'name', value: (s) => s.name },
+    { key: 'tags', value: (s) => this.describe(s) },
+    { key: 'tracks', value: (s) => s.tracks },
+    { key: 'listeners', value: (s) => s.listeners },
+    { key: 'jock', value: (s) => this.jockName(s) },
+  ]);
   /**
    * True once the first answer has arrived, success OR failure.
    *

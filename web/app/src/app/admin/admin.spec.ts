@@ -144,7 +144,9 @@ describe('Admin', () => {
       openEveryForm(fixture);
       const controls = [...fixture.nativeElement.querySelectorAll('input, select, textarea')];
       counted += controls.length;
-      offenders.push(...unnamed(fixture.nativeElement).map((c) => `${section}: ${describeControl(c)}`));
+      offenders.push(
+        ...unnamed(fixture.nativeElement).map((c) => `${section}: ${describeControl(c)}`),
+      );
     }
 
     // COUNTED, so an audit that walked nine empty screens cannot pass. The
@@ -161,7 +163,15 @@ describe('Admin', () => {
     const fixture = mounted();
     let selects = 0;
     const offenders: string[] = [];
-    for (const section of ['sources', 'stations', 'playlist', 'jocks', 'accounts', 'model', 'logs']) {
+    for (const section of [
+      'sources',
+      'stations',
+      'playlist',
+      'jocks',
+      'accounts',
+      'model',
+      'logs',
+    ]) {
       fixture.nativeElement.querySelector(`[data-section="${section}"]`).click();
       fixture.detectChanges();
       settle(fixture);

@@ -436,19 +436,21 @@ describe('logs', () => {
   });
 
   it('renders the odd record without falling over', () => {
-    const fixture = showingEverything(mounted({
-      records: [
-        // No attrs at all, which is most records.
-        { time: '2026-09-08T03:31:06Z', level: 'WARN', message: 'plain' },
-        // A time that is not a time, from a hand-edited row.
-        { time: 'whenever', level: 'ERROR', message: 'bad clock' },
-        // A level this build does not know, from a newer server. It sorts with
-        // info rather than vanishing from every filter.
-        { time: '2026-09-08T03:31:06Z', level: 'CATASTROPHE', message: 'from the future' },
-      ],
-      dropped: 0,
-      level: 'INFO',
-    }));
+    const fixture = showingEverything(
+      mounted({
+        records: [
+          // No attrs at all, which is most records.
+          { time: '2026-09-08T03:31:06Z', level: 'WARN', message: 'plain' },
+          // A time that is not a time, from a hand-edited row.
+          { time: 'whenever', level: 'ERROR', message: 'bad clock' },
+          // A level this build does not know, from a newer server. It sorts with
+          // info rather than vanishing from every filter.
+          { time: '2026-09-08T03:31:06Z', level: 'CATASTROPHE', message: 'from the future' },
+        ],
+        dropped: 0,
+        level: 'INFO',
+      }),
+    );
     const got = rows(fixture);
     expect(got.length).toBe(3);
     expect(got[0].querySelector('[data-log-attrs]')).toBeNull();

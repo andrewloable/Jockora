@@ -19,7 +19,10 @@ import { FormDialog } from './form-dialog';
       <label>Genre <input data-second /></label>
       <label>
         Mood
-        <select data-picker><option value="calm">calm</option><option value="raw">raw</option></select>
+        <select data-picker>
+          <option value="calm">calm</option>
+          <option value="raw">raw</option>
+        </select>
       </label>
     </app-form-dialog>
   `,
@@ -227,7 +230,6 @@ describe('FormDialog', () => {
       'AMBIENT',
     );
   });
-
 
   it('edit dialog puts itself back when the browser closes it anyway', () => {
     // MEASURED IN CHROME 151: preventDefault on cancel is supposed to stop

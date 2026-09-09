@@ -827,19 +827,34 @@ describe('Stations', () => {
     }
   });
 
-  it('station fields names the describe button and puts it with the field it reads', () => {
+  it('station fields gives the describe button one name and puts it with the field it reads', () => {
     const fixture = mounted();
     (fixture.nativeElement.querySelector('[data-edit]') as HTMLButtonElement).click();
     fixture.detectChanges();
     const form = fixture.nativeElement.querySelector('[data-station-edit]');
-    const box = form.querySelector('[data-edit-describe]')!.closest('[data-field]');
+    const button = form.querySelector('[data-edit-describe]') as HTMLButtonElement;
 
     // IMMEDIATELY AFTER THE DESCRIPTION IT ACTS ON, not adrift in the numeric
     // row below it.
-    expect(box.previousElementSibling).toBe(form.querySelector('[data-brief-label]'));
-    // And it has a name of its own, which it did not.
-    expect(box.textContent.trim().length).toBeGreaterThan(0);
-    expect(form.querySelector('[data-edit-describe]')!.closest('label')).toBeNull();
+    expect(button.previousElementSibling).toBe(form.querySelector('[data-brief-label]'));
+    expect(button.closest('label')).toBeNull();
+
+    // ONE NAME, AND IT IS ON THE BUTTON. It used to sit in a [data-field] box
+    // whose heading read "Derive it" above a button reading "Describe it" --
+    // two imperatives, different verbs, one action -- and the operator asked
+    // which was which. Reported with a screenshot 2026-09-09.
+    expect(button.textContent!.trim()).toBe('Describe it');
+    const group = button.closest('[data-brief-group]') as HTMLElement;
+    expect(group).not.toBeNull();
+    expect(group.textContent).not.toContain('Derive it');
+  });
+
+  it('station fields gives the describe button one name on the add form too', () => {
+    // The two forms drifted apart before; this is the pair check that stops it.
+    const fixture = mounted();
+    const button = fixture.nativeElement.querySelector('[data-describe]') as HTMLButtonElement;
+    expect(button.textContent!.trim()).toBe('Describe it');
+    expect(button.closest('[data-brief-group]')!.textContent).not.toContain('Derive it');
   });
 
   it('station fields separates the jock choice from the numeric filters', () => {
@@ -1590,14 +1605,76 @@ describe('stations brief', () => {
     // REPORTED LIVE with a screenshot: Longest read "32.3166666666667" in a box
     // whose step is 0.5. Seconds were divided by sixty and bound straight to
     // the input. Jockora-2mu.
-    const fixture = mounted([
-      { ...stations[0], duration_min_s: 1938, duration_max_s: 1939 },
-    ]);
+    const fixture = mounted([{ ...stations[0], duration_min_s: 1938, duration_max_s: 1939 }]);
     (fixture.nativeElement.querySelectorAll('[data-edit]')[0] as HTMLButtonElement).click();
     fixture.detectChanges();
 
     expect(fixture.nativeElement.querySelector('[data-edit-length-max]').value).toBe('32.32');
     expect(fixture.nativeElement.querySelector('[data-edit-length-min]').value).toBe('32.3');
+  });
+
+  // ------------------------------------------------------ search and sort --
+  // Jockora-9g7. Every station is in the browser, so both tell the truth about
+  // the whole dial rather than a page of it.
+
+  it('stations table sorts by a column and turns it round on a second click', () => {
+    const fixture = mounted(stations);
+    const header = fixture.nativeElement.querySelector('[data-sort="name"]') as HTMLButtonElement;
+    // The FIRST TEXT NODE of the name cell: the cell also carries an "off the
+    // dial" marker under the name, which is not part of the name.
+    const names = () =>
+      [...fixture.nativeElement.querySelectorAll('[data-stations] tbody tr')].map((r) =>
+        (r as HTMLElement).querySelector('td')!.firstChild!.textContent!.trim(),
+      );
+
+    header.click();
+    fixture.detectChanges();
+    expect(names()).toEqual(['AMBIENT', 'ROCK']);
+    expect(header.closest('th')!.getAttribute('aria-sort')).toBe('ascending');
+
+    header.click();
+    fixture.detectChanges();
+    expect(names()).toEqual(['ROCK', 'AMBIENT']);
+    expect(header.closest('th')!.getAttribute('aria-sort')).toBe('descending');
+  });
+
+  it('stations table sorts a count as a number, not as text', () => {
+    // 412 and 12: as text 12 sorts first ascending, which is the column an
+    // operator sorts to find their biggest station.
+    const fixture = mounted(stations);
+    (fixture.nativeElement.querySelector('[data-sort="tracks"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(fixture.componentInstance.view.shown().map((s) => s.tracks)).toEqual([12, 412]);
+  });
+
+  it('stations table searches every column it draws', () => {
+    const fixture = mounted(stations);
+    const search = fixture.nativeElement.querySelector('[data-search]') as HTMLInputElement;
+    search.value = 'calm';
+    search.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    // The mood lives in the genre-and-mood cell, not the name.
+    expect(fixture.componentInstance.view.shown().map((s) => s.name)).toEqual(['AMBIENT']);
+  });
+
+  it('stations table says a search matched nothing rather than that the dial is empty', () => {
+    // LOADING, EMPTY AND NO-MATCH ARE THREE STATES. Telling an operator with
+    // twelve stations to add their first one because they mistyped a name is
+    // the Jockora-e9a.50 mistake wearing a third hat.
+    const fixture = mounted(stations);
+    const search = fixture.nativeElement.querySelector('[data-search]') as HTMLInputElement;
+    search.value = 'nothing matches this';
+    search.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-empty]')).toBeNull();
+    const none = fixture.nativeElement.querySelector('[data-no-match]');
+    expect(none).not.toBeNull();
+    expect(none.textContent).toContain('nothing matches this');
+
+    (fixture.nativeElement.querySelector('[data-clear-search]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(fixture.componentInstance.view.shown()).toHaveLength(2);
   });
 
   // ------------------------------------------------- abandoned derivations --
@@ -1634,7 +1711,9 @@ describe('stations brief', () => {
   it('stations abandoned a derivation answered after the add form closed fills nothing in', () => {
     const fixture = mounted();
     typeBrief(fixture, 'late-night rock for driving');
-    const req = describeThenLeave(fixture, '[data-describe]', () => closeDialog(fixture, '[data-station-add]'));
+    const req = describeThenLeave(fixture, '[data-describe]', () =>
+      closeDialog(fixture, '[data-station-add]'),
+    );
 
     req.flush({ ...derived, name: 'Night Rock', genres: ['rock'], moods: ['raw'] });
     fixture.detectChanges();
@@ -1650,7 +1729,9 @@ describe('stations brief', () => {
   it('stations abandoned a derivation that fails after the add form closed says nothing', () => {
     const fixture = mounted();
     typeBrief(fixture, 'late-night rock for driving');
-    const req = describeThenLeave(fixture, '[data-describe]', () => closeDialog(fixture, '[data-station-add]'));
+    const req = describeThenLeave(fixture, '[data-describe]', () =>
+      closeDialog(fixture, '[data-station-add]'),
+    );
 
     // A 503 OPENS THE BY-HAND FIELDSETS, so a stale one does not just print a
     // message: it changes what is on screen for a request already abandoned.
@@ -1741,4 +1822,24 @@ describe('stations brief', () => {
     expect(fixture.componentInstance.manualOpen()).toBe(false);
   });
 
+  it('stations table gives every sortable header its own column', () => {
+    // COPY-PASTED HEADERS ARE THE BUG THIS CATCHES. Each one carries the key it
+    // sorts by, and a header wired to its neighbour's key looks right and sorts
+    // the wrong column -- which nothing else here would notice.
+    const fixture = mounted(stations);
+    const headers = [
+      ...fixture.nativeElement.querySelectorAll('[data-stations] thead [data-sort]'),
+    ] as HTMLButtonElement[];
+    expect(headers.length).toBe(5);
+    const keys = new Set<string>();
+    for (const h of headers) {
+      const key = h.getAttribute('data-sort')!;
+      expect(keys.has(key), `two headers claim ${key}`).toBe(false);
+      keys.add(key);
+      h.click();
+      fixture.detectChanges();
+      expect(fixture.componentInstance.view.sortKey()).toBe(key);
+      expect(h.closest('th')!.getAttribute('aria-sort')).toBe('ascending');
+    }
+  });
 });

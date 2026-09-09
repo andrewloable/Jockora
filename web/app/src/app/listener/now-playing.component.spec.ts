@@ -165,26 +165,20 @@ describe('NowPlayingView', () => {
     return fixture;
   }
 
-  it('says the DJ speaks after this track', () => {
-    const fixture = tuned({ now: null, next_break: 'ready' });
-    expect(fixture.nativeElement.querySelector('[data-nextbreak]').textContent).toContain(
-      'speaks after this track',
-    );
-  });
-
-  it('says the DJ is still writing', () => {
-    const fixture = tuned({ now: null, next_break: 'writing' });
-    expect(fixture.nativeElement.querySelector('[data-nextbreak]').textContent).toContain(
-      'writing a break',
-    );
-  });
-
-  it('says nothing when no break is coming', () => {
-    expect(
-      tuned({ now: null, next_break: 'none' }).nativeElement.querySelector('[data-nextbreak]'),
-    ).toBeNull();
-    // And a server that does not report it at all is not a crash.
-    expect(tuned({ now: null }).nativeElement.querySelector('[data-nextbreak]')).toBeNull();
+  it('never says what the DJ is about to do, whatever the server reports', () => {
+    // ASKED FOR 2026-09-09, after the transcript went the same way: a listener
+    // tunes in to hear a station, not to watch it work. Radio does not narrate
+    // its own production. Jockora-do2.
+    //
+    // EVERY STATE THE SERVER CAN SEND, because the paragraph this replaces had
+    // a case for each and removing one of three is how half a feature survives.
+    for (const state of ['ready', 'writing', 'none', undefined]) {
+      const fixture = tuned({ now: null, next_break: state });
+      expect(fixture.nativeElement.querySelector('[data-nextbreak]'), String(state)).toBeNull();
+      const text = fixture.nativeElement.textContent as string;
+      expect(text, String(state)).not.toContain('speaks after this track');
+      expect(text, String(state)).not.toContain('writing a break');
+    }
   });
 
   it('forgets the old station when the listener moves', () => {

@@ -758,6 +758,98 @@ label[data-inline-field] input {
   flex: 1 0 100%;
 }
 
+/* THE DESCRIBE BUTTON, beside the description it reads.
+ *
+ * It used to live in a [data-field] box so a bare button would line up with the
+ * labelled controls it sat beside on the numeric row. It does not sit there any
+ * more -- it sits next to a textarea in a group that aligns on the bottom edge
+ * -- so the box bought nothing and cost a second name: its heading read "Derive
+ * it" above a button reading "Describe it", and the operator asked which was
+ * which. Reported with a screenshot 2026-09-09.
+ *
+ * Sized rather than stretched: as a bare flex item it would grow to fill the
+ * row beside a textarea that is already 100% wide. */
+[data-brief-group] > button {
+  flex: 0 0 auto;
+  align-self: end;
+  margin-bottom: var(--s3);
+}
+
+/* WHAT THE MODEL SAID, AS ONE BLOCK.
+ *
+ * The count, the low-track warning and the slow-model note were three loose
+ * flex items in a wrapping row, so they packed in wherever there was space: the
+ * count drew to the LEFT of the Name box and read as its caption, and the
+ * warning ran on the same line as the count. They are one thing and they get
+ * one row. */
+[data-derived-status] {
+  flex: 1 0 100%;
+  margin: 0 0 var(--s3);
+  font-size: var(--t-sm);
+  color: var(--ink-faint);
+}
+
+[data-derived-status] > span {
+  display: block;
+}
+
+[data-derived-status] > [data-derived-warning] {
+  color: var(--warn);
+}
+
+/* THE NAME GETS A ROW. It is what the station is called and it was drawn
+ * floating mid-form with the track count to its left, because it was an
+ * ordinary flex item after three items of unpredictable width. */
+[data-name-field] {
+  flex: 1 0 100%;
+}
+
+/* AND SO DOES THE BY-HAND PICKER. A details element holding two full
+ * checkbox grids was wedged into the gap beside "Longest (minutes)", so its
+ * summary read as a caption for the length field. */
+[data-manual] {
+  flex: 1 0 100%;
+  margin-bottom: var(--s3);
+}
+
+/* A SORTABLE HEADER IS A BUTTON, and it looks like the header it replaced.
+ *
+ * A th with a click handler is not reachable by keyboard and is announced as a
+ * cell, so the control is a real button -- and then it has to be stripped back
+ * to header typography, or every table grows a row of grey chrome. Jockora-9g7. */
+[data-sort] {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--s1);
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+[data-sort]:hover {
+  color: var(--ember);
+}
+
+/* The arrow keeps its space whether or not it is drawn, so clicking a header
+   does not shove the ones beside it sideways. */
+[data-sort-marker] {
+  display: inline-block;
+  min-width: 1em;
+  font-size: 0.8em;
+  color: var(--ember);
+}
+
+/* The search box sits above its table and does not stretch to the page: it
+   filters a list, it is not the primary field on a form. */
+[data-table-search] {
+  max-width: 24rem;
+}
+
 /* THE ACTIONS END THE FORM, on a row of their own rather than landing wherever
  * the wrap happens to leave room. Jockora-e9a.53: Save and Cancel used to be
  * stranded in the table's Actions column at y610 and y644, vertically adrift of

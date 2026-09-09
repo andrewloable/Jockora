@@ -511,9 +511,7 @@ describe('Playlist tag editing', () => {
     const fixture = open(0);
     // THE ROW SCROLLING AWAY STOPS MATTERING once the dialog says which track
     // it is -- and the editor left the table entirely, so nothing else does.
-    expect(fixture.nativeElement.querySelector('[data-dialog-title]').textContent).toContain(
-      'One',
-    );
+    expect(fixture.nativeElement.querySelector('[data-dialog-title]').textContent).toContain('One');
     expect(fixture.nativeElement.querySelector('[data-tag-editor]')!.closest('table')).toBeNull();
 
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
@@ -638,5 +636,4 @@ describe('Playlist narrow', () => {
       expect(row.querySelector('[data-exclude]')).toBeTruthy();
     }
   });
-
 });

@@ -106,6 +106,9 @@ export class Player implements OnDestroy {
 
   private play(src: string): void {
     const audio = this.audio();
+    // WAS SOUND COMING OUT BEFORE THE SWAP? Read from the ELEMENT and captured
+    // before anything touches it, because everything below re-sources it.
+    const wasPlaying = !audio.paused;
 
     // HLS.JS FIRST, AND canPlayType IS NOT A RELIABLE ANSWER.
     //
@@ -123,6 +126,7 @@ export class Player implements OnDestroy {
     if (!Hls.isSupported()) {
       if (audio.canPlayType('application/vnd.apple.mpegurl')) {
         audio.src = src;
+        this.resume(wasPlaying);
         this.status.set('Ready.');
         return;
       }
@@ -166,7 +170,43 @@ export class Player implements OnDestroy {
         this.destroy();
       }
     });
+    this.resume(wasPlaying);
     this.status.set('Ready.');
+  }
+
+  /**
+   * Carry playback across a change of station.
+   *
+   * REPORTED 2026-09-09: pick a station, press Listen, pick another -- the
+   * button still read Stop, pressing it did nothing, and the new station never
+   * made a sound.
+   *
+   * TWO FAULTS, ONE CAUSE. Re-sourcing the element runs the media load
+   * algorithm, which sets paused to true and does NOT fire a pause event. So
+   * the playing signal, which deliberately follows the element rather than the
+   * click, had nothing to follow and went stale: the button kept claiming it
+   * was playing, and pressing it called pause() on an already-paused element,
+   * which does nothing at all. Hence "could not click listen".
+   *
+   * CHANGING STATION IS THIS PRODUCT'S ONLY ESCAPE HATCH -- there is no skip
+   * and no seek -- so somebody who was listening and picks another station is
+   * still listening, and the stream simply changes under them. Somebody who
+   * was NOT listening stays silent, or picking a station to read its name
+   * starts sound they did not ask for.
+   *
+   * The play() is allowed: the listener pressed Listen, and a gesture is what
+   * the browser's block on unrequested sound asks for. A refusal is swallowed the same
+   * way toggle() swallows it, and resync leaves the button honest either way.
+   */
+  private resume(wasPlaying: boolean): void {
+    const audio = this.audio();
+    if (wasPlaying) {
+      void audio.play().catch(() => undefined);
+    }
+    // HONEST EITHER WAY, and this is the half that unsticks the button: the
+    // signal is resynced from the element after the swap, so it can never be
+    // left asserting a state the element is not in.
+    this.playing.set(!audio.paused);
   }
 
   // Retried indefinitely and on a timer, because this is radio: the station

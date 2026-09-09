@@ -15,12 +15,10 @@ export const POLL_MS = 4000;
   standalone: true,
   template: `
     <p data-nowplaying>{{ label() }}</p>
-    <!-- WHETHER THE DJ IS ABOUT TO SPEAK. A break that is coming, one still
-         being written, and one that was never scheduled are the same silence
-         from here -- so a quiet station and a broken one read alike. -->
-    @if (breakLabel(); as b) {
-      <p data-nextbreak>{{ b }}</p>
-    }
+    <!-- WHETHER THE DJ IS ABOUT TO SPEAK IS NOT SHOWN EITHER. Asked for
+         2026-09-09, after the transcript went the same way: a listener tunes in
+         to hear a station, not to watch it work. Radio does not narrate its own
+         production. Jockora-do2. -->
     <!-- WHAT THE DJ SAID IS NOT PRINTED. Asked for 2026-09-09: radio is heard,
          and a transcript under the player turns a break into something to read
          along with. The signal stays -- it is what the thumbs-down has to rate,
@@ -48,19 +46,6 @@ export class NowPlayingView implements OnDestroy {
    * stands for minutes.
    */
   readonly spoke = output<string>();
-  readonly nextBreak = signal('');
-
-  /** What the DJ is about to do, in words rather than a state name. */
-  breakLabel(): string {
-    switch (this.nextBreak()) {
-      case 'ready':
-        return 'The DJ speaks after this track.';
-      case 'writing':
-        return 'The DJ is writing a break…';
-      default:
-        return '';
-    }
-  }
 
   private timer: ReturnType<typeof setInterval> | null = null;
 
@@ -85,7 +70,6 @@ export class NowPlayingView implements OnDestroy {
     this.api.now(id).subscribe({
       next: (n) => {
         this.label.set(n.now ? `${n.now.artist} — ${n.now.title}` : 'Nothing playing yet.');
-        this.nextBreak.set(n.next_break ?? '');
         const said = n.last_break?.text ?? '';
         if (said !== this.transcript()) {
           this.transcript.set(said);
@@ -107,7 +91,6 @@ export class NowPlayingView implements OnDestroy {
   private forget(): void {
     this.label.set('Nothing playing yet.');
     this.transcript.set('');
-    this.nextBreak.set('');
     this.spoke.emit('');
   }
 

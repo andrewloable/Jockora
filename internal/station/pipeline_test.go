@@ -4,10 +4,12 @@
 package station
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -421,5 +423,78 @@ func TestPipelineWithNoWriterDeclinesRatherThanPanicking(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("scheduled %d breaks with no writer", n)
+	}
+}
+
+// TestBreakTextLogsTheRecordsItIsAbout: asked for 2026-09-09 so the DJ's words
+// can be checked against the records they are supposed to be about.
+//
+// THIS IS THE ONE FAILURE THE REST OF THE PIPELINE CANNOT SEE. A break can be
+// well written, correctly timed, the right length and about the WRONG PAIR --
+// every counter green, every test passing, and the DJ naming a record the
+// station is not playing. It has happened here: the writer's context was
+// shared, later boundaries overwrote it during the seventy-five seconds between
+// announce and generation, and the DJ said Everlong was next while Green Day
+// played. applyContext fixed the cause; this line is how anybody CHECKS it on a
+// running station.
+func TestBreakTextLogsTheRecordsItIsAbout(t *testing.T) {
+	clk := clock.NewFake(time.Unix(1_700_000_000, 0))
+	var logged bytes.Buffer
+	p, s, _ := newPipeline(t, clk, 20*time.Second, 6.0)
+	p.Log = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	_ = s
+
+	at := 240.0
+	for i := 1; i <= 4; i++ {
+		p.Announce(Boundary{
+			Index: i, Cur: lrcTrack(4, 4), Next: lrcTrack(12, 4),
+			InsertionAt: float64(i) * 60, InsertionSample: int64(float64(i) * 60 * mix.SampleRate),
+			PrevArtist: "Blur", PrevTitle: "Song 2",
+			CurArtist: "Nine Inch Nails", CurTitle: "Hurt",
+			NextArtist: "Green Day", NextTitle: "21 Guns",
+		})
+	}
+	if _, err := p.Tick(context.Background(), at-150); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	out := logged.String()
+	if !strings.Contains(out, "break text") {
+		t.Fatalf("no break text line was logged:\n%s", out)
+	}
+	// THE WORDS THEMSELVES, or the line says a break happened and not what it
+	// said, which is the whole point of it. This is what the fake writer
+	// produces, so the assertion is on the script that actually flowed through
+	// rather than on a string the test planted at the other end.
+	if !strings.Contains(out, "script for a target of some words") {
+		t.Errorf("the line does not carry what the DJ said:\n%s", out)
+	}
+	// NAMED FOR WHAT A LISTENER HEARS. The break airs at the end of Cur, so the
+	// record that just finished is cur and the one starting is next -- reading
+	// the struct's Prev as "the song before this break" is exactly the
+	// misreading that makes a correct break look wrong.
+	for _, want := range []string{
+		`just_played="Nine Inch Nails — Hurt"`,
+		`coming_up="Green Day — 21 Guns"`,
+		`before_that="Blur — Song 2"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the line is missing %s:\n%s", want, out)
+		}
+	}
+}
+
+func TestBreakTextNamesAnAbsentRecordRatherThanLeavingItBlank(t *testing.T) {
+	// The first break on a station has no record before the one just played.
+	// An empty value in a log line reads as a field that failed to populate.
+	for _, c := range []struct{ artist, title, want string }{
+		{"Blur", "Song 2", "Blur — Song 2"},
+		{"", "", "none"},
+		{"", "Song 2", "Song 2"},
+		{"Blur", "", "Blur"},
+	} {
+		if got := song(c.artist, c.title); got != c.want {
+			t.Errorf("song(%q, %q) = %q, want %q", c.artist, c.title, got, c.want)
+		}
 	}
 }

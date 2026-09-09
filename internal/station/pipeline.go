@@ -302,6 +302,29 @@ func (p *Pipeline) generate(ctx context.Context, now float64, b Boundary) (bool,
 
 	p.log().Info("break scheduled", "boundary", b.Index, "placement", rendered.Placement.String(),
 		"seconds", rendered.Seconds, "attempts", rendered.Attempts, "elapsed", elapsed)
+
+	// WHAT THE DJ SAID, BESIDE THE RECORDS IT WAS WRITTEN ABOUT.
+	//
+	// A break can be perfectly written, correctly timed and about the wrong
+	// pair. That has happened here: the writer's context was shared, later
+	// boundaries overwrote it during the seventy-five seconds between announce
+	// and generation, and the DJ said Everlong was next while the station
+	// played Green Day. applyContext fixed the cause; this is how anybody
+	// CHECKS it, on a running station, without a debugger.
+	//
+	// THE THREE ARE NAMED FOR WHAT A LISTENER HEARS, not for the struct
+	// fields, because the struct's names are a trap: this break airs at the end
+	// of CUR, so the record that just finished is cur and the one starting is
+	// next. Prev is the one before that -- the DJ may backsell it, and reading
+	// it as "the song before this break" is exactly the misreading that would
+	// make a correct break look wrong.
+	p.log().Info("break text",
+		"boundary", b.Index,
+		"placement", rendered.Placement.String(),
+		"just_played", song(b.CurArtist, b.CurTitle),
+		"coming_up", song(b.NextArtist, b.NextTitle),
+		"before_that", song(b.PrevArtist, b.PrevTitle),
+		"said", rendered.Text)
 	if p.OnScheduled != nil {
 		p.OnScheduled(rendered.Text, rendered.Placement)
 	}
@@ -393,4 +416,21 @@ func (p *Pipeline) Outlook() Outlook {
 	default:
 		return OutlookNone
 	}
+}
+
+// song is one record as a person would name it, for a log line.
+//
+// EMPTY IS SAID OUT LOUD as "none" rather than left blank: the first break on a
+// station has no previous record, and an empty value in a log line reads as a
+// field that failed to populate rather than a fact.
+func song(artist, title string) string {
+	switch {
+	case artist == "" && title == "":
+		return "none"
+	case artist == "":
+		return title
+	case title == "":
+		return artist
+	}
+	return artist + " — " + title
 }

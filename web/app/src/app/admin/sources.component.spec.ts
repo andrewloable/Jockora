@@ -293,26 +293,32 @@ describe('Sources', () => {
     const fixture = mounted();
     fixture.nativeElement.querySelector('[data-rescan]').click();
     ctrl.expectOne('/admin/rescan').flush({});
-    ctrl.expectOne((r) => r.url.includes('/now.json')).flush({
-      rescan: { running: true, found: 10, skipped: 0, missing: 0 },
-    });
+    ctrl
+      .expectOne((r) => r.url.includes('/now.json'))
+      .flush({
+        rescan: { running: true, found: 10, skipped: 0, missing: 0 },
+      });
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-progress]').textContent).toContain('10');
 
     // IT MOVES.
     vi.advanceTimersByTime(SCAN_POLL_MS);
-    ctrl.expectOne((r) => r.url.includes('/now.json')).flush({
-      rescan: { running: true, found: 240, skipped: 2, missing: 0 },
-    });
+    ctrl
+      .expectOne((r) => r.url.includes('/now.json'))
+      .flush({
+        rescan: { running: true, found: 240, skipped: 2, missing: 0 },
+      });
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-progress]').textContent).toContain('240');
 
     // AND IT STOPS when the scan does, rather than polling a finished answer
     // for as long as the tab is open.
     vi.advanceTimersByTime(SCAN_POLL_MS);
-    ctrl.expectOne((r) => r.url.includes('/now.json')).flush({
-      rescan: { running: false, found: 512, skipped: 3, missing: 1 },
-    });
+    ctrl
+      .expectOne((r) => r.url.includes('/now.json'))
+      .flush({
+        rescan: { running: false, found: 512, skipped: 3, missing: 1 },
+      });
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('[data-progress]').textContent).toContain(
       'Last scan',
@@ -333,9 +339,11 @@ describe('Sources', () => {
     const fixture = mounted();
     fixture.nativeElement.querySelector('[data-rescan]').click();
     ctrl.expectOne('/admin/rescan').flush({});
-    ctrl.expectOne((r) => r.url.includes('/now.json')).flush({
-      rescan: { running: true, found: 10, skipped: 0, missing: 0 },
-    });
+    ctrl
+      .expectOne((r) => r.url.includes('/now.json'))
+      .flush({
+        rescan: { running: true, found: 10, skipped: 0, missing: 0 },
+      });
     fixture.detectChanges();
 
     fixture.destroy();
@@ -365,5 +373,74 @@ describe('Sources', () => {
     expect(fixture.componentInstance.password()).toBe('');
     expect(fixture.componentInstance.locator()).toBe('');
     expect(fixture.componentInstance.username()).toBe('');
+  });
+
+  // Jockora-9g7. This table had no header row at all before it -- five columns
+  // of bare cells, so nothing said which was the folder and which the username.
+  it('sources table names its columns', () => {
+    const fixture = mounted();
+    const heads = [...fixture.nativeElement.querySelectorAll('[data-sources] thead th')].map((h) =>
+      (h as HTMLElement).textContent!.trim().replace(/\s+/g, ' '),
+    );
+    expect(heads.length).toBe(5);
+    expect(heads[0]).toContain('Kind');
+    expect(heads[4]).toContain('Actions');
+  });
+
+  it('sources table searches kind, where, username and status', () => {
+    const fixture = mounted();
+    const search = fixture.nativeElement.querySelector('[data-search]') as HTMLInputElement;
+    const shown = () => fixture.componentInstance.view.shown().map((s) => s.id);
+    for (const [q, want] of [
+      ['folder', [1]],
+      ['/music', [1]],
+      ['andrew', [2]],
+      // "on" and "off" are drawn from a boolean, so the column searches the
+      // word the cell shows.
+      ['off', [2]],
+    ] as [string, number[]][]) {
+      search.value = q;
+      search.dispatchEvent(new Event('input'));
+      fixture.detectChanges();
+      expect(shown(), q).toEqual(want);
+    }
+  });
+
+  it('sources table sorts by a clicked header', () => {
+    const fixture = mounted();
+    const header = fixture.nativeElement.querySelector('[data-sort="kind"]') as HTMLButtonElement;
+    header.click();
+    fixture.detectChanges();
+    expect(fixture.componentInstance.view.shown().map((s) => s.kind)).toEqual([
+      'folder',
+      'subsonic',
+    ]);
+    header.click();
+    fixture.detectChanges();
+    expect(fixture.componentInstance.view.shown().map((s) => s.kind)).toEqual([
+      'subsonic',
+      'folder',
+    ]);
+  });
+
+  it('sources table gives every sortable header its own column', () => {
+    // COPY-PASTED HEADERS ARE THE BUG THIS CATCHES. Each one carries the key it
+    // sorts by, and a header wired to its neighbour's key looks right and sorts
+    // the wrong column -- which nothing else here would notice.
+    const fixture = mounted();
+    const headers = [
+      ...fixture.nativeElement.querySelectorAll('[data-sources] thead [data-sort]'),
+    ] as HTMLButtonElement[];
+    expect(headers.length).toBe(4);
+    const keys = new Set<string>();
+    for (const h of headers) {
+      const key = h.getAttribute('data-sort')!;
+      expect(keys.has(key), `two headers claim ${key}`).toBe(false);
+      keys.add(key);
+      h.click();
+      fixture.detectChanges();
+      expect(fixture.componentInstance.view.sortKey()).toBe(key);
+      expect(h.closest('th')!.getAttribute('aria-sort')).toBe('ascending');
+    }
   });
 });

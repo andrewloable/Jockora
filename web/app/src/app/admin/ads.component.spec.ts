@@ -633,4 +633,72 @@ describe('ads', () => {
     const script = form.querySelector('[data-script]')!.closest('label');
     expect(box.nextElementSibling).toBe(script);
   });
+
+  // Jockora-9g7.
+  it('adverts table searches brand, copy, air date and state', () => {
+    const fixture = mounted();
+    const search = fixture.nativeElement.querySelector('[data-search]') as HTMLInputElement;
+    const shown = () => fixture.componentInstance.view.shown().map((a) => a.id);
+    search.value = 'Stillwater';
+    search.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    expect(shown()).toEqual([1]);
+    // The COPY, not just the brand: finding the advert that mentions a thing is
+    // the reason to search a table of adverts.
+    search.value = 'hand-thrown';
+    search.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    expect(shown()).toEqual([1]);
+    search.value = '2026-09-08';
+    search.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    expect(shown()).toEqual([1]);
+    search.value = 'on air';
+    search.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+    expect(shown()).toEqual([1, 2]);
+
+    // AND AN ADVERT THAT IS OFF, which is the state an operator searches for --
+    // "which of these is not running". Both halves of the column, because a
+    // ternary tested one way round is a column that half works.
+    const off = mounted([{ ...rows[0], id: 9, enabled: false }]);
+    const offSearch = off.nativeElement.querySelector('[data-search]') as HTMLInputElement;
+    offSearch.value = 'off';
+    offSearch.dispatchEvent(new Event('input'));
+    off.detectChanges();
+    expect(off.componentInstance.view.shown().map((a) => a.id)).toEqual([9]);
+  });
+
+  it('adverts table sorts by a clicked header', () => {
+    const fixture = mounted();
+    const header = fixture.nativeElement.querySelector('[data-sort="brand"]') as HTMLButtonElement;
+    header.click();
+    fixture.detectChanges();
+    const first = fixture.componentInstance.view.shown()[0].brand;
+    header.click();
+    fixture.detectChanges();
+    expect(fixture.componentInstance.view.shown()[0].brand).not.toBe(first);
+    expect(header.closest('th')!.getAttribute('aria-sort')).toBe('descending');
+  });
+
+  it('adverts table gives every sortable header its own column', () => {
+    // COPY-PASTED HEADERS ARE THE BUG THIS CATCHES. Each one carries the key it
+    // sorts by, and a header wired to its neighbour's key looks right and sorts
+    // the wrong column -- which nothing else here would notice.
+    const fixture = mounted();
+    const headers = [
+      ...fixture.nativeElement.querySelectorAll('[data-ads] thead [data-sort]'),
+    ] as HTMLButtonElement[];
+    expect(headers.length).toBe(4);
+    const keys = new Set<string>();
+    for (const h of headers) {
+      const key = h.getAttribute('data-sort')!;
+      expect(keys.has(key), `two headers claim ${key}`).toBe(false);
+      keys.add(key);
+      h.click();
+      fixture.detectChanges();
+      expect(fixture.componentInstance.view.sortKey()).toBe(key);
+      expect(h.closest('th')!.getAttribute('aria-sort')).toBe('ascending');
+    }
+  });
 });

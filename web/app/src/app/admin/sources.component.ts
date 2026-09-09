@@ -1,5 +1,6 @@
 import { Component, OnDestroy, inject, signal } from '@angular/core';
 import { Api, AdminApi, Source, serverSaid } from '../api/api';
+import { TableView } from './table-view';
 import { FormDialog } from './form-dialog';
 
 /**
@@ -22,37 +23,80 @@ export const SCAN_POLL_MS = 4000;
   imports: [FormDialog],
   template: `
     <h2>Sources</h2>
+    <!-- SEARCH AND SORT over the whole list, which is all in the browser.
+         Jockora-9g7. -->
+    <label data-table-search>
+      Search
+      <input
+        data-search
+        type="search"
+        placeholder="kind, folder or server"
+        [value]="view.query()"
+        (input)="view.query.set($any($event.target).value)"
+      />
+    </label>
     <table data-sources>
-      @for (source of sources(); track source.id) {
+      <!-- A HEADER ROW AT ALL. This table had none: five columns of bare cells,
+           so nothing said which was the folder and which the username, and a
+           screen reader had no column names to announce. Jockora-9g7. -->
+      <thead>
         <tr>
-          <td>{{ source.kind }}</td>
-          <td>{{ source.locator }}</td>
-          <td>{{ source.username }}</td>
-          <td>{{ source.enabled ? 'on' : 'off' }}</td>
-          <td>
-            <button type="button" data-toggle (click)="toggle(source)">
-              {{ source.enabled ? 'Disable' : 'Enable' }}
+          <th scope="col" [attr.aria-sort]="view.ariaSort('kind')">
+            <button type="button" data-sort="kind" (click)="view.toggle('kind')">
+              Kind <span data-sort-marker>{{ view.marker('kind') }}</span>
             </button>
-            <button type="button" data-remove data-danger (click)="remove(source)">Remove</button>
-          </td>
+          </th>
+          <th scope="col" [attr.aria-sort]="view.ariaSort('locator')">
+            <button type="button" data-sort="locator" (click)="view.toggle('locator')">
+              Where <span data-sort-marker>{{ view.marker('locator') }}</span>
+            </button>
+          </th>
+          <th scope="col" [attr.aria-sort]="view.ariaSort('username')">
+            <button type="button" data-sort="username" (click)="view.toggle('username')">
+              Username <span data-sort-marker>{{ view.marker('username') }}</span>
+            </button>
+          </th>
+          <th scope="col" [attr.aria-sort]="view.ariaSort('enabled')">
+            <button type="button" data-sort="enabled" (click)="view.toggle('enabled')">
+              Status <span data-sort-marker>{{ view.marker('enabled') }}</span>
+            </button>
+          </th>
+          <!-- NOT SORTABLE: a column of buttons has no order. -->
+          <th scope="col">Actions</th>
         </tr>
-      } @empty {
-        <!-- LOADING AND EMPTY ARE NOT THE SAME THING and both drew a table
+      </thead>
+      <tbody>
+        @for (source of view.shown(); track source.id) {
+          <tr>
+            <td>{{ source.kind }}</td>
+            <td>{{ source.locator }}</td>
+            <td>{{ source.username }}</td>
+            <td>{{ source.enabled ? 'on' : 'off' }}</td>
+            <td>
+              <button type="button" data-toggle (click)="toggle(source)">
+                {{ source.enabled ? 'Disable' : 'Enable' }}
+              </button>
+              <button type="button" data-remove data-danger (click)="remove(source)">Remove</button>
+            </td>
+          </tr>
+        } @empty {
+          <!-- LOADING AND EMPTY ARE NOT THE SAME THING and both drew a table
              with no rows, so a slow first paint told a new operator their
              library was empty. Jockora-e9a.50. -->
-        <tr>
-          <td colspan="5">
-            @if (!loaded()) {
-              <span data-loading>Loading…</span>
-            } @else if (!failed()) {
-              <span data-empty
-                ><strong>Nothing scanned yet.</strong> Add a source below and Jockora reads it. It
-                is never written to.</span
-              >
-            }
-          </td>
-        </tr>
-      }
+          <tr>
+            <td colspan="5">
+              @if (!loaded()) {
+                <span data-loading>Loading…</span>
+              } @else if (!failed()) {
+                <span data-empty
+                  ><strong>Nothing scanned yet.</strong> Add a source below and Jockora reads it. It
+                  is never written to.</span
+                >
+              }
+            </td>
+          </tr>
+        }
+      </tbody>
     </table>
 
     <button type="button" data-add-open (click)="adding.set(true)">Add a source</button>
@@ -60,44 +104,44 @@ export const SCAN_POLL_MS = 4000;
       @if (adding()) {
         <fieldset data-source-form>
           <legend>Add a source</legend>
-      <label>
-        Kind
-        <select data-kind [value]="kind()" (change)="kind.set($any($event.target).value)">
-          <option value="folder">folder</option>
-          <option value="subsonic">subsonic</option>
-        </select>
-      </label>
-      <label>
-        Where it is
-        <!-- THE PLACEHOLDER SURVIVES because it is an EXAMPLE rather than a
+          <label>
+            Kind
+            <select data-kind [value]="kind()" (change)="kind.set($any($event.target).value)">
+              <option value="folder">folder</option>
+              <option value="subsonic">subsonic</option>
+            </select>
+          </label>
+          <label>
+            Where it is
+            <!-- THE PLACEHOLDER SURVIVES because it is an EXAMPLE rather than a
              repeat of the label -- which is the whole distinction this task
              turns on. -->
-        <input
-          data-locator
-          placeholder="path or URL"
-          [value]="locator()"
-          (input)="locator.set($any($event.target).value)"
-        />
-      </label>
-      @if (kind() === 'subsonic') {
-        <label>
-          Username
-          <input
-            data-username
-            [value]="username()"
-            (input)="username.set($any($event.target).value)"
-          />
-        </label>
-        <label>
-          Password
-          <input
-            data-password
-            type="password"
-            [value]="password()"
-            (input)="password.set($any($event.target).value)"
-          />
-        </label>
-      }
+            <input
+              data-locator
+              placeholder="path or URL"
+              [value]="locator()"
+              (input)="locator.set($any($event.target).value)"
+            />
+          </label>
+          @if (kind() === 'subsonic') {
+            <label>
+              Username
+              <input
+                data-username
+                [value]="username()"
+                (input)="username.set($any($event.target).value)"
+              />
+            </label>
+            <label>
+              Password
+              <input
+                data-password
+                type="password"
+                [value]="password()"
+                (input)="password.set($any($event.target).value)"
+              />
+            </label>
+          }
           <div data-form-actions>
             <button type="button" data-add (click)="add()">Add</button>
           </div>
@@ -120,6 +164,14 @@ export class Sources implements OnDestroy {
   private readonly listener = inject(Api);
 
   readonly sources = signal<Source[]>([]);
+
+  /** The search box and the sortable headers. Jockora-9g7. */
+  readonly view = new TableView<Source>(this.sources, [
+    { key: 'kind', value: (s) => s.kind },
+    { key: 'locator', value: (s) => s.locator },
+    { key: 'username', value: (s) => s.username },
+    { key: 'enabled', value: (s) => (s.enabled ? 'on' : 'off') },
+  ]);
   /**
    * True once the first answer has arrived, success OR failure.
    *
@@ -199,8 +251,7 @@ export class Sources implements OnDestroy {
         },
         // The SERVER'S OWN WORDS: it stats the folder and pings the server, and
         // its refusal says which one failed and why.
-        error: (e: unknown) =>
-          this.said.set(serverSaid(e, 'Could not add that source.')),
+        error: (e: unknown) => this.said.set(serverSaid(e, 'Could not add that source.')),
       });
   }
 
