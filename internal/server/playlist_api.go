@@ -29,7 +29,7 @@ const (
 // breath as pinning -- even though what they change is the TRACK and not the
 // station's copy of it.
 type Playlists interface {
-	StationTrackPage(ctx context.Context, id int64, limit, offset int) ([]store.StationTrackDetail, int, error)
+	StationTrackPage(ctx context.Context, id int64, limit, offset int, sort string, desc bool) ([]store.StationTrackDetail, int, error)
 	SetPinned(ctx context.Context, stationID, trackID int64, pinned bool) error
 	SetExcluded(ctx context.Context, stationID, trackID int64, excluded bool) error
 	SetTrackTags(ctx context.Context, trackID int64, genres, moods []string) error
@@ -75,7 +75,13 @@ func (s *Server) listPlaylist(w http.ResponseWriter, r *http.Request, stationID 
 		offset = 0
 	}
 
-	rows, total, err := s.playlists.StationTrackPage(r.Context(), stationID, limit, offset)
+	// UNVALIDATED ON PURPOSE. The store owns the list of columns it can sort
+	// by, and a name it does not know is the default order -- the same way an
+	// unreadable limit is the default page size rather than a 400.
+	sort := r.URL.Query().Get("sort")
+	desc := r.URL.Query().Get("dir") == "desc"
+
+	rows, total, err := s.playlists.StationTrackPage(r.Context(), stationID, limit, offset, sort, desc)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -152,7 +158,7 @@ func (s *Server) flagTrack(w http.ResponseWriter, r *http.Request, stationID int
 // lost. Read through the same paged listing rather than a second query, so
 // there is one definition of what "missing" means.
 func (s *Server) trackIsMissing(ctx context.Context, stationID, trackID int64) (bool, error) {
-	rows, _, err := s.playlists.StationTrackPage(ctx, stationID, MaxPlaylistPage, 0)
+	rows, _, err := s.playlists.StationTrackPage(ctx, stationID, MaxPlaylistPage, 0, "", false)
 	if err != nil {
 		return false, err
 	}

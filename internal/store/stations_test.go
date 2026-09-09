@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -481,7 +482,7 @@ func TestStationsTrackPage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rows, total, err := s.StationTrackPage(ctx, id, 2, 1)
+	rows, total, err := s.StationTrackPage(ctx, id, 2, 1, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +504,7 @@ func TestStationsTrackPage(t *testing.T) {
 		t.Errorf("track 2 has no dossier, want empty genres/moods, got %+v", rows[0])
 	}
 
-	all, _, err := s.StationTrackPage(ctx, id, 50, 0)
+	all, _, err := s.StationTrackPage(ctx, id, 50, 0, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +526,7 @@ func TestStationsTrackPage(t *testing.T) {
 	}
 
 	// Past the end is an empty page, not an error.
-	if rows, _, err := s.StationTrackPage(ctx, id, 10, 500); err != nil || len(rows) != 0 {
+	if rows, _, err := s.StationTrackPage(ctx, id, 10, 500, "", false); err != nil || len(rows) != 0 {
 		t.Errorf("past the end = %v rows, %v", len(rows), err)
 	}
 
@@ -534,15 +535,129 @@ func TestStationsTrackPage(t *testing.T) {
 	if _, err := s.DB().Exec(`ALTER TABLE tracks DROP COLUMN artist`); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.StationTrackPage(ctx, id, 10, 0); err == nil {
+	if _, _, err := s.StationTrackPage(ctx, id, 10, 0, "", false); err == nil {
 		t.Error("a page that could not be read was reported as empty")
 	}
 
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.StationTrackPage(ctx, id, 10, 0); err == nil {
+	if _, _, err := s.StationTrackPage(ctx, id, 10, 0, "", false); err == nil {
 		t.Error("StationTrackPage succeeded on a closed store")
+	}
+}
+
+// TestStationsTrackPageSorted: Jockora-22s. The playlist is paged on the
+// server, so the ORDER has to be too -- sorting the fifty rows a console holds
+// would answer a question about the page while looking like an answer about the
+// library.
+func TestStationsTrackPageSorted(t *testing.T) {
+	s := stationStore(t)
+	ctx := context.Background()
+	// INSERTED OUT OF EVERY ORDER UNDER TEST, so a query that ignored the sort
+	// and handed back insertion order could not pass by accident.
+	rows := []struct {
+		id     int
+		artist string
+		album  string
+		year   any
+		bpm    any
+	}{
+		{1, "zeta", "a", 1999, 90.0},
+		{2, "Alpha", "C", nil, nil},
+		{3, "", "B", 1970, 120.0},
+		{4, "beta", "", 1985, 100.0},
+		{5, "beta", "b", 1985, 100.0},
+	}
+	// blank stores an absent value as NULL, which is what a real library gives
+	// for a file with no album tag -- and NULL and the empty string must sort
+	// to the same place or half the untagged tracks end up at each end.
+	blank := func(s string) any {
+		if s == "" {
+			return nil
+		}
+		return s
+	}
+	for _, r := range rows {
+		if _, err := s.DB().Exec(
+			`INSERT INTO tracks (id, path, artist, title, album, year, bpm, playable)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
+			r.id, fmt.Sprintf("/m/%d.mp3", r.id), blank(r.artist),
+			// TITLES RUN BACKWARDS against the ids, so a title sort that was
+			// silently falling through to the default order would fail here
+			// rather than agreeing with it by coincidence.
+			fmt.Sprintf("Title %d", 6-r.id), blank(r.album), r.year, r.bpm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id, err := s.CreateStation(ctx, store2Station())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceStationTracks(ctx, id, []int64{1, 2, 3, 4, 5}); err != nil {
+		t.Fatal(err)
+	}
+
+	ids := func(sort string, desc bool) []int64 {
+		t.Helper()
+		page, _, err := s.StationTrackPage(ctx, id, 50, 0, sort, desc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make([]int64, len(page))
+		for i, r := range page {
+			out[i] = r.TrackID
+		}
+		return out
+	}
+
+	// CASE-INSENSITIVE, or "beta" sorts after every capitalised name and the
+	// column reads as unsorted. BLANK LAST, and it stays last when the column
+	// is turned round: an operator sorting by artist to find a mistagged file
+	// did not ask for a screenful of empty cells either way.
+	for _, c := range []struct {
+		sort string
+		desc bool
+		want []int64
+	}{
+		{"artist", false, []int64{2, 4, 5, 1, 3}},
+		{"artist", true, []int64{1, 4, 5, 2, 3}},
+		{"year", false, []int64{3, 4, 5, 1, 2}},
+		{"year", true, []int64{1, 4, 5, 3, 2}},
+		{"bpm", false, []int64{1, 4, 5, 3, 2}},
+		{"title", false, []int64{5, 4, 3, 2, 1}},
+		{"album", false, []int64{1, 3, 5, 2, 4}},
+		// AN UNKNOWN COLUMN IS THE ORDER THE PLAYLIST HAS ALWAYS HAD, not an
+		// error: the name arrives from a query string, and a console one
+		// version ahead asking for a column this server does not sort by
+		// should get a playlist, not a stack trace.
+		{"; DROP TABLE tracks", false, []int64{1, 2, 3, 4, 5}},
+		{"", true, []int64{1, 2, 3, 4, 5}},
+	} {
+		if got := ids(c.sort, c.desc); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("sort %q desc=%v = %v, want %v", c.sort, c.desc, got, c.want)
+		}
+	}
+
+	// THE TIEBREAK IS ASSERTED ON THE CLAUSE, not on a page, because it cannot
+	// be seen from one: SQLite returns tied rows in rowid order here whether or
+	// not the clause asks it to, so removing the tiebreak changes nothing any
+	// result can show. "Happens to" is not an ordering guarantee, and a page
+	// boundary landing inside a tie is how one row gets listed twice while
+	// another is never listed at all.
+	if got := playlistOrderBy("artist", false); !strings.HasSuffix(got, ", st.track_id") {
+		t.Errorf("ORDER BY = %q, want a track_id tiebreak", got)
+	}
+
+	// THE SORT SURVIVES PAGING, which is the whole point of doing it here: the
+	// second page of an artist sort is the next three artists, not the next
+	// three ids.
+	page, _, err := s.StationTrackPage(ctx, id, 2, 2, "artist", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 2 || page[0].TrackID != 5 || page[1].TrackID != 1 {
+		t.Errorf("page 2 of an artist sort = %+v", page)
 	}
 }
 

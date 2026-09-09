@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"testing"
 
@@ -98,6 +99,49 @@ func TestPlaylistAPIListPaged(t *testing.T) {
 	// like a broken server.
 	if rec := as(t, s, http.MethodGet, tracksPath(id)+"?limit=abc&offset=-5", "", admin); rec.Code != http.StatusOK {
 		t.Errorf("a nonsense page = %d, want 200", rec.Code)
+	}
+}
+
+// TestPlaylistAPISorted: Jockora-22s. The playlist is paged here, so the sort
+// belongs here too -- a console ordering the fifty rows it was handed would
+// answer a question about the page and look like it answered one about the
+// library.
+func TestPlaylistAPISorted(t *testing.T) {
+	s, _, id := playlistServer(t, 12)
+	admin := adminCookie(t, s)
+
+	ids := func(query string) []int64 {
+		t.Helper()
+		rec := as(t, s, http.MethodGet, tracksPath(id)+query, "", admin)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s = %d: %s", query, rec.Code, rec.Body)
+		}
+		var page struct{ Tracks []store.StationTrackDetail }
+		if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+			t.Fatal(err)
+		}
+		out := make([]int64, len(page.Tracks))
+		for i, tr := range page.Tracks {
+			out[i] = tr.TrackID
+		}
+		return out
+	}
+
+	// "Artist 10" sorts before "Artist 2" as text, which is exactly what makes
+	// this distinguishable from the id order the playlist has by default.
+	if got := ids("?sort=artist")[:3]; !reflect.DeepEqual(got, []int64{1, 10, 11}) {
+		t.Errorf("sorted by artist = %v, want it to start 1, 10, 11", got)
+	}
+	if got := ids("?sort=artist&dir=desc")[:3]; !reflect.DeepEqual(got, []int64{9, 8, 7}) {
+		t.Errorf("reversed = %v, want it to start 9, 8, 7", got)
+	}
+	// ANYTHING ELSE IS THE DEFAULT ORDER, not a 400: the column name comes off
+	// a query string, and a console asking for one this server does not sort by
+	// should still get its playlist.
+	for _, q := range []string{"", "?sort=nonsense", "?dir=desc"} {
+		if got := ids(q)[:3]; !reflect.DeepEqual(got, []int64{1, 2, 3}) {
+			t.Errorf("%q = %v, want the default order", q, got)
+		}
 	}
 }
 
@@ -329,7 +373,7 @@ type brokenPlaylists struct {
 	tagWriteOK bool
 }
 
-func (b brokenPlaylists) StationTrackPage(context.Context, int64, int, int) (
+func (b brokenPlaylists) StationTrackPage(context.Context, int64, int, int, string, bool) (
 	[]store.StationTrackDetail, int, error) {
 	if b.pageOK {
 		return []store.StationTrackDetail{{TrackID: 1}}, 1, nil

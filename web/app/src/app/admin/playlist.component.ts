@@ -2,6 +2,7 @@ import { DecimalPipe } from '@angular/common';
 import { Component, computed, effect, inject, input, signal, untracked } from '@angular/core';
 import { AdminApi, Diff, PlaylistTrack, TrackTags } from '../api/api';
 import { FormDialog } from './form-dialog';
+import { SortState } from './table-view';
 
 /** The cap a dossier itself carries, enforced here so a doomed save is not sent. */
 export const MAX_TAGS = 5;
@@ -22,12 +23,21 @@ export const PAGE = 50;
     <p data-count>{{ total() }} tracks</p>
     <table data-playlist>
       <thead>
+        <!-- SORTED BY THE SERVER. These headers order the whole playlist and
+             come back on the first page, because the table holds fifty rows out
+             of thousands: sorting what is on screen would answer a question
+             about the page and look like an answer about the library.
+             Jockora-22s. -->
         <tr>
-          <th scope="col">Artist</th>
-          <th scope="col">Title</th>
-          <th scope="col">Album</th>
-          <th scope="col">Year</th>
-          <th scope="col">Tempo</th>
+          @for (c of COLUMNS; track c.key) {
+            <th scope="col" [attr.aria-sort]="sort.ariaSort(c.key)">
+              <button type="button" [attr.data-sort]="c.key" (click)="sortBy(c.key)">
+                {{ c.label }} <span data-sort-marker>{{ sort.marker(c.key) }}</span>
+              </button>
+            </th>
+          }
+          <!-- NOT SORTABLE. Genre and mood are lists rather than values, and a
+               column of buttons has no order at all. -->
           <th scope="col">Genre</th>
           <th scope="col">Mood</th>
           <th scope="col"><span data-sr-only>Actions</span></th>
@@ -213,6 +223,22 @@ export class Playlist {
   readonly failed = signal(false);
   readonly total = signal(0);
   readonly offset = signal(0);
+
+  /**
+   * The five columns a server-side sort can order by, and what they are called.
+   *
+   * THE KEYS ARE THE SERVER'S, not the column headings: the store owns the list
+   * of columns it can sort by, and a name it does not know is answered with the
+   * default order rather than an error.
+   */
+  readonly COLUMNS: readonly { key: string; label: string }[] = [
+    { key: 'artist', label: 'Artist' },
+    { key: 'title', label: 'Title' },
+    { key: 'album', label: 'Album' },
+    { key: 'year', label: 'Year' },
+    { key: 'bpm', label: 'Tempo' },
+  ];
+  readonly sort = new SortState();
   readonly said = signal('');
 
   /** The track whose tags are open for editing, by id. */
@@ -251,23 +277,38 @@ export class Playlist {
   }
 
   load(): void {
-    this.api.playlist(this.station(), PAGE, this.offset()).subscribe({
-      next: (p) => {
-        this.tracks.set(p.tracks);
-        this.total.set(p.total);
-        this.loaded.set(true);
-        this.failed.set(false);
-      },
-      error: () => {
-        this.loaded.set(true);
-        this.failed.set(true);
-        this.said.set('Could not read the playlist.');
-      },
-    });
+    this.api
+      .playlist(this.station(), PAGE, this.offset(), this.sort.sortKey(), this.sort.ascending())
+      .subscribe({
+        next: (p) => {
+          this.tracks.set(p.tracks);
+          this.total.set(p.total);
+          this.loaded.set(true);
+          this.failed.set(false);
+        },
+        error: () => {
+          this.loaded.set(true);
+          this.failed.set(true);
+          this.said.set('Could not read the playlist.');
+        },
+      });
   }
 
   page(direction: number): void {
     this.offset.set(Math.max(0, this.offset() + direction * PAGE));
+    this.load();
+  }
+
+  /**
+   * Sort the whole playlist by one column, from the top.
+   *
+   * BACK TO THE FIRST PAGE. Page 4 of a title sort has nothing to do with page
+   * 4 of the order it replaced, so staying put would drop the operator somewhere
+   * arbitrary in a list they just asked to reorder.
+   */
+  sortBy(key: string): void {
+    this.sort.toggle(key);
+    this.offset.set(0);
     this.load();
   }
 

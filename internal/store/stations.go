@@ -397,9 +397,55 @@ type StationTrackDetail struct {
 	BPM float64 `json:"bpm"`
 }
 
+// playlistOrder is the ORDER BY for each column a playlist can be sorted by,
+// keyed by the name the API uses for it.
+//
+// A MAP AND NOT INTERPOLATION. The column name arrives from a query string, and
+// the only safe way to put an operator's text into a SQL clause is not to: the
+// key selects a fragment written here, and anything unrecognised falls back to
+// the insertion order the playlist has always had.
+//
+// BLANKS LAST IN BOTH DIRECTIONS, which is what the console's own client-side
+// tables already do. A year of 0 or an unmeasured tempo is "nothing here", and
+// sorting to find the oldest record must not answer with a screenful of tracks
+// that have no year -- nor must reversing it. The direction is applied to the
+// value only, never to the blank test.
+//
+// TEXT COMPARED WITHOUT CASE, or every lower-cased artist sorts after every
+// capitalised one and the column reads as unsorted.
+var playlistOrder = map[string]struct{ blank, value string }{
+	"artist": {"coalesce(t.artist, '') = ''", "t.artist COLLATE NOCASE"},
+	"title":  {"coalesce(t.title, '') = ''", "t.title COLLATE NOCASE"},
+	"album":  {"coalesce(t.album, '') = ''", "t.album COLLATE NOCASE"},
+	"year":   {"coalesce(t.year, 0) = 0", "t.year"},
+	"bpm":    {"coalesce(t.bpm, 0) = 0", "t.bpm"},
+}
+
+// playlistOrderBy is the clause for one sort key, or the default order.
+func playlistOrderBy(sort string, desc bool) string {
+	o, ok := playlistOrder[sort]
+	if !ok {
+		return "st.track_id"
+	}
+	dir := "ASC"
+	if desc {
+		dir = "DESC"
+	}
+	// THE TRACK ID LAST AND ALWAYS. Two tracks off one record share a year, and
+	// a page boundary falling inside a tie can show a row twice or skip it
+	// entirely: LIMIT/OFFSET asks the database twice and nothing else says
+	// which of the tied rows comes first.
+	return o.blank + ", " + o.value + " " + dir + ", st.track_id"
+}
+
 // StationTrackPage is one page of a station's playlist, with the total so a
 // console can show "showing 50 of 1,200" rather than guessing when to stop.
-func (s *Store) StationTrackPage(ctx context.Context, id int64, limit, offset int) (
+//
+// SORTED HERE RATHER THAN IN THE CONSOLE, because the console holds fifty rows
+// out of seven thousand: ordering those fifty would answer a question about the
+// page while looking like an answer about the library. An unknown sort is the
+// default order, the same way an unreadable limit is the default page size.
+func (s *Store) StationTrackPage(ctx context.Context, id int64, limit, offset int, sort string, desc bool) (
 	[]StationTrackDetail, int, error) {
 	var total int
 	if err := s.db.QueryRowContext(ctx,
@@ -415,7 +461,8 @@ func (s *Store) StationTrackPage(ctx context.Context, id int64, limit, offset in
 		  FROM station_tracks st
 		  JOIN tracks t ON t.id = st.track_id
 		  JOIN effective_tags e ON e.track_id = t.id
-		 WHERE st.station_id = ? ORDER BY st.track_id LIMIT ? OFFSET ?`, id, limit, offset)
+		 WHERE st.station_id = ? ORDER BY ` + playlistOrderBy(sort, desc) + ` LIMIT ? OFFSET ?`,
+		id, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("store: reading station %d playlist: %w", id, err)
 	}

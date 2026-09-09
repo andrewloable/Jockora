@@ -9,61 +9,18 @@ export interface Column<T> {
 }
 
 /**
- * The search box and the click-to-sort headers, once rather than five times.
+ * Which column a table is sorted by, and which way round.
  *
- * WHY A SHARED THING AND NOT A COMPONENT. Every admin table draws its own cells
- * -- stations puts a marker under a name, ads render an aired timestamp, people
- * swap a row for edit boxes -- and a generic table component would have to grow
- * a slot for each of those. This owns only the three pieces of state that are
- * genuinely the same everywhere, and the tables keep their markup.
- *
- * ONLY FOR TABLES THAT HOLD EVERYTHING. The playlist is paged on the server,
- * limit and offset with no query and no order, so filtering there would narrow
- * the fifty rows on screen out of seven thousand and read as an answer about
- * the whole library. Jockora-9g7 says so and leaves it out on purpose.
+ * SPLIT OUT OF TableView because the PLAYLIST cannot use TableView: it holds
+ * fifty rows out of seven thousand and is ordered by the SERVER, so it needs
+ * the header behaviour -- the toggle, the arrow, the aria-sort -- and none of
+ * the filtering. A second copy of "a third press does not clear it" is how the
+ * playlist headers and the other five come to behave differently.
  */
-export class TableView<T> {
-  /** What the operator typed. Matched against every column's value. */
-  readonly query = signal('');
+export class SortState {
   /** Which column is sorted, or null for the order the server sent. */
   readonly sortKey = signal<string | null>(null);
   readonly ascending = signal(true);
-
-  private readonly columns: ReadonlyMap<string, Column<T>>;
-
-  constructor(
-    private readonly rows: Signal<readonly T[]>,
-    columns: readonly Column<T>[],
-  ) {
-    this.columns = new Map(columns.map((c) => [c.key, c]));
-  }
-
-  /** The rows to draw: searched, then sorted. */
-  readonly shown = computed<T[]>(() => {
-    const q = this.query().trim().toLowerCase();
-    const found = q
-      ? this.rows().filter((row) =>
-          [...this.columns.values()].some((c) => text(c.value(row)).toLowerCase().includes(q)),
-        )
-      : [...this.rows()];
-
-    const column = this.columns.get(this.sortKey() ?? '');
-    if (!column) {
-      // UNSORTED IS A REAL STATE and it is the one every table starts in: the
-      // server already returns these in an order somebody chose.
-      return found;
-    }
-    const dir = this.ascending() ? 1 : -1;
-    // SORTING IN PLACE IS SAFE HERE and only here: found is a fresh array on
-    // both paths above -- filter builds one, and the else branch spreads rather
-    // than passing this.rows() through. Sorting the signal's own array would
-    // reorder it under every other reader of it.
-    //
-    // sort rather than toSorted, which would say that in the method name: it
-    // needs the ES2023 lib and this project targets ES2022, and moving the
-    // whole target for one call is not a trade worth making.
-    return found.sort((a, b) => compare(column.value(a), column.value(b), dir));
-  });
 
   /**
    * Sort by this column, or turn it round if it is already the sorted one.
@@ -102,6 +59,63 @@ export class TableView<T> {
     }
     return this.ascending() ? '▲' : '▼';
   }
+}
+
+/**
+ * The search box and the click-to-sort headers, once rather than five times.
+ *
+ * WHY A SHARED THING AND NOT A COMPONENT. Every admin table draws its own cells
+ * -- stations puts a marker under a name, ads render an aired timestamp, people
+ * swap a row for edit boxes -- and a generic table component would have to grow
+ * a slot for each of those. This owns only the three pieces of state that are
+ * genuinely the same everywhere, and the tables keep their markup.
+ *
+ * ONLY FOR TABLES THAT HOLD EVERYTHING. The playlist is paged on the server, so
+ * filtering there would narrow the fifty rows on screen out of seven thousand
+ * and read as an answer about the whole library. Jockora-9g7 leaves it out on
+ * purpose, and Jockora-22s gave the playlist the part that CAN be right across
+ * a paged listing -- the sort, done by the server -- through SortState above.
+ */
+export class TableView<T> extends SortState {
+  /** What the operator typed. Matched against every column's value. */
+  readonly query = signal('');
+
+  private readonly columns: ReadonlyMap<string, Column<T>>;
+
+  constructor(
+    private readonly rows: Signal<readonly T[]>,
+    columns: readonly Column<T>[],
+  ) {
+    super();
+    this.columns = new Map(columns.map((c) => [c.key, c]));
+  }
+
+  /** The rows to draw: searched, then sorted. */
+  readonly shown = computed<T[]>(() => {
+    const q = this.query().trim().toLowerCase();
+    const found = q
+      ? this.rows().filter((row) =>
+          [...this.columns.values()].some((c) => text(c.value(row)).toLowerCase().includes(q)),
+        )
+      : [...this.rows()];
+
+    const column = this.columns.get(this.sortKey() ?? '');
+    if (!column) {
+      // UNSORTED IS A REAL STATE and it is the one every table starts in: the
+      // server already returns these in an order somebody chose.
+      return found;
+    }
+    const dir = this.ascending() ? 1 : -1;
+    // SORTING IN PLACE IS SAFE HERE and only here: found is a fresh array on
+    // both paths above -- filter builds one, and the else branch spreads rather
+    // than passing this.rows() through. Sorting the signal's own array would
+    // reorder it under every other reader of it.
+    //
+    // sort rather than toSorted, which would say that in the method name: it
+    // needs the ES2023 lib and this project targets ES2022, and moving the
+    // whole target for one call is not a trade worth making.
+    return found.sort((a, b) => compare(column.value(a), column.value(b), dir));
+  });
 }
 
 /** A value as text, for searching. */

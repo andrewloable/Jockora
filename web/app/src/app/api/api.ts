@@ -521,13 +521,23 @@ export class AdminApi {
     return this.http.put<void>(`/admin/stations/${id}/jock`, { jock_id: jockId });
   }
 
+  /**
+   * One page of a station's playlist, in the order the SERVER puts it in.
+   *
+   * SORTED BY THE SERVER, not here. This returns fifty rows out of a station
+   * that can hold thousands, so ordering them in the console would order the
+   * page while looking like it ordered the library. Jockora-22s.
+   */
   playlist(
     id: number,
     limit: number,
     offset: number,
+    sort: string | null = null,
+    ascending = true,
   ): Observable<{ tracks: PlaylistTrack[]; total: number }> {
+    const order = sort ? `&sort=${encodeURIComponent(sort)}&dir=${ascending ? 'asc' : 'desc'}` : '';
     return this.http.get<{ tracks: PlaylistTrack[]; total: number }>(
-      `/admin/stations/${id}/tracks?limit=${limit}&offset=${offset}`,
+      `/admin/stations/${id}/tracks?limit=${limit}&offset=${offset}${order}`,
     );
   }
 

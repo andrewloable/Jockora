@@ -186,6 +186,84 @@ describe('Playlist', () => {
     ctrl.expectOne(`/admin/stations/3/tracks?limit=${PAGE}&offset=0`).flush({ tracks, total: 120 });
   });
 
+  // ----------------------------------------------------------- sorting --
+  // Jockora-22s. The other five admin tables sort in the browser; this one
+  // cannot, because it holds fifty rows out of thousands.
+
+  it('asks the server to sort, and turns the column round on a second press', () => {
+    const fixture = mounted(120);
+    const header = () => fixture.nativeElement.querySelector('[data-sort="artist"]');
+
+    header().click();
+    ctrl
+      .expectOne(`/admin/stations/3/tracks?limit=${PAGE}&offset=0&sort=artist&dir=asc`)
+      .flush({ tracks, total: 120 });
+    fixture.detectChanges();
+    expect(header().closest('th').getAttribute('aria-sort')).toBe('ascending');
+    expect(header().textContent).toContain('▲');
+
+    header().click();
+    ctrl
+      .expectOne(`/admin/stations/3/tracks?limit=${PAGE}&offset=0&sort=artist&dir=desc`)
+      .flush({ tracks, total: 120 });
+    fixture.detectChanges();
+    expect(header().closest('th').getAttribute('aria-sort')).toBe('descending');
+    expect(header().textContent).toContain('▼');
+  });
+
+  it('goes back to the first page when the order changes', () => {
+    // Page 4 of a title sort has nothing to do with page 4 of the order it
+    // replaced, so staying put drops the operator somewhere arbitrary in a list
+    // they just asked to reorder.
+    const fixture = mounted(120);
+    fixture.nativeElement.querySelector('[data-next]').click();
+    ctrl
+      .expectOne(`/admin/stations/3/tracks?limit=${PAGE}&offset=${PAGE}`)
+      .flush({ tracks, total: 120 });
+    fixture.detectChanges();
+
+    fixture.nativeElement.querySelector('[data-sort="year"]').click();
+    ctrl
+      .expectOne(`/admin/stations/3/tracks?limit=${PAGE}&offset=0&sort=year&dir=asc`)
+      .flush({ tracks, total: 120 });
+  });
+
+  it('keeps the order while paging', () => {
+    // The whole reason the sort is on the server: page 2 of an artist sort is
+    // the next fifty artists, not the next fifty ids.
+    const fixture = mounted(120);
+    fixture.nativeElement.querySelector('[data-sort="title"]').click();
+    ctrl
+      .expectOne(`/admin/stations/3/tracks?limit=${PAGE}&offset=0&sort=title&dir=asc`)
+      .flush({ tracks, total: 120 });
+    fixture.detectChanges();
+
+    fixture.nativeElement.querySelector('[data-next]').click();
+    ctrl
+      .expectOne(`/admin/stations/3/tracks?limit=${PAGE}&offset=${PAGE}&sort=title&dir=asc`)
+      .flush({ tracks, total: 120 });
+  });
+
+  it('offers a header for every column that has an order, and none for the rest', () => {
+    // Genre and mood are LISTS rather than values and the last column is
+    // buttons: a header that looks sortable and does nothing is worse than one
+    // that does not look sortable.
+    const fixture = mounted();
+    const keys = [...fixture.nativeElement.querySelectorAll('thead [data-sort]')].map(
+      (b: HTMLElement) => b.getAttribute('data-sort'),
+    );
+    expect(keys).toEqual(['artist', 'title', 'album', 'year', 'bpm']);
+    expect(fixture.nativeElement.querySelectorAll('thead th').length).toBe(8);
+    // Announced as sortable BEFORE anything is sorted, or a screen reader is
+    // never told the header does anything.
+    expect(
+      fixture.nativeElement
+        .querySelector('[data-sort="artist"]')
+        .closest('th')
+        .getAttribute('aria-sort'),
+    ).toBe('none');
+  });
+
   it('shows the diff after regenerating', () => {
     // What CHANGED, rather than a redrawn list to compare by eye.
     const fixture = mounted();

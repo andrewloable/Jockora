@@ -198,7 +198,7 @@ func TestTrackTagsShowInThePlaylistRow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rows, _, err := s.StationTrackPage(ctx, 1, 10, 0)
+	rows, _, err := s.StationTrackPage(ctx, 1, 10, 0, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestTrackTagsShowInThePlaylistRow(t *testing.T) {
 	if err := s.SetTrackTags(ctx, 1, []string{"synthwave"}, []string{"nocturnal"}); err != nil {
 		t.Fatal(err)
 	}
-	rows, _, err = s.StationTrackPage(ctx, 1, 10, 0)
+	rows, _, err = s.StationTrackPage(ctx, 1, 10, 0, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +236,7 @@ func TestMoodTempoShowsInThePlaylistRow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rows, _, err := s.StationTrackPage(ctx, 1, 10, 0)
+	rows, _, err := s.StationTrackPage(ctx, 1, 10, 0, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

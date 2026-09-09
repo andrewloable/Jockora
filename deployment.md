@@ -454,6 +454,43 @@ and neither is reachable without an admin session, so nothing here exercised
 them. `Jockora-91o` is the open question they turn on: the derive was tuned
 against the 4B test model and this box runs llama-3.3-70b.
 
+### What the 2026-09-09 v0.2.0 release deploy verified
+
+**The first deploy of a PUBLISHED image rather than one built on the box.**
+`docker pull docker.io/andrewloable/jockora:v0.2.0`, then retagged onto the
+local name `jockora:v0.2` that the compose file already expects -- so the
+released artifact ships without editing the compose file. The box reported the
+same digest the release published, `sha256:f3438f5d...`, which is the check that
+makes "the thing that was tested is the thing that is running" a fact rather
+than a hope.
+
+Rollback image `jockora:rollback-20260909c`. **No migration crossed**: schema is
+still 14 both sides, so the backup is `jockora.db.schema-14-20260909c`.
+
+Verified, all reads:
+
+- `jockora:v0.2` up; `docker exec jockora jockora version` says **0.2.0**.
+- **0 ERROR lines, 0 unexpected WARN lines**; health all three `ok`;
+  enrichment `7595 of 7595, running`.
+- The served console is this build: a new `main-VU65YIWX.js`, both new icons
+  answer 200, `index.html` links `icon.svg` and **no longer links
+  `favicon.ico`**, `visibilitychange` is present (the dial's listener count
+  polls again) and `data-transcript` is **gone** (the DJ's words are no longer
+  printed).
+- The lazy admin chunk `chunk-ZYHU3SM2.js` carries `data-sort` and
+  `data-form-dialog` -- the searchable, sortable tables and the modal forms.
+
+**A NOTE ON WHICH VERSION STRING YOU GET.** The image says `0.2.0` and the
+release tarballs say `v0.2.0`. The release job stamps
+`-X main.Version=${GITHUB_REF_NAME}` when it builds the tarball binaries, but
+`Dockerfile` builds with `-ldflags="-s -w"` and no `-X` at all, so the image
+carries the value compiled into `cmd/jockora/main.go`. Same release, two
+strings. Worth knowing before you read one into a bug report.
+
+**The audio path is NOT verified.** `now` was null again, so no encoder ran and
+no break was placed. In particular the break lead-in shipped here -- the DJ now
+starting up to three seconds before a transition -- has never been heard.
+
 ## 6. Rolling back
 
 ```sh
