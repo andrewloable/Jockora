@@ -4,7 +4,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 )
@@ -30,7 +32,31 @@ type Admin interface {
 	// worker that gave up restarts it, resuming a paused one only unpauses it,
 	// and an operator pressing one button deserves to know which they got.
 	SetEnriching(on bool) (string, error)
+	// PublicListener reports whether the listener half of the product is open
+	// to anyone. Read on EVERY request that a guest could make, so the answer
+	// is the live one and switching it off logs guests out on their next fetch
+	// rather than whenever their guest cookie happens to lapse.
+	PublicListener() bool
+	// SetPublicListener opens or closes it. Never touches the console: an
+	// operator account is required there whatever this is set to.
+	SetPublicListener(on bool) error
+	// SetEnrichRecall lets the enricher ask the model what a song is about
+	// when nothing could be looked up. Future enrichment only -- a dossier is
+	// written once, so this changes nothing already stored.
+	SetEnrichRecall(on bool) error
+	// RedoUnknownDossiers clears the dossiers with no meaning in them so the
+	// enricher writes them again, and reports how many. It is what makes the
+	// switch above visible on a library that is already enriched.
+	RedoUnknownDossiers(ctx context.Context) (int64, error)
 }
+
+// ErrNoLibrary means the operation needs a music library and there is none.
+//
+// Defined HERE rather than in package app, for the reason ErrStationPreparing
+// gives: the HTTP status is the only thing that turns on it, and package app
+// already imports this one. It separates "this server cannot do that" (503)
+// from "that went wrong" (500), which is the split serveRescan beside it makes.
+var ErrNoLibrary = errors.New("no library")
 
 // SetAdmin wires the operator surface. Without one every /admin route reports
 // 503: the routes exist, the capability does not.
@@ -63,9 +89,11 @@ func (s *Server) serveAdminWrite(w http.ResponseWriter, r *http.Request, path st
 	}
 
 	var body struct {
-		Cadence   *int     `json:"cadence"`
-		Overlap   *float64 `json:"overlap"`
-		Enriching *bool    `json:"enriching"`
+		Cadence        *int     `json:"cadence"`
+		Overlap        *float64 `json:"overlap"`
+		Enriching      *bool    `json:"enriching"`
+		PublicListener *bool    `json:"public_listener"`
+		Recall         *bool    `json:"recall"`
 	}
 	if !s.decode(w, r, &body) {
 		return
@@ -90,6 +118,43 @@ func (s *Server) serveAdminWrite(w http.ResponseWriter, r *http.Request, path st
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+	case "/admin/public-listener":
+		if body.PublicListener == nil {
+			http.Error(w, `expected {"public_listener": true|false}`, http.StatusBadRequest)
+			return
+		}
+		if err := s.admin.SetPublicListener(*body.PublicListener); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	case "/admin/recall":
+		if body.Recall == nil {
+			http.Error(w, `expected {"recall": true|false}`, http.StatusBadRequest)
+			return
+		}
+		if err := s.admin.SetEnrichRecall(*body.Recall); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	case "/admin/redo-dossiers":
+		// STATUSES MATCHED TO serveRescan, the other route that sets a long
+		// library job going: 503 when the capability is absent, 500 when it
+		// failed. Both were 400 here, which says the operator sent something
+		// wrong when they did not.
+		// THE ONE ADMIN WRITE THAT DESTROYS SOMETHING, so it answers with the
+		// count rather than a bare 204: an operator who clears four thousand
+		// dossiers and one who clears none see the same success otherwise.
+		n, err := s.admin.RedoUnknownDossiers(r.Context())
+		if errors.Is(err, ErrNoLibrary) {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.writeJSON(w, http.StatusOK, map[string]any{"cleared": n})
+		return
 	case "/admin/enriching":
 		if body.Enriching == nil {
 			http.Error(w, `expected {"enriching": true|false}`, http.StatusBadRequest)

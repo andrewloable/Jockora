@@ -498,28 +498,35 @@ func applyAnalysis(ctx context.Context, s *store.Store, id int64, a *PortAnalysi
 func storeImported(ctx context.Context, s *store.Store, id int64, rec Record) bool {
 	d := *rec.Dossier
 
-	// SANITISED FIELD BY FIELD, because every one of these is printed into the
-	// break prompt.
-	d.SubjectSummary = sanitizeTag(d.SubjectSummary)
-	d.NotableLine = sanitizeTag(d.NotableLine)
-	d.Release = sanitizeTag(d.Release)
-	d.ArtistFacts = sanitizeAll(d.ArtistFacts)
-	d.Themes = sanitizeAll(d.Themes)
-	d.Sources = sanitizeAll(d.Sources)
-
+	// SANITISING LIVES IN validate NOW, which this calls below, so it is not
+	// repeated here.
+	//
+	// It used to be done twice, and the copy here was load-bearing for a while:
+	// LookedUpSource is computed from the raw sources on the next line, and
+	// while the recall label was compared exactly, a padded or capitalised one
+	// slipped past it. isRecallLabel canonicalises now, so the decision below
+	// is safe on raw input and one owner is better than two that must agree.
 	// The TrackInput validate needs, rebuilt from what the record actually
 	// carries. Found is set from the dossier's own sources: a dossier that
 	// arrives with them WAS looked up, on the other machine, and one that
 	// arrives without them earns the same downgrade it would have earned here.
+	//
+	// THE RECALL LABEL IS NOT A LOOKUP. It names the model's own memory, and
+	// counting it here would let a file carrying sources ["model"] and a list
+	// of invented artist_facts past the grounding check -- on the one path in
+	// this program that reads a document somebody else wrote.
 	in := TrackInput{
 		Artist: rec.Artist, Title: rec.Title, Album: rec.Album,
 		DurationS:   rec.DurationS,
-		ArtistFacts: ArtistFacts{Found: len(d.Sources) > 0},
+		ArtistFacts: ArtistFacts{Found: LookedUpSource(d.Sources)},
 	}
 	if rec.Analysis != nil && rec.Analysis.RampConfidence != "" {
 		in.HasSyncedLyrics = true
 	}
-	d = validate(d, in)
+	// recognised is FALSE here and it does not matter: recall is off for an
+	// import, so applyRecall never reads it. The other machine already applied
+	// its own answer before this record was written.
+	d = validate(d, false, in)
 
 	return StoreDossier(ctx, s, id, d) == nil
 }

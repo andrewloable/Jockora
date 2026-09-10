@@ -13,7 +13,7 @@ tell you what is coming next.
 It layers on top of a library you already have. It never writes to it, never
 retags it, never transcodes it.
 
-> **Status: v0.2, running.** The station runs unattended, writes and speaks its
+> **Status: v0.3, running.** The station runs unattended, writes and speaks its
 > own breaks, and recovers from a killed encoder. What is measured and what is
 > still unknown are both listed in [Where this actually is](#where-this-actually-is)
 > — including the one thing that matters most and is hardest to score.

@@ -80,6 +80,27 @@ type Dossier struct {
 	Confidence string   `json:"confidence"`
 }
 
+// dossierResponse is what the MODEL returns: a dossier, plus control signals
+// that are not part of one and must never be stored as though they were.
+//
+// A SEPARATE TYPE RATHER THAN A FIELD WITH omitempty. Recognised lived on
+// Dossier and was zeroed in validate, which kept it out of the database only
+// for as long as every writer went through validate -- and StoreDossier does
+// not. A caller who built a Dossier straight from parsed JSON would have
+// written the model's control signal into the table as a fact about the track.
+// Off the type, that is not a rule to remember; it cannot be expressed.
+type dossierResponse struct {
+	Dossier
+	// Recognised is the model committing to knowing this song.
+	//
+	// It exists because "leave the field empty if you do not know" does not
+	// work on a small model -- a live probe watched one fill every field with
+	// the title, the instructions and, given an example, another song's
+	// content. A boolean it must emit is a refusal the sampler can represent,
+	// which is the same move that makes an ungrounded fact id impossible.
+	Recognised bool `json:"recognised"`
+}
+
 // TrackInput is everything known about a track before the LLM pass.
 type TrackInput struct {
 	Artist    string
@@ -101,6 +122,17 @@ type TrackInput struct {
 	// only artist metadata either echoes the title or invents. Both were
 	// observed in a live probe.
 	Lyrics string
+
+	// AllowRecall lets the model describe the song FROM ITS OWN KNOWLEDGE when
+	// no lyrics were found.
+	//
+	// OFF BY DEFAULT AND A DELIBERATE WEAKENING. Every other field in a dossier
+	// traces to a named source: MusicBrainz for the artist, LRCLIB for the
+	// words, the file's own tags for the release. This one traces to the model,
+	// which is exactly the guessing the dossier design exists to prevent -- so
+	// it is opt-in, it is labelled SourceModelRecall wherever it is used, and
+	// it reaches only the two fields nothing else can fill. See Jockora-dtb.
+	AllowRecall bool
 }
 
 // hasSources reports whether anything factual was actually found ABOUT THE
@@ -114,6 +146,26 @@ type TrackInput struct {
 // cannot be confused with having researched anything.
 func (in TrackInput) hasSources() bool {
 	return in.ArtistFacts.Found || in.HasSyncedLyrics
+}
+
+// SourceModelRecall labels meaning the model supplied from its own knowledge
+// rather than from anything looked up.
+//
+// It goes in Dossier.Sources beside "musicbrainz" and "lrclib" precisely so the
+// two are distinguishable later: an operator reading a dossier, or anybody
+// tracing what a break asserted, can see that this one was recalled and not
+// researched.
+const SourceModelRecall = "model"
+
+// RecallApplies reports whether this track is one the model may describe from
+// memory.
+//
+// LYRICS WIN WHENEVER THERE ARE ANY. Reading the actual words is both better
+// and already grounded, so recall is the fallback for the half of a real
+// library LRCLIB has never heard of -- never a second opinion over the half it
+// has.
+func RecallApplies(in TrackInput) bool {
+	return in.AllowRecall && strings.TrimSpace(in.Lyrics) == ""
 }
 
 // hasRelease reports whether the file told us where the recording came from.
@@ -192,7 +244,7 @@ var refusalPhrases = []string{
 func GenerateDossier(ctx context.Context, llm Completer, in TrackInput) (Dossier, error) {
 	req := CompletionRequest{
 		Prompt:     BuildPrompt(in),
-		JSONSchema: DossierSchema(),
+		JSONSchema: DossierSchema(in),
 		NPredict:   400,
 	}
 
@@ -240,12 +292,12 @@ func parseDossier(resp Completion, in TrackInput) (Dossier, error) {
 		return Dossier{}, fmt.Errorf("%w: %.80s", ErrLLMRefusal, content)
 	}
 
-	var d Dossier
-	if err := json.Unmarshal([]byte(content), &d); err != nil {
+	var parsed dossierResponse
+	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
 		return Dossier{}, fmt.Errorf("%w: %v", ErrLLMBadJSON, err)
 	}
 
-	return validate(d, in), nil
+	return validate(parsed.Dossier, parsed.Recognised, in), nil
 }
 
 // isRefusal reports whether the model declined rather than answered.
@@ -318,6 +370,13 @@ func stripPlaceholderEcho(d Dossier) Dossier {
 	}
 	d.ArtistFacts = keepReal(d.ArtistFacts)
 	d.Themes = keepReal(d.Themes)
+	// A PROVENANCE LABEL MUST NOT OUTLIVE WHAT IT DESCRIBES. The recall label
+	// is attached in validate, which runs BEFORE this; a summary blanked here
+	// as prompt scaffolding would otherwise leave a dossier saying the model
+	// recalled something when the recalled text is gone.
+	if recalled(d) && strings.TrimSpace(d.SubjectSummary) == "" && len(d.Themes) == 0 {
+		d.Sources = withoutRecallLabel(d.Sources)
+	}
 	return downgradeEmpty(d)
 }
 
@@ -429,7 +488,30 @@ var nonWord = regexp.MustCompile(`[^\p{L}\p{N}]+`)
 // A grammar constrains SHAPE and SET MEMBERSHIP. It does not enforce
 // uniqueness -- the live probe returned ["synthwave","synthwave"] -- and it
 // cannot know whether any source was actually consulted.
-func validate(d Dossier, in TrackInput) Dossier {
+func validate(d Dossier, recognised bool, in TrackInput) Dossier {
+	// SANITISED FIELD BY FIELD, exactly as storeImported does it, and for the
+	// reason written there: every one of these is printed into the break
+	// prompt. dj/prompt.go writes the summary and the themes into that prompt
+	// RAW -- and its own comment says "port.go sanitises them", a guarantee
+	// only the IMPORT path was providing. A dossier written by the enricher
+	// went in unsanitised.
+	//
+	// It is a stored injection, and lyrics are the way in: LRCLIB is
+	// community-submitted, it is read into this prompt, and a summary derived
+	// from it is replayed into every break prompt for that track for the life
+	// of the library. Recall widens it -- the model now authors these fields
+	// for the half of a library LRCLIB has never heard of, where they used to
+	// be empty.
+	//
+	// StationTags and Mood are not here: both are filtered against a closed
+	// vocabulary below, which is a stronger guarantee than sanitising.
+	d.SubjectSummary = sanitizeTag(d.SubjectSummary)
+	d.NotableLine = sanitizeTag(d.NotableLine)
+	d.Release = sanitizeTag(d.Release)
+	d.ArtistFacts = sanitizeAll(d.ArtistFacts)
+	d.Themes = sanitizeAll(d.Themes)
+	d.Sources = sanitizeAll(d.Sources)
+
 	raw := d.StationTags
 	d.StationTags = filterVocab(raw, stationTagSet, maxTags)
 	// Everything the model offered was out of vocabulary. Store the fallback,
@@ -452,13 +534,64 @@ func validate(d Dossier, in TrackInput) Dossier {
 		d.Confidence = ConfidenceNone
 	}
 
+	// A QUOTE NEEDS SOMETHING TO QUOTE. notable_line is a line FROM THE LYRICS,
+	// so with none supplied anything here was written from memory and a DJ
+	// reading it would attribute words the record does not contain. Prompt rule
+	// 8 has always said so and nothing enforced it; recall, which exists only
+	// where there are no lyrics, would have made that the common case.
+	if strings.TrimSpace(in.Lyrics) == "" {
+		d.NotableLine = ""
+	}
+
+	// THE RECALL LABEL IS OURS TO WRITE, so anything the model put there is
+	// removed before anything is decided from it.
+	//
+	// The model has read the word in neither prompt, but it writes provenance
+	// it was never given -- the same habit that produced "wikipedia" for a
+	// track nothing was looked up about. With recall OFF and a real MusicBrainz
+	// hit the source list is not wiped, so a self-written label survived and
+	// the dossier claimed a recall that never happened. Traceability that the
+	// model can forge is not traceability.
+	d.Sources = withoutRecallLabel(d.Sources)
+
+	// RECALL, BEFORE THE GROUNDING RULES BELOW, because it decides whether this
+	// dossier has anything grounded in it at all.
+	d, didRecall := applyRecall(d, recognised, in)
+
 	// Nothing was actually looked up, so nothing may be asserted. Whatever the
 	// model wrote in artist_facts it invented, and inventing facts is the exact
 	// failure the dossier design exists to prevent.
 	if !in.hasSources() {
 		d.ArtistFacts = nil
+		// THE SOURCE LIST IS WIPED EVEN WHEN RECALL SUCCEEDED, and rebuilt
+		// below rather than added to. The model has read the words
+		// "musicbrainz" and "lrclib" in its own prompt and will write them
+		// back; letting recall exempt the list from this wipe produced
+		// sources ["musicbrainz","wikipedia","model"] for a track where
+		// nothing whatsoever was consulted. Sources is the one field the
+		// design uses to trace what grounded a break, so a false label in it
+		// is worse than no label at all.
 		d.Sources = nil
-		d.Confidence = ConfidenceNone
+		if !didRecall {
+			d.Confidence = ConfidenceNone
+		}
+	}
+
+	// The label goes on last, so it names something that actually happened.
+	// No duplicate check: it was stripped above, so this is the only writer.
+	if didRecall {
+		d.Sources = append(d.Sources, SourceModelRecall)
+	}
+
+	// ARTIST FACTS NEED AN ARTIST LOOKUP, not merely SOME source.
+	//
+	// This used to ride on hasSources, which is true for lyrics alone -- so a
+	// track LRCLIB knew and MusicBrainz did not kept whatever the model wrote
+	// about the artist, resting entirely on the prompt asking it not to.
+	// Recall widens that hole to every unknown track in the library, so the
+	// condition is now the one it always meant.
+	if !in.ArtistFacts.Found {
+		d.ArtistFacts = nil
 	}
 
 	// The release survives that downgrade, because it was never a claim about
@@ -473,6 +606,84 @@ func validate(d Dossier, in TrackInput) Dossier {
 	}
 
 	return d
+}
+
+// applyRecall decides what survives of a dossier the model filled from memory.
+//
+// THREE THINGS AND NO MORE. The meaning fields are kept, the source label is
+// added so the dossier says where they came from, and everything the model
+// might have volunteered alongside them is dropped -- artist facts and the
+// notable line, neither of which recall was invited to fill.
+//
+// A model that did not commit to recognising the track loses the meaning
+// instead. That branch is the whole reason the boolean exists: leaving the
+// field empty is an instruction a small model ignores, and emitting false is
+// one the sampler makes it honour.
+// It REPORTS whether recall supplied anything and does not label the dossier
+// itself. The label belongs with the other source rules in validate, because
+// what a source label is allowed to say depends on what else was consulted --
+// and putting half that decision here is how the two halves disagreed.
+func applyRecall(d Dossier, recognised bool, in TrackInput) (Dossier, bool) {
+	if !RecallApplies(in) {
+		// The flag is asked for nowhere else, so a true here is noise from a
+		// model answering a question it was not asked. Ignored rather than
+		// obeyed: recall is decided by the operator and the lyrics, never by
+		// the model volunteering that it knows the song.
+		return d, false
+	}
+
+	if !recognised || (strings.TrimSpace(d.SubjectSummary) == "" && len(d.Themes) == 0) {
+		d.SubjectSummary = ""
+		d.Themes = nil
+		return d, false
+	}
+	return d, true
+}
+
+// LookedUpSource reports whether any source in this list names something that
+// was actually CONSULTED, rather than the model's own memory.
+//
+// It exists because two readers used "the sources list is not empty" to mean
+// "an artist lookup happened", which was true until recall put a label in that
+// list for a dossier where nothing was looked up at all. Both then read a
+// recalled dossier as grounded -- and on the import path, which takes an
+// operator-supplied file, that let sources ["model"] carry invented
+// artist_facts past the grounding check.
+func LookedUpSource(sources []string) bool {
+	return len(withoutRecallLabel(sources)) > 0
+}
+
+// isRecallLabel reports whether a source names the model's own memory.
+//
+// CANONICALISED, and that is not tidiness. The comparison was exact, so
+// "MODEL" was not the recall label -- which meant LookedUpSource read it as a
+// real lookup and the importer kept the invented artist_facts sitting beside
+// it. One changed letter walked a forged file past the grounding check.
+// sanitizeTag trims and collapses whitespace but does not lower-case, so
+// nothing upstream was going to catch it.
+func isRecallLabel(src string) bool {
+	return strings.EqualFold(strings.TrimSpace(src), SourceModelRecall)
+}
+
+// withoutRecallLabel drops the recall label, keeping every other source.
+func withoutRecallLabel(sources []string) []string {
+	var out []string
+	for _, src := range sources {
+		if !isRecallLabel(src) {
+			out = append(out, src)
+		}
+	}
+	return out
+}
+
+// recalled reports whether this dossier's meaning came from the model itself.
+func recalled(d Dossier) bool {
+	for _, src := range d.Sources {
+		if isRecallLabel(src) {
+			return true
+		}
+	}
+	return false
 }
 
 func dedupeStrings(in []string, limit int) []string {
@@ -563,7 +774,7 @@ func clampLyrics(s string) string {
 // The vocabularies go in as enums so the SAMPLER cannot emit an out-of-list
 // value. That is the first line of defence; the post-parse filtering in
 // validate() is the second, not the first.
-func DossierSchema() map[string]any {
+func DossierSchema(in TrackInput) map[string]any {
 	strEnum := func(vals []string) map[string]any {
 		items := make([]any, len(vals))
 		for i, v := range vals {
@@ -572,33 +783,44 @@ func DossierSchema() map[string]any {
 		return map[string]any{"type": "string", "enum": items}
 	}
 
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"station_tags": map[string]any{
-				"type": "array", "maxItems": maxTags, "items": strEnum(StationTags),
-			},
-			"mood": map[string]any{
-				"type": "array", "maxItems": maxTags, "items": strEnum(Moods),
-			},
-			"themes": map[string]any{
-				"type": "array", "maxItems": maxTags,
-				"items": map[string]any{"type": "string", "maxLength": 40},
-			},
-			"subject_summary": map[string]any{"type": "string", "maxLength": 300},
-			"artist_facts": map[string]any{
-				"type": "array", "maxItems": 4,
-				"items": map[string]any{"type": "string", "maxLength": 200},
-			},
-			"notable_line": map[string]any{"type": "string", "maxLength": MaxNotableLine},
-			"release":      map[string]any{"type": "string", "maxLength": 200},
-			"sources": map[string]any{
-				"type": "array", "items": map[string]any{"type": "string", "maxLength": 40},
-			},
-			"confidence": strEnum([]string{ConfidenceHigh, ConfidenceLow, ConfidenceNone}),
+	props := map[string]any{
+		"station_tags": map[string]any{
+			"type": "array", "maxItems": maxTags, "items": strEnum(StationTags),
 		},
-		"required": []any{"station_tags", "mood", "themes", "subject_summary",
-			"artist_facts", "notable_line", "release", "sources", "confidence"},
+		"mood": map[string]any{
+			"type": "array", "maxItems": maxTags, "items": strEnum(Moods),
+		},
+		"themes": map[string]any{
+			"type": "array", "maxItems": maxTags,
+			"items": map[string]any{"type": "string", "maxLength": 40},
+		},
+		"subject_summary": map[string]any{"type": "string", "maxLength": 300},
+		"artist_facts": map[string]any{
+			"type": "array", "maxItems": 4,
+			"items": map[string]any{"type": "string", "maxLength": 200},
+		},
+		"notable_line": map[string]any{"type": "string", "maxLength": MaxNotableLine},
+		"release":      map[string]any{"type": "string", "maxLength": 200},
+		"sources": map[string]any{
+			"type": "array", "items": map[string]any{"type": "string", "maxLength": 40},
+		},
+		"confidence": strEnum([]string{ConfidenceHigh, ConfidenceLow, ConfidenceNone}),
+	}
+	required := []any{"station_tags", "mood", "themes", "subject_summary",
+		"artist_facts", "notable_line", "release", "sources", "confidence"}
+
+	// ONLY WHERE IT IS ALLOWED. A model asked whether it recognises a song it
+	// was never invited to recall would answer anyway, and the answer would sit
+	// in the stored JSON meaning nothing.
+	if RecallApplies(in) {
+		props["recognised"] = map[string]any{"type": "boolean"}
+		required = append(required, "recognised")
+	}
+
+	return map[string]any{
+		"type":       "object",
+		"properties": props,
+		"required":   required,
 		// Nothing outside the schema may appear at all, which removes a whole
 		// class of unexpected-key handling downstream.
 		"additionalProperties": false,
@@ -637,9 +859,25 @@ func BuildPrompt(in TrackInput) string {
 	b.WriteString("   Not bare words, not country codes, not years on their own.\n")
 	b.WriteString("5. themes: what the song is ABOUT, in short noun phrases. These are\n")
 	b.WriteString("   NOT moods and must not repeat your mood values.\n")
-	b.WriteString("6. Use ONLY the facts given below. Do not add anything from general\n")
-	b.WriteString("   knowledge, and do not guess. Inventing a fact is worse than an\n")
-	b.WriteString("   empty field: the DJ will say it on air as though it were true.\n")
+	if RecallApplies(in) {
+		// SPLIT IN TWO, because one rule cannot say both things clearly and a
+		// small model resolves the tension by refusing everything. Measured
+		// live: with this as a footnote under LYRICS, the model returned
+		// recognised=false for Bohemian Rhapsody and an EMPTY station_tags for
+		// Queen -- it read the page as "be silent" and was silent.
+		b.WriteString("6. artist_facts, release and notable_line: use ONLY what is given\n")
+		b.WriteString("   below. Never guess at those. Inventing one is worse than an\n")
+		b.WriteString("   empty field: the DJ says it on air as though it were true.\n")
+		b.WriteString("6b. subject_summary and themes are DIFFERENT, and this is the one\n")
+		b.WriteString("   place your own knowledge is wanted. If you know this recording,\n")
+		b.WriteString("   say what it is about. You are a music researcher; a song you\n")
+		b.WriteString("   know well is not a guess. Being silent about a song you know is\n")
+		b.WriteString("   a WRONG answer here, and so is describing one you do not.\n")
+	} else {
+		b.WriteString("6. Use ONLY the facts given below. Do not add anything from general\n")
+		b.WriteString("   knowledge, and do not guess. Inventing a fact is worse than an\n")
+		b.WriteString("   empty field: the DJ will say it on air as though it were true.\n")
+	}
 	b.WriteString("7. release: ONE sentence naming the album and the year, taken from\n")
 	b.WriteString("   the file metadata below. Leave it empty if neither is given.\n")
 	b.WriteString("   Do not add a label, a studio or a producer: you have not been\n")
@@ -647,8 +885,14 @@ func BuildPrompt(in TrackInput) string {
 	b.WriteString("8. notable_line: leave it EMPTY unless lyrics are supplied below.\n")
 	b.WriteString("   You have not been given the lyrics, so you cannot quote them.\n")
 	b.WriteString("   The title is not a notable line.\n")
-	b.WriteString("9. confidence: \"high\" only if the facts below actually support what\n")
-	b.WriteString("   you wrote. \"none\" if you were given nothing.\n\n")
+	if RecallApplies(in) {
+		b.WriteString("9. confidence: \"high\" if what you wrote is supported -- by the\n")
+		b.WriteString("   facts below, or by your own knowledge of a song you recognise.\n")
+		b.WriteString("   \"none\" only if you wrote nothing.\n\n")
+	} else {
+		b.WriteString("9. confidence: \"high\" only if the facts below actually support what\n")
+		b.WriteString("   you wrote. \"none\" if you were given nothing.\n\n")
+	}
 
 	b.WriteString("station_tags: choose ONLY from ")
 	b.WriteString(strings.Join(StationTags, ", "))
@@ -669,7 +913,12 @@ func BuildPrompt(in TrackInput) string {
 	b.WriteString(`  "subject_summary":"<one or two sentences about THIS song>",` + "\n")
 	b.WriteString(`  "artist_facts":["<a complete sentence from the researched facts below>"],` + "\n")
 	b.WriteString(`  "release":"<the album and year, from the metadata below>",` + "\n")
-	b.WriteString(`  "notable_line":"","sources":["<where a fact came from>"],"confidence":"<high|low|none>"}` + "\n\n")
+	if RecallApplies(in) {
+		b.WriteString(`  "notable_line":"","sources":["<where a fact came from>"],` + "\n")
+		b.WriteString(`  "recognised":<true only if you know this exact song>,"confidence":"<high|low|none>"}` + "\n\n")
+	} else {
+		b.WriteString(`  "notable_line":"","sources":["<where a fact came from>"],"confidence":"<high|low|none>"}` + "\n\n")
+	}
 
 	// Everything below comes from files this program did not write. It is
 	// fenced and labelled as data, and the schema is what actually enforces the
@@ -695,6 +944,16 @@ func BuildPrompt(in TrackInput) string {
 
 	if in.ArtistFacts.Found {
 		b.WriteString("\nTurn the researched facts above into complete sentences.\n")
+	} else if RecallApplies(in) {
+		// THE CONFIDENCE ORDER IS DELIBERATELY ABSENT HERE. This block used to
+		// end "set confidence to none", which is right when there is nothing at
+		// all -- and fatal beside recall: only "high" clears the DJ's 0.6 gate,
+		// so a recalled summary under a forced "none" is written, stored, and
+		// never sayable. The feature would look built and do nothing.
+		b.WriteString("\nRESEARCHED FACTS: NONE. Nothing is known about this artist.\n")
+		b.WriteString("Leave artist_facts empty. Judge confidence on what you actually\n")
+		b.WriteString("wrote: \"high\" if you know this song and described it, \"none\" if\n")
+		b.WriteString("you did not recognise it and left the fields empty.\n")
 	} else {
 		b.WriteString("\nRESEARCHED FACTS: NONE. Nothing is known about this artist.\n")
 		b.WriteString("Leave artist_facts empty, leave sources empty, and set\n")
@@ -708,6 +967,23 @@ func BuildPrompt(in TrackInput) string {
 		b.WriteString("summary that repeats the lyrics will be discarded:\n")
 		b.WriteString(clampLyrics(sanitizeTag(in.Lyrics)))
 		b.WriteString("\n")
+	} else if RecallApplies(in) {
+		// THE ONE PLACE THE MODEL IS INVITED TO USE ITSELF AS A SOURCE, and the
+		// invitation is narrow on purpose: two fields, and only after it has
+		// committed to knowing which record this is. Everything else on this
+		// page still says "use only the facts given", and rule 6 above is
+		// amended rather than removed so the two cannot be read as one licence.
+		b.WriteString("\nLYRICS: not available, so rule 6b applies.\n")
+		b.WriteString("Do you know this recording -- this exact song by this exact\n")
+		b.WriteString("artist?\n\n")
+		b.WriteString("If YES: set recognised true, and fill subject_summary and themes\n")
+		b.WriteString("from what you know about it. Those two fields only.\n")
+		b.WriteString("If NO: set recognised false and leave both empty. A similar\n")
+		b.WriteString("title, a famous song by a different artist, or a guess from the\n")
+		b.WriteString("words in the title are all NO.\n")
+		if in.HasSyncedLyrics {
+			b.WriteString("(Timed lyrics exist for this track but were not supplied here.)\n")
+		}
 	} else {
 		b.WriteString("\nLYRICS: not available. You do NOT know what this song is about.\n")
 		b.WriteString("Leave subject_summary empty and themes empty rather than guessing.\n")

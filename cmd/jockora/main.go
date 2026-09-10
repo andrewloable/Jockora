@@ -36,13 +36,20 @@ import (
 // built from with -ldflags "-X main.Version=v1.2.3". -X cannot write to a
 // const, so the linker flag would have been silently ignored and every release
 // binary would have reported the same hardcoded string.
-// 0.2.0 SINCE THE v0.2 EPIC CLOSED: accounts and roles, runtime-managed
-// sources with rescan, per-station lifecycle with presence, playlists
-// materialised from a filter, the API by role, and one Angular app with a
-// listener route and a lazy console. Schema 14. The deployment has been tagged
-// jockora:v0.2 since it shipped; this was still reporting 0.1.0, so the one
-// thing an operator can put in a bug report named the wrong release.
-var Version = "0.2.0"
+// 0.3.0 ADDS THE TWO OPERATOR SWITCHES: public listening, which opens the dial,
+// tuning and the stream to callers with no account while leaving the console
+// behind a login; and model recall, which lets the enricher describe a song
+// from the model's own knowledge when LRCLIB has no lyrics for it. Both are off
+// by default and both are stored, because each changes what the product does
+// rather than how it looks. Schema 14, unchanged: neither needed a migration.
+//
+// 0.2.0 was the v0.2 epic: accounts and roles, runtime-managed sources with
+// rescan, per-station lifecycle with presence, playlists materialised from a
+// filter, the API by role, and one Angular app with a listener route and a lazy
+// console. The deployment had been tagged jockora:v0.2 since it shipped while
+// this still reported 0.1.0, so the one thing an operator can put in a bug
+// report named the wrong release -- which is why this comment exists at all.
+var Version = "0.3.0"
 
 // subcommands is the WHOLE surface, named once and deliberately.
 //

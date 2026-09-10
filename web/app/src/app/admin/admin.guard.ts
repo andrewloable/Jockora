@@ -19,7 +19,12 @@ export const adminGuard: CanActivateFn = () => {
       if (me.role === 'admin') {
         return true;
       }
-      void router.navigate(['']);
+      // A GUEST IS NOT A LISTENER. While public listening is on, /me answers
+      // anyone with role guest and a 200, so the catch below never fires --
+      // and sending them to the dial would leave somebody who typed /admin
+      // with no way to sign in. They get the form; a real listener does not,
+      // because they have already passed it.
+      void router.navigate([me.role === 'guest' ? '/login' : '']);
       return false;
     }),
     catchError(() => {

@@ -388,7 +388,7 @@ func TestLlamaCPPPostsToNativeCompletion(t *testing.T) {
 	defer srv.Close()
 
 	got, err := NewLlamaCPP(srv.URL, srv.Client()).Complete(context.Background(), CompletionRequest{
-		Prompt: "catalogue this", JSONSchema: DossierSchema(), NPredict: 400,
+		Prompt: "catalogue this", JSONSchema: DossierSchema(TrackInput{}), NPredict: 400,
 	})
 	if err != nil {
 		t.Fatalf("Complete: %v", err)

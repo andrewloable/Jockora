@@ -76,6 +76,15 @@ func (s *Server) Routes() []Route {
 		{Method: http.MethodPost, Path: "/admin/cadence", Role: auth.RoleAdmin, H: adminWrite},
 		{Method: http.MethodPost, Path: "/admin/overlap", Role: auth.RoleAdmin, H: adminWrite},
 		{Method: http.MethodPost, Path: "/admin/enriching", Role: auth.RoleAdmin, H: adminWrite},
+		// Opening the listener half to anyone. An OPERATOR route like every
+		// other setting: the switch that removes a login is not one a listener
+		// gets to touch.
+		{Method: http.MethodPost, Path: "/admin/public-listener", Role: auth.RoleAdmin, H: adminWrite},
+		// Whether the model may describe a song nothing could be looked up
+		// about, and the redo that makes that switch visible on a library
+		// already enriched. Jockora-dtb.
+		{Method: http.MethodPost, Path: "/admin/recall", Role: auth.RoleAdmin, H: adminWrite},
+		{Method: http.MethodPost, Path: "/admin/redo-dossiers", Role: auth.RoleAdmin, H: adminWrite},
 		{Method: http.MethodPost, Path: "/admin/rescan", Role: auth.RoleAdmin, H: s.serveRescan},
 		// THE FIRST NON-HLS STREAMING ENDPOINT. /admin/logs/stream is SSE and
 		// the server has no WriteTimeout, which is what makes a long-lived

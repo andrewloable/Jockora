@@ -95,9 +95,9 @@ const (
 	DropSelfRepetitive DropReason = "self_repetitive"
 	// DropRecited is a break that read the dossier out loud instead of saying
 	// it in the DJ's own words.
-	DropRecited DropReason = "recited_dossier"
-	DropBadJSON        DropReason = "bad_json"
-	DropLLMError       DropReason = "llm_error"
+	DropRecited  DropReason = "recited_dossier"
+	DropBadJSON  DropReason = "bad_json"
+	DropLLMError DropReason = "llm_error"
 )
 
 // Writer produces one break from an assembled prompt and schema.

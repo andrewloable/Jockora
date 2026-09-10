@@ -53,6 +53,30 @@ describe('Listener', () => {
     expect(navigate).toHaveBeenCalledWith(['/login']);
   });
 
+  it('keeps a guest on the dial instead of bouncing them to a login', () => {
+    // The whole point of the operator's switch. /me answers role guest with a
+    // 200, and a redirect here would make the setting do nothing in a browser.
+    const el = mounted({ name: '', role: 'guest' }).nativeElement;
+    expect(navigate).not.toHaveBeenCalled();
+    expect(el.querySelector('[data-dial]')).toBeTruthy();
+  });
+
+  it('offers a guest a way in and no way out', () => {
+    // A guest has no session to end, and the operator needs a route to the
+    // console that is not typing a url.
+    const el = mounted({ name: '', role: 'guest' }).nativeElement;
+    expect(el.querySelector('[data-sign-out]')).toBeNull();
+    expect(el.querySelector('[data-sign-in]').getAttribute('href')).toBe('/login');
+  });
+
+  it('hides the thumbs-down from a guest, because a verdict needs an account', () => {
+    const guest = mounted({ name: '', role: 'guest' }).nativeElement;
+    expect(guest.querySelector('app-feedback')).toBeNull();
+    // And a signed-in listener still has it: the control is hidden by WHO is
+    // listening, not removed.
+    expect(mounted().nativeElement.querySelector('app-feedback')).toBeTruthy();
+  });
+
   it('carries the tuned station to the player and the poll', () => {
     const fixture = mounted();
     fixture.nativeElement.querySelector('[data-station]').click();

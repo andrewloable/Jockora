@@ -68,6 +68,15 @@ type Queue struct {
 	// means LRC or nothing. Measured coverage on the real library is 41.5%, so
 	// nil leaves most tracks with no ramp at all.
 	Onset OnsetSource
+
+	// Recall lets the model describe a track from its own knowledge when no
+	// lyrics were found. A FUNCTION rather than a bool: the operator can turn
+	// it on mid-run from the console, and a value copied in at construction
+	// would only take effect at the next restart.
+	//
+	// Nil means off, which is what an install that has never been asked wants.
+	Recall func() bool
+
 	Log   *slog.Logger
 	Clock clock.Clock
 
@@ -341,6 +350,9 @@ func (q *Queue) enrichOne(ctx context.Context, w work) error {
 		}
 	}
 	in.HasSyncedLyrics = ramp.Confidence == ConfidenceLRC
+	// Read PER TRACK, not once per run: the operator may throw the switch
+	// while the queue is halfway through a library.
+	in.AllowRecall = q.Recall != nil && q.Recall()
 
 	// Audio analysis rescues what LRCLIB could not answer. That is most of the
 	// library -- coverage measured 41.5% -- and it INCLUDES the untagged tracks

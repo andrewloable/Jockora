@@ -260,6 +260,26 @@ type App struct {
 	overlap    float64
 	overlapSet bool
 
+	// publicListener opens the listener half to callers with no account.
+	//
+	// ATOMIC AND NOT UNDER breaksMu: it is read on the path of every listener
+	// request and every HLS segment, which is the hottest read in the program,
+	// while it is written about once in the life of an install.
+	publicListener atomic.Bool
+
+	// enrichRecallSince is WHEN the operator let the enricher ask the model what
+	// a song is about, as a unix second; zero means never, which means off.
+	//
+	// ONE VALUE HOLDING BOTH FACTS. A separate flag and cutoff could disagree
+	// -- a write that stored one and not the other left recall on with no
+	// cutoff, which is a switch that works and a redo button that never appears
+	// with only a log line to explain it. Two settings that must always agree
+	// are better expressed as one that cannot.
+	//
+	// Atomic because the enrichment goroutine reads it once per track while an
+	// HTTP handler writes it about once in the life of an install.
+	enrichRecallSince atomic.Int64
+
 	// stallUntil pauses the feeder, for the fault injection GATE 2 requires.
 	// Guarded because the signal handler and the feeder are different goroutines.
 	stallMu    sync.Mutex
@@ -547,6 +567,10 @@ func New(cfg *config.Config, opts Options) (*App, error) {
 		// cadence above does. The configured default is applied where the
 		// pipeline is built, not here.
 		a.applyStoredOverlap(context.Background(), opts.Breaks)
+		// And whether a listener needs an account at all.
+		a.applyStoredPublicListener(context.Background())
+		// And whether the model may be its own source when nothing else is.
+		a.applyStoredEnrichRecall(context.Background())
 
 		a.tracker = presence.New(clock.Real{}, ListenerGrace)
 		// THE MANAGER IS BUILT BEFORE SetStations, and the order is not
@@ -663,6 +687,181 @@ func (a *App) applyStoredOverlap(ctx context.Context, breaks *station.Pipeline) 
 	a.log.Info("break overlap restored", "seconds", v)
 }
 
+// applyStoredPublicListener restores the operator's answer at startup.
+//
+// CLOSED UNLESS THE DATABASE SAYS OTHERWISE. A missing row, an unreadable one
+// and a value nobody recognises all mean "ask for a login": every failure here
+// has to fall the safe way, because the unsafe way is a server on somebody's
+// network streaming to anyone who finds it.
+func (a *App) applyStoredPublicListener(ctx context.Context) {
+	if a.opts.Library == nil || a.opts.Library.Store == nil {
+		return
+	}
+	raw, ok, err := a.opts.Library.Store.Setting(ctx, publicListenerSetting)
+	if err != nil || !ok {
+		return
+	}
+	on, convErr := strconv.ParseBool(raw)
+	if convErr != nil {
+		a.log.Warn("stored public listener setting is not usable; a login is required",
+			"stored", raw)
+		return
+	}
+	a.publicListener.Store(on)
+	a.log.Info("public listener restored", "public", on)
+}
+
+// applyStoredEnrichRecall restores the operator's answer at startup.
+//
+// Falls the strict way on anything unreadable, for the same reason public
+// listening does: the loose direction here is a DJ asserting on air something
+// nothing ever looked up.
+func (a *App) applyStoredEnrichRecall(ctx context.Context) {
+	if a.opts.Library == nil || a.opts.Library.Store == nil {
+		return
+	}
+	raw, ok, err := a.opts.Library.Store.Setting(ctx, enrichRecallSetting)
+	if err != nil || !ok {
+		return
+	}
+	since, convErr := strconv.ParseInt(raw, 10, 64)
+	if convErr != nil {
+		a.log.Warn("stored enrichment recall setting is not usable; staying off", "stored", raw)
+		return
+	}
+	// No guard against a negative. It would be unreachable defence: EnrichRecall
+	// asks for greater than zero, and redoCutoff hands a negative straight to a
+	// "created_at < ?" that matches nothing. A value below zero is already off
+	// by both rules, and a branch no test can reach is one nobody can prove.
+	a.enrichRecallSince.Store(since)
+	a.log.Info("enrichment recall restored", "recall", since > 0, "since", since)
+}
+
+// EnrichRecall reports whether the enricher may ask the model what a song is
+// about when nothing could be looked up.
+func (a *App) EnrichRecall() bool { return a.enrichRecallSince.Load() > 0 }
+
+// SetEnrichRecall turns model recall on or off for future enrichment.
+//
+// FUTURE enrichment, and that is the whole subtlety of this switch. A dossier
+// is written once and reused for the life of the library, and the queue only
+// looks at tracks with no dossier at all -- so turning this on changes nothing
+// about a library that is already enriched until RedoUnknownDossiers is run.
+// Persisted before it is applied, for the reason SetPublicListener records.
+func (a *App) SetEnrichRecall(on bool) error {
+	since := int64(0)
+	if on {
+		// AN EXISTING MOMENT IS KEPT. Re-stamping whenever the switch is
+		// touched would re-offer the whole library for a redo each time an
+		// operator flicked it, including flicking it to the value it already
+		// had. Turning it off and on again is the deliberate way to re-offer.
+		if since = a.enrichRecallSince.Load(); since <= 0 {
+			since = time.Now().Unix()
+		}
+	}
+	if a.opts.Library != nil && a.opts.Library.Store != nil {
+		if err := a.opts.Library.Store.SetSetting(context.Background(),
+			enrichRecallSetting, strconv.FormatInt(since, 10)); err != nil {
+			return fmt.Errorf("enrichment recall could not be saved, so it was not changed: %w", err)
+		}
+	}
+	a.enrichRecallSince.Store(since)
+	a.log.Info("enrichment recall changed", "recall", on, "since", since)
+	return nil
+}
+
+// redoCutoff is the moment before which a dossier was written under settings
+// that no longer apply, and so is worth writing again.
+//
+// ZERO MEANS NOTHING IS WORTH REDOING, which is the answer whenever recall is
+// off: re-running enrichment under the same settings that produced a dossier
+// reproduces it exactly, at hours of model time. No database read -- the value
+// IS the setting, held in memory.
+func (a *App) redoCutoff() int64 { return a.enrichRecallSince.Load() }
+
+// wireEnricher hands the background worker the two switches the operator owns.
+//
+// A NAMED FUNCTION rather than four lines inside Run, so a test can assert the
+// handoff without booting a station. It was inside Run, and a mutation that
+// deleted the recall line passed every test in the tree: the whole feature was
+// inert and nothing said so. This project has shipped twelve subsystems that
+// were never connected to a caller, and this is the shape of that failure.
+func (a *App) wireEnricher() {
+	if a.opts.Enricher == nil {
+		return
+	}
+	a.opts.Enricher.Paused = a.enriching.Load
+	// GETTERS, not values: the operator can throw either switch while the queue
+	// is halfway through a library, and a bool copied in here would only take
+	// effect at the next restart.
+	a.opts.Enricher.Recall = a.EnrichRecall
+}
+
+// RedoUnknownDossiers deletes the dossiers that say nothing about what a track
+// is about, so the enricher writes them again under the current settings.
+//
+// It returns how many were cleared. Deliberate, counted and operator-triggered:
+// each of those tracks is off the dial until its replacement lands, which is a
+// cost worth naming rather than paying silently.
+func (a *App) RedoUnknownDossiers(ctx context.Context) (int64, error) {
+	if a.opts.Library == nil || a.opts.Library.Store == nil {
+		return 0, fmt.Errorf("%w to re-enrich", server.ErrNoLibrary)
+	}
+	n, err := a.opts.Library.Store.ClearMeaninglessDossiersBefore(ctx, a.redoCutoff())
+	if err != nil {
+		return 0, err
+	}
+	a.log.Info("dossiers cleared for re-enrichment", "tracks", n, "recall", a.EnrichRecall())
+	// THE WORKER HAS ALREADY GIVEN UP by the time anybody presses this. Run
+	// returns on errNoWork and the goroutine parks, so clearing rows without
+	// waking it leaves the operator watching a queue that never starts.
+	if n > 0 {
+		// The error is DISCARDED, not swallowed: SetEnriching returns nil on
+		// every one of its paths, so a check here would be a branch no test
+		// could ever reach -- and a guard nobody can prove works is worse than
+		// no guard. If it ever grows a failure mode, this is the call site that
+		// has to grow a check with it.
+		_, _ = a.SetEnriching(true)
+	}
+	return n, nil
+}
+
+// UnknownDossierCount is that same set, counted, so the console can say what a
+// redo would cost before it happens.
+func (a *App) UnknownDossierCount(ctx context.Context) (int64, error) {
+	if a.opts.Library == nil || a.opts.Library.Store == nil {
+		return 0, nil
+	}
+	return a.opts.Library.Store.CountMeaninglessDossiersBefore(ctx, a.redoCutoff())
+}
+
+// PublicListener reports whether the listener half is open to anyone.
+func (a *App) PublicListener() bool { return a.publicListener.Load() }
+
+// SetPublicListener opens or closes the listener half, without a restart.
+//
+// The console is untouched by this. Every /admin route asks for an operator
+// account whatever this is set to, which is what makes leaving it on a decision
+// about the dial rather than a decision about the server.
+// WRITTEN BEFORE IT IS APPLIED, and the order is the whole point.
+//
+// Storing it in memory first and persisting after meant a failed write returned
+// an error while the door had ALREADY MOVED: the console reverts its checkbox
+// and says the change did not happen, the operator believes the server is shut,
+// and it is open. For a switch that decides who can reach the product, the safe
+// failure is "nothing happened", not "something happened and nobody was told".
+func (a *App) SetPublicListener(on bool) error {
+	if a.opts.Library != nil && a.opts.Library.Store != nil {
+		if err := a.opts.Library.Store.SetSetting(context.Background(),
+			publicListenerSetting, strconv.FormatBool(on)); err != nil {
+			return fmt.Errorf("public listening could not be saved, so it was not changed: %w", err)
+		}
+	}
+	a.publicListener.Store(on)
+	a.log.Info("public listener changed", "public", on)
+	return nil
+}
+
 // cadenceSetting is where the operator's break cadence lives.
 //
 // IT HAS TO OUTLIVE A RESTART. It is a decision an operator makes about how
@@ -677,6 +876,28 @@ const cadenceSetting = "break_cadence"
 // the station sounds, and a setting that silently reverts to the compose file
 // on every restart is one the operator has to remember to redo, and will not.
 const overlapSetting = "break_overlap"
+
+// publicListenerSetting is where the operator's answer to "does the listener
+// page need a login" lives. Persisted for the same reason the cadence is: it is
+// a decision about the install, and one that silently reverting on a restart
+// would either lock out a household or open a server nobody meant to open.
+const publicListenerSetting = "public_listener"
+
+// enrichRecallSetting is where the operator's answer to "may the DJ describe a
+// song the library could not look up" lives.
+//
+// Persisted like every other operator decision, and OFF by default: it is the
+// one setting that lets the model be its own source, so an install nobody has
+// asked stays with the stricter rule.
+// enrichRecallSetting stores the unix second recall was switched on, or "0" for
+// off. Not a boolean: the moment is also the redo cutoff, and see
+// enrichRecallSince for why the two are one value.
+//
+// THE CUTOFF IS WHAT MAKES THE REDO TERMINATE. Recall does not rescue every
+// track, so re-enrichment writes a fresh meaningless dossier for each one the
+// model still cannot describe. Only rows written BEFORE this moment were
+// written under the old settings, and only those can be improved by a redo.
+const enrichRecallSetting = "enrich_recall"
 
 // MaxBreakOverlapS caps the lead-in an operator may ask for.
 //
@@ -1483,7 +1704,7 @@ func (a *App) Run(ctx context.Context) error {
 
 	if a.opts.Enricher != nil {
 		a.enriching.Store(true)
-		a.opts.Enricher.Paused = a.enriching.Load
+		a.wireEnricher()
 		go func() {
 			for {
 				a.enrichAlive.Store(true)
@@ -2377,6 +2598,14 @@ func (a *App) Overview() any {
 	out["feedback"] = recentFeedback(ctx, db)
 	out["cadence"] = a.liveCadence()
 	out["break_overlap_s"] = a.liveOverlap()
+	out["public_listener"] = a.PublicListener()
+	out["enrich_recall"] = a.EnrichRecall()
+	// The ctx this function already opened, not a second Background: every
+	// other query here uses it, and two of them is how one later grows a
+	// timeout the other does not have.
+	if n, err := a.UnknownDossierCount(ctx); err == nil {
+		out["dossiers_without_meaning"] = n
+	}
 	out["enriching"] = a.enrichmentRunning()
 	if why := a.enrichmentTrouble(); why != "" {
 		out["enrichment_stopped"] = why

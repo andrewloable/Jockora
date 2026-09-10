@@ -5,6 +5,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -427,12 +429,27 @@ func post(t *testing.T, s *Server, path, body string, header ...string) *httptes
 // names a station id rather than a tag, and the /jock routes are gone. Their
 // replacements are in listener_test.go, beside the code that answers them.
 
+// GUARDED for the reason listenTuner is: it stands in for something reached
+// from many request goroutines at once, and an unguarded double turns every
+// concurrent test into a race report about the test.
 type fakeAdmin struct {
+	mu        sync.Mutex
 	cadence   int
 	overlap   float64
 	enriching bool
+	public    bool
+	recall    bool
+	cleared   int64
 	said      string
 	err       error
+}
+
+// setPublic is the operator's switch, used where a test drives it directly
+// rather than through the route.
+func (f *fakeAdmin) setPublic(on bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.public = on
 }
 
 func (f *fakeAdmin) Overview() any { return map[string]any{"cadence": f.cadence} }
@@ -449,6 +466,37 @@ func (f *fakeAdmin) SetBreakOverlap(seconds float64) error {
 	}
 	f.overlap = seconds
 	return nil
+}
+func (f *fakeAdmin) PublicListener() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.public
+}
+func (f *fakeAdmin) SetPublicListener(on bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.public = on
+	return nil
+}
+func (f *fakeAdmin) SetEnrichRecall(on bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.recall = on
+	return nil
+}
+func (f *fakeAdmin) RedoUnknownDossiers(context.Context) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return 0, f.err
+	}
+	return f.cleared, nil
 }
 func (f *fakeAdmin) SetEnriching(on bool) (string, error) {
 	f.enriching = on

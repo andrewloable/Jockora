@@ -78,8 +78,10 @@ func AssertableFacts(ctx context.Context, s *store.Store, trackID int64) ([]stri
 		// A corrupt dossier is treated as no dossier rather than as an outage.
 		return nil, nil
 	}
-	if len(d.Sources) == 0 {
-		// Nothing was actually looked up, so nothing may be asserted.
+	if !LookedUpSource(d.Sources) {
+		// Nothing was actually looked up, so nothing may be asserted. The
+		// recall label does not count: it names the model's own memory, which
+		// grounds what a song is ABOUT and never a fact about the artist.
 		return nil, nil
 	}
 	return d.ArtistFacts, nil

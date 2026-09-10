@@ -44,6 +44,16 @@ describe('adminGuard', () => {
     expect(navigate).toHaveBeenCalledWith(['']);
   });
 
+  it('sends a guest to the login form, not to the dial', async () => {
+    // While public listening is on /me answers ANYONE with a 200, so the 401
+    // branch below never fires. A guest who typed /admin would otherwise be
+    // bounced to the dial with no way to reach the sign-in form at all.
+    const allowed = run();
+    ctrl.expectOne('/me').flush({ name: '', role: 'guest' });
+    expect(await allowed).toBe(false);
+    expect(navigate).toHaveBeenCalledWith(['/login']);
+  });
+
   it('sends a stranger to the login form', async () => {
     const allowed = run();
     ctrl.expectOne('/me').flush(null, { status: 401, statusText: 'Unauthorized' });

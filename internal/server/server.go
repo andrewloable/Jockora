@@ -237,6 +237,27 @@ type Toucher interface {
 // be counted for is a station that would never stop.
 func (s *Server) SetSessions(src SessionSource) { s.sessions = src }
 
+// listenerKey is the ONE answer to "which listener is this", for every route
+// that counts one.
+//
+// Both the stream and the tune button need it, and they were asking two
+// different things: /hls went through the configured SessionSource and /tune
+// called sessionFromCookie directly. Nothing diverged yet -- the app installs
+// sessionFromCookie as the source -- but SetSessions is exported, and two
+// authorities for one question is how one of them gets forgotten.
+func (s *Server) listenerKey(w http.ResponseWriter, r *http.Request) (string, bool) {
+	// NO SOURCE MEANS NOBODY, which is what SetAuth documents and what the
+	// spike path relies on. A fallback to the cookie here looked harmless and
+	// was not: it would have served HLS on a server that installed no identity
+	// at all, quietly undoing the invariant one line above it. Every server
+	// with accounts gets a source from SetAuth, so the fallback was covering a
+	// case that does not exist.
+	if s.sessions == nil {
+		return "", false
+	}
+	return s.sessions(w, r)
+}
+
 // SetPresence wires the heartbeat sink.
 func (s *Server) SetPresence(t Toucher) { s.presence = t }
 
@@ -261,10 +282,7 @@ func (s *Server) serveHLS(w http.ResponseWriter, r *http.Request, rest string) {
 	// fits an int64, so the allowlist above is the whole guard.
 	id, _ := strconv.ParseInt(station, 10, 64)
 
-	session, ok := "", false
-	if s.sessions != nil {
-		session, ok = s.sessions(w, r)
-	}
+	session, ok := s.listenerKey(w, r)
 	if !ok {
 		http.Error(w, "sign in to listen", http.StatusUnauthorized)
 		return

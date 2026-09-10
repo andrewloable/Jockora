@@ -28,6 +28,14 @@ const (
 	RoleListener = "listener"
 )
 
+// RoleGuest is what /me calls a caller with no account at all, while public
+// listening is switched on.
+//
+// DELIBERATELY OUTSIDE THE SET ABOVE. Sign and Verify accept only admin and
+// listener, so a guest can never hold a signed token however this string
+// travels -- it is a label the server reports, not an authority anyone carries.
+const RoleGuest = "guest"
+
 // DefaultCost is the bcrypt cost for real use.
 //
 // 12, not bcrypt's own default of 10: this is a self-hosted service whose

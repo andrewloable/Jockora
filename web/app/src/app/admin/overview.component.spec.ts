@@ -793,6 +793,256 @@ describe('Overview', () => {
     expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('Overlap set');
   });
 
+  // Jockora-vpd: the one switch on this page that changes who can reach the
+  // product at all.
+  it('the public listener switch opens the dial on the click', () => {
+    const fixture = mounted();
+    const box = fixture.nativeElement.querySelector('[data-public-listener]') as HTMLInputElement;
+    expect(box.checked).toBe(false);
+
+    box.checked = true;
+    box.dispatchEvent(new Event('change'));
+    const req = ctrl.expectOne('/admin/public-listener');
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual({ public_listener: true });
+    req.flush(null);
+    fixture.detectChanges();
+
+    const said = fixture.nativeElement.querySelector('[data-said]').textContent;
+    expect(said).toContain('without signing in');
+    // AND WHAT IS STILL SHUT, said in the same breath: an operator opening
+    // this needs to know the console did not open with it.
+    expect(said).toContain('operator account');
+  });
+
+  it('the public listener switch closes it again and says so', () => {
+    const fixture = mounted({ library: { tracks: 1, enriched: 1 }, public_listener: true });
+    const box = fixture.nativeElement.querySelector('[data-public-listener]') as HTMLInputElement;
+    expect(box.checked).toBe(true);
+
+    box.checked = false;
+    box.dispatchEvent(new Event('change'));
+    ctrl.expectOne('/admin/public-listener').flush(null);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain(
+      'needs a sign-in again',
+    );
+  });
+
+  it('a refused public listener change puts the switch back', () => {
+    // THE BOX HAS ALREADY MOVED in the browser. Leaving it ticked over a
+    // server that refused would tell the operator the door is open when it is
+    // shut, which is the one direction this must never get wrong.
+    const fixture = mounted();
+    const box = fixture.nativeElement.querySelector('[data-public-listener]') as HTMLInputElement;
+    box.checked = true;
+    box.dispatchEvent(new Event('change'));
+    ctrl.expectOne('/admin/public-listener').flush('could not be saved\n', {
+      status: 400,
+      statusText: 'Bad Request',
+    });
+    fixture.detectChanges();
+
+    expect(
+      (fixture.nativeElement.querySelector('[data-public-listener]') as HTMLInputElement).checked,
+    ).toBe(false);
+    expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain(
+      'could not be saved',
+    );
+  });
+
+  it('the public listener switch shows what the server has', () => {
+    // Same rule as the cadence and the overlap beside it, and reported twice
+    // for those: a control that never reads the answer is indistinguishable
+    // from a setting that was lost.
+    const fixture = mounted({ library: { tracks: 1, enriched: 1 }, public_listener: true });
+    expect(
+      (fixture.nativeElement.querySelector('[data-public-listener]') as HTMLInputElement).checked,
+    ).toBe(true);
+  });
+
+  // Jockora-dtb: letting the model be its own source when nothing was found.
+  it('the recall switch turns on and says what it applies to', () => {
+    const fixture = mounted();
+    const box = fixture.nativeElement.querySelector('[data-recall]') as HTMLInputElement;
+    expect(box.checked).toBe(false);
+
+    box.checked = true;
+    box.dispatchEvent(new Event('change'));
+    const req = ctrl.expectOne('/admin/recall');
+    expect(req.request.body).toEqual({ recall: true });
+    req.flush(null);
+    fixture.detectChanges();
+
+    const said = fixture.nativeElement.querySelector('[data-said]').textContent;
+    // FROM HERE ON, said out loud. A dossier is written once, so an operator
+    // who expects this to change what is already stored will be puzzled.
+    expect(said).toContain('from here on');
+  });
+
+  it('the recall note names the cost, not just the feature', () => {
+    // The switch weakens the rule the whole DJ design rests on, so the screen
+    // where it is thrown has to say what goes wrong, not only what improves.
+    const note = mounted().nativeElement.querySelector('[data-recall-note]').textContent;
+    expect(note).toContain('sometimes get wrong');
+    expect(note).toContain('as though it were true');
+    // And what recall never touches, which is the bound that makes it safe.
+    expect(note).toContain('Artist facts');
+  });
+
+  it('the recall switch turns back off and says so', () => {
+    // The direction that matters if the operator tries this and dislikes it.
+    const fixture = mounted({ library: { tracks: 1, enriched: 1 }, enrich_recall: true });
+    const box = fixture.nativeElement.querySelector('[data-recall]') as HTMLInputElement;
+    box.checked = false;
+    box.dispatchEvent(new Event('change'));
+    const req = ctrl.expectOne('/admin/recall');
+    expect(req.request.body).toEqual({ recall: false });
+    req.flush(null);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain(
+      'only what was looked up',
+    );
+  });
+
+  it('a poll landing mid-write does not undo the switch', () => {
+    // THE RACE. The poll runs every 10s and its response carries whatever the
+    // server said when it was ISSUED. A response issued before the toggle can
+    // land after it, overwriting the new value with the old -- and the
+    // operator sees a security switch reading the opposite of what it is.
+    const fixture = mounted();
+    const box = fixture.nativeElement.querySelector('[data-public-listener]') as HTMLInputElement;
+    box.checked = true;
+    box.dispatchEvent(new Event('change'));
+    const write = ctrl.expectOne('/admin/public-listener');
+
+    // A poll issued before the click, answering with the OLD state.
+    fixture.componentInstance.load();
+    ctrl.expectOne('/admin/overview.json').flush({
+      library: { tracks: 1, enriched: 1 },
+      public_listener: false,
+      enrich_recall: false,
+    });
+    write.flush(null);
+    fixture.detectChanges();
+
+    expect(
+      (fixture.nativeElement.querySelector('[data-public-listener]') as HTMLInputElement).checked,
+    ).toBe(true);
+    expect(fixture.componentInstance.publicListener()).toBe(true);
+  });
+
+  it('a poll landing mid-write does not undo the recall switch either', () => {
+    // The same race on the other switch. Both are applied on the click, so
+    // both need the flag; asserting only one would let the other regress.
+    const fixture = mounted();
+    const box = fixture.nativeElement.querySelector('[data-recall]') as HTMLInputElement;
+    box.checked = true;
+    box.dispatchEvent(new Event('change'));
+    const write = ctrl.expectOne('/admin/recall');
+
+    fixture.componentInstance.load();
+    ctrl.expectOne('/admin/overview.json').flush({
+      library: { tracks: 1, enriched: 1 },
+      enrich_recall: false,
+    });
+    write.flush(null);
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.recall()).toBe(true);
+  });
+
+  it('the poll takes the switch back over once the write has landed', () => {
+    // THE FLAG MUST CLEAR, or the console stops following the server for the
+    // rest of the session -- a switch changed in another browser, or reverted
+    // by a restart, would never show here.
+    const fixture = mounted();
+    const box = fixture.nativeElement.querySelector('[data-public-listener]') as HTMLInputElement;
+    box.checked = true;
+    box.dispatchEvent(new Event('change'));
+    ctrl.expectOne('/admin/public-listener').flush(null);
+
+    fixture.componentInstance.load();
+    ctrl.expectOne('/admin/overview.json').flush({
+      library: { tracks: 1, enriched: 1 },
+      public_listener: false,
+      enrich_recall: true,
+    });
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.publicListener()).toBe(false);
+    expect(fixture.componentInstance.recall()).toBe(true);
+  });
+
+  it('a refused recall change puts the switch back', () => {
+    const fixture = mounted();
+    const box = fixture.nativeElement.querySelector('[data-recall]') as HTMLInputElement;
+    box.checked = true;
+    box.dispatchEvent(new Event('change'));
+    ctrl.expectOne('/admin/recall').flush('no library\n', {
+      status: 400,
+      statusText: 'Bad Request',
+    });
+    fixture.detectChanges();
+    expect(
+      (fixture.nativeElement.querySelector('[data-recall]') as HTMLInputElement).checked,
+    ).toBe(false);
+  });
+
+  it('the recall switch shows what the server has', () => {
+    const fixture = mounted({ library: { tracks: 1, enriched: 1 }, enrich_recall: true });
+    expect((fixture.nativeElement.querySelector('[data-recall]') as HTMLInputElement).checked).toBe(
+      true,
+    );
+  });
+
+  it('the redo offers itself only when there is something to redo', () => {
+    // WITHOUT THIS THE SWITCH ABOVE LOOKS BROKEN on a library already
+    // enriched: the queue only visits tracks with no dossier at all.
+    const none = mounted({ library: { tracks: 1, enriched: 1 }, dossiers_without_meaning: 0 });
+    expect(none.nativeElement.querySelector('[data-redo]')).toBeNull();
+
+    const fixture = mounted({ library: { tracks: 1, enriched: 1 }, dossiers_without_meaning: 4200 });
+    const line = fixture.nativeElement.querySelector('[data-redo-line]').textContent;
+    expect(line).toContain('4,200');
+    // IT SAYS WHY IT IS NOT EVERY EMPTY DOSSIER. The server only offers rows
+    // written before the setting changed; a line claiming otherwise would have
+    // the operator pressing this after every enrichment run, forever.
+    expect(line).toContain('before this setting changed');
+    expect(line).toContain('not offered again');
+
+    // One reads as one, not as "1 dossiers".
+    const one = mounted({ library: { tracks: 1, enriched: 1 }, dossiers_without_meaning: 1 });
+    expect(one.nativeElement.querySelector('[data-redo-line]').textContent).toContain('1 dossier ');
+  });
+
+  it('the redo reports how many it cleared, and zero is an answer', () => {
+    const fixture = mounted({ library: { tracks: 1, enriched: 1 }, dossiers_without_meaning: 12 });
+    (fixture.nativeElement.querySelector('[data-redo]') as HTMLButtonElement).click();
+    ctrl.expectOne('/admin/redo-dossiers').flush({ cleared: 12 });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain('Cleared 12');
+
+    const empty = mounted({ library: { tracks: 1, enriched: 1 }, dossiers_without_meaning: 3 });
+    (empty.nativeElement.querySelector('[data-redo]') as HTMLButtonElement).click();
+    ctrl.expectOne('/admin/redo-dossiers').flush({ cleared: 0 });
+    empty.detectChanges();
+    expect(empty.nativeElement.querySelector('[data-said]').textContent).toContain('Nothing to clear');
+  });
+
+  it('a refused redo says so rather than reporting a clear', () => {
+    const fixture = mounted({ library: { tracks: 1, enriched: 1 }, dossiers_without_meaning: 5 });
+    (fixture.nativeElement.querySelector('[data-redo]') as HTMLButtonElement).click();
+    ctrl.expectOne('/admin/redo-dossiers').flush('no library to re-enrich\n', {
+      status: 400,
+      statusText: 'Bad Request',
+    });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-said]').textContent).toContain(
+      'no library to re-enrich',
+    );
+  });
+
   it('the DJ overlap repeats the server refusal rather than its own', () => {
     const fixture = mounted();
     (fixture.nativeElement.querySelector('[data-set-overlap]') as HTMLButtonElement).click();

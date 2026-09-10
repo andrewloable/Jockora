@@ -61,7 +61,7 @@ func TestLiveProbeBreakRequest(t *testing.T) {
 		Persona:       testPersona(t),
 		Current:       cur,
 		CurrentArtist: "Nightdrive", CurrentTitle: "Not Going Back",
-		Next:      next,
+		Next:       next,
 		NextArtist: "Shift Work", NextTitle: "Clocking Off",
 		Placement:     "outro",
 		WindowSeconds: 20,
@@ -71,7 +71,7 @@ func TestLiveProbeBreakRequest(t *testing.T) {
 	}
 
 	body, err := json.Marshal(map[string]any{
-		"prompt":      prompt,
+		"prompt": prompt,
 		// EVERY SAMPLER SETTING COMES FROM THE CONSTANT PRODUCTION USES, never
 		// from a number typed here. The first version of this probe hardcoded
 		// temperature 0.2 -- which is the DOSSIER temperature -- and measured

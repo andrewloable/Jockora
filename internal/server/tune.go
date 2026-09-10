@@ -83,8 +83,12 @@ func (s *Server) serveTune(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "tuning unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	sess, _, err := s.session(r)
-	if err != nil {
+	// The SID is what presence counts, and a guest has one of their own while
+	// public listening is on. THE SAME ANSWER /hls/ GETS, through the same
+	// call: a listener who tunes under one key and is then counted under
+	// another holds a station that stops underneath them.
+	sid, ok := s.listenerKey(w, r)
+	if !ok {
 		http.Error(w, "sign in to listen", http.StatusUnauthorized)
 		return
 	}
@@ -95,7 +99,7 @@ func (s *Server) serveTune(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hls, err := s.tuner.Tune(r.Context(), sess.SID, body.StationID)
+	hls, err := s.tuner.Tune(r.Context(), sid, body.StationID)
 	if errors.Is(err, store.ErrNotFound) {
 		// A station that is not there, or is off the dial, is the listener's
 		// mistake rather than a server fault -- and they stay on whatever they
@@ -121,6 +125,11 @@ func (s *Server) serveTune(w http.ResponseWriter, r *http.Request) {
 //
 // ATTRIBUTED, because a household is several people with different taste and
 // "somebody disliked this" is much less useful than knowing who.
+//
+// WHICH IS WHY A GUEST CANNOT LEAVE ONE, even while public listening is open.
+// An unowned verdict in the table the console reports as what listeners said
+// would be worse than no verdict, so this stays 401 and the page hides the
+// control rather than offering a button that fails.
 func (s *Server) serveFeedback(w http.ResponseWriter, r *http.Request) {
 	if s.tuner == nil {
 		http.Error(w, "feedback unavailable", http.StatusServiceUnavailable)

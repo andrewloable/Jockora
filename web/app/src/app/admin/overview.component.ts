@@ -80,6 +80,48 @@ const REFRESH_MS = 10_000;
         {{ enrichmentTrouble() ? 'Restart enrichment' : 'Resume' }}
       </button>
 
+      <p>
+        <!-- THE OTHER SWITCH THAT CHANGES WHAT THE DJ IS ALLOWED TO SAY, and
+             the only one that lets the model be its own source. It sits under
+             the enrichment controls because that is what it changes, and it
+             says the trade-off rather than the feature. Jockora-dtb. -->
+        <label data-inline-field>
+          <input
+            type="checkbox"
+            data-recall
+            [checked]="recall()"
+            (change)="saveRecall($any($event.target))"
+          />
+          Let the DJ describe songs the library could not look up.
+        </label>
+        <small data-recall-note
+          >Most songs have no lyrics on LRCLIB and nothing but a country and a founding year on
+          MusicBrainz, so the DJ has nothing to say about them and falls back to personality. With
+          this on, the model describes those songs from its own knowledge instead — which it will
+          sometimes get wrong, and the DJ will say it on air as though it were true. Artist facts
+          and quoted lines are never recalled.</small
+        >
+      </p>
+      @if (unknownDossiers() > 0) {
+        <p data-redo-line>
+          <!-- WHY THE SWITCH ABOVE LOOKS BROKEN WITHOUT THIS. A dossier is
+               written once and the queue only visits tracks that have none, so
+               on a library already enriched the switch changes nothing until
+               these are cleared.
+
+               AND WHY IT IS CUT OFF AT THE SETTING CHANGE. Recall does not
+               rescue every track; re-enrichment writes a fresh empty dossier
+               for each one the model still cannot describe. Offering those
+               again would send the operator round a loop costing hours of
+               model time per lap and changing nothing. -->
+          {{ unknownDossiers() | number }} dossier{{ unknownDossiers() === 1 ? '' : 's' }} say
+          nothing about what the track is about and were written before this setting changed.
+          Clearing them puts those tracks back in the enrichment queue — they leave the dial
+          until their replacement lands. Tracks the model has already been asked about under
+          the current setting are not offered again, however little it knew.
+          <button type="button" data-redo (click)="redoDossiers()">Clear and re-enrich</button>
+        </p>
+      }
       @if (cost(); as c) {
         <p data-cost-line>
           {{ c.perTrack }} per track · {{ c.wall }} of model time so far · {{ c.tokens }} tokens.
@@ -142,6 +184,26 @@ const REFRESH_MS = 10_000;
           end, and the music pauses in between. It applies to every break whatever the track is
           doing, so a song that sings to its last second gets talked over. Set it to 0 for no
           overlap and no pause.</small
+        >
+      </p>
+      <p>
+        <!-- THE ONE SWITCH ON THIS PAGE THAT CHANGES WHO CAN REACH THE
+             PRODUCT, so it says what it does in full rather than in a word.
+             Applied on the click: this is a door, and a door with a separate
+             Set button is a door somebody leaves half-open. Jockora-vpd. -->
+        <label data-inline-field>
+          <input
+            type="checkbox"
+            data-public-listener
+            [checked]="publicListener()"
+            (change)="savePublicListener($any($event.target))"
+          />
+          Anyone can listen without signing in.
+        </label>
+        <small data-public-listener-note
+          >The dial and the stream open to whoever can reach this server, with no account and no
+          password. The console is not affected and always asks for an operator account. Leave it
+          off unless this machine is only reachable by people you trust.</small
         >
       </p>
       <p data-dj-line>
@@ -448,8 +510,113 @@ export class Overview implements OnDestroy {
         if (typeof v === 'number' && !this.editingOverlap) {
           this.overlap.set(v);
         }
+        // A FLAG FOR THE SAME REASON AS THE OVERLAP'S, though not for typing.
+        // These are applied on the click, so there is no half-typed state --
+        // but this poll's answer carries whatever the server said when the
+        // request was ISSUED, and one issued before the click lands after it
+        // and overwrites the new value with the old. The operator then reads a
+        // switch saying the opposite of what the server is doing, for up to a
+        // full refresh interval, on the control that decides who can reach the
+        // product.
+        const p = (o as Record<string, unknown>)['public_listener'];
+        if (typeof p === 'boolean' && !this.writingPublicListener) {
+          this.publicListener.set(p);
+        }
+        const rc = (o as Record<string, unknown>)['enrich_recall'];
+        if (typeof rc === 'boolean' && !this.writingRecall) {
+          this.recall.set(rc);
+        }
+        const un = (o as Record<string, unknown>)['dossiers_without_meaning'];
+        if (typeof un === 'number') {
+          this.unknownDossiers.set(un);
+        }
       },
       error: () => this.said.set('Could not read the overview.'),
+    });
+  }
+
+  /** Whether the model may describe a song nothing could be looked up about. */
+  readonly recall = signal(false);
+  /** How many stored dossiers say nothing about what the track is about. */
+  readonly unknownDossiers = signal(0);
+
+  /** Takes the ELEMENT for the reason savePublicListener does. */
+  saveRecall(box: HTMLInputElement): void {
+    const on = box.checked;
+    this.recall.set(on);
+    this.writingRecall = true;
+    this.api.setRecall(on).subscribe({
+      next: () => {
+        this.writingRecall = false;
+        this.said.set(
+          on
+            ? 'The DJ may now describe songs from the model\'s own knowledge. It applies to enrichment from here on.'
+            : 'The DJ is back to saying only what was looked up.',
+        );
+      },
+      error: (e: unknown) => {
+        this.writingRecall = false;
+        this.recall.set(!on);
+        box.checked = !on;
+        this.said.set(serverSaid(e, 'Could not change that.'));
+      },
+    });
+  }
+
+  redoDossiers(): void {
+    this.api.redoDossiers().subscribe({
+      next: (r) => {
+        // ZERO IS AN ANSWER, not a silence. An operator who clears nothing and
+        // one who clears four thousand saw the same blank line before this.
+        this.unknownDossiers.set(0);
+        this.said.set(
+          r.cleared === 0
+            ? 'Nothing to clear: every dossier already says something.'
+            : `Cleared ${r.cleared} dossiers. They are back in the enrichment queue.`,
+        );
+      },
+      error: (e: unknown) => this.said.set(serverSaid(e, 'Could not clear those.')),
+    });
+  }
+
+  /** Whether the listener page is open to callers with no account. */
+  readonly publicListener = signal(false);
+
+  /**
+   * Takes the ELEMENT, not its value, because a refusal has to put the box
+   * back and the binding cannot do it.
+   *
+   * The browser has already ticked it. The signal goes to the new value and
+   * then, on a refusal, back to the old one -- both before change detection
+   * runs -- so Angular compares the old bound value against itself, sees no
+   * change and writes nothing, leaving a ticked box over a door that is shut.
+   * That is the one direction this must never get wrong, so the element is
+   * reverted by hand.
+   */
+  // True between the operator clicking a switch and the server answering. The
+  // poll leaves that switch alone while it is set.
+  private writingPublicListener = false;
+  private writingRecall = false;
+
+  savePublicListener(box: HTMLInputElement): void {
+    const on = box.checked;
+    this.publicListener.set(on);
+    this.writingPublicListener = true;
+    this.api.setPublicListener(on).subscribe({
+      next: () => {
+        this.writingPublicListener = false;
+        this.said.set(
+          on
+            ? 'Anyone can now listen without signing in. The console still needs an operator account.'
+            : 'Listening needs a sign-in again.',
+        );
+      },
+      error: (e: unknown) => {
+        this.writingPublicListener = false;
+        this.publicListener.set(!on);
+        box.checked = !on;
+        this.said.set(serverSaid(e, 'Could not change that.'));
+      },
     });
   }
 

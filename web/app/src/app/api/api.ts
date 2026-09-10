@@ -346,6 +346,24 @@ export class AdminApi {
     return this.http.post<void>('/admin/overlap', { overlap: seconds });
   }
 
+  /** Open or close the listener page to callers with no account. */
+  setPublicListener(on: boolean): Observable<void> {
+    return this.http.post<void>('/admin/public-listener', { public_listener: on });
+  }
+
+  /** Whether the model may describe a song nothing could be looked up about. */
+  setRecall(on: boolean): Observable<void> {
+    return this.http.post<void>('/admin/recall', { recall: on });
+  }
+
+  /**
+   * Clear the dossiers with no meaning that predate the current enrichment
+   * settings, so the enricher writes them again. Answers with how many.
+   */
+  redoDossiers(): Observable<{ cleared: number }> {
+    return this.http.post<{ cleared: number }>('/admin/redo-dossiers', {});
+  }
+
   setEnriching(on: boolean): Observable<{ said: string }> {
     return this.http.post<{ said: string }>('/admin/enriching', { enriching: on });
   }

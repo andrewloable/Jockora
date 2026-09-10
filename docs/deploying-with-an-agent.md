@@ -235,8 +235,8 @@ version tag (`v*`) publishes multi-arch (`linux/amd64`, `linux/arm64`) images
 to Docker Hub and GHCR via CI, so there is usually nothing to build:
 
 ```sh
-ssh user@host 'docker pull andrewloable/jockora:v0.2.0'
-# or: ghcr.io/andrewloable/jockora:v0.2.0
+ssh user@host 'docker pull andrewloable/jockora:v0.3.0'
+# or: ghcr.io/andrewloable/jockora:v0.3.0
 ```
 
 This skips the rsync, skips needing npm/Go/pip network access on the target
@@ -254,7 +254,7 @@ rsync -az --delete \
   --exclude '*.db' --exclude 'segments/' --exclude 'models/' \
   ./ user@host:/path/to/src/
 
-ssh user@host 'cd /path/to/src && docker build -t jockora:v0.2 .'
+ssh user@host 'cd /path/to/src && docker build -t jockora:v0.3 .'
 ```
 
 The Dockerfile is multi-stage and self-contained: a Node stage builds the
@@ -266,7 +266,7 @@ pip.
 than the Go code alone, because the browser bundle is embedded in it:
 
 ```sh
-docker run --rm --entrypoint sh andrewloable/jockora:v0.2.0 -c 'ls -l /usr/local/bin/jockora'
+docker run --rm --entrypoint sh andrewloable/jockora:v0.3.0 -c 'ls -l /usr/local/bin/jockora'
 # ~12-13 MB. Much smaller means the web stage did not run.
 ```
 
@@ -277,7 +277,7 @@ docker run --rm --entrypoint sh andrewloable/jockora:v0.2.0 -c 'ls -l /usr/local
 ```yaml
 services:
   jockora:
-    image: andrewloable/jockora:v0.2.0  # or jockora:v0.2 if built locally in step 5
+    image: andrewloable/jockora:v0.3.0  # or jockora:v0.3 if built locally in step 5
     container_name: jockora
     restart: always
     networks: [server-network]

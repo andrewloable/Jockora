@@ -461,7 +461,7 @@ func (s *Store) StationTrackPage(ctx context.Context, id int64, limit, offset in
 		  FROM station_tracks st
 		  JOIN tracks t ON t.id = st.track_id
 		  JOIN effective_tags e ON e.track_id = t.id
-		 WHERE st.station_id = ? ORDER BY ` + playlistOrderBy(sort, desc) + ` LIMIT ? OFFSET ?`,
+		 WHERE st.station_id = ? ORDER BY `+playlistOrderBy(sort, desc)+` LIMIT ? OFFSET ?`,
 		id, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("store: reading station %d playlist: %w", id, err)

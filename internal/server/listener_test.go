@@ -10,13 +10,21 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/andrewloable/jockora/internal/store"
 )
 
 // listenTuner is the listener side of the app, faked.
+//
+// GUARDED, because the real one is reached from many request goroutines at
+// once and this stands in for it. Unguarded, every concurrent test of the
+// listener routes reported a race in the DOUBLE and hid whatever the
+// production code was or was not doing -- which is why there were no
+// concurrent tests of them at all.
 type listenTuner struct {
+	mu       sync.Mutex
 	stations []DialStation
 	err      error
 
@@ -27,11 +35,22 @@ type listenTuner struct {
 	fbStation    int64
 }
 
+// tuned reports what the last Tune was told, safely.
+func (l *listenTuner) tuned() (int64, string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.tunedTo, l.tunedSession
+}
+
 func (l *listenTuner) Dial(context.Context) ([]DialStation, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	return l.stations, l.err
 }
 
 func (l *listenTuner) Tune(_ context.Context, session string, id int64) (string, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	for _, st := range l.stations {
 		if st.ID == id {
 			l.tunedTo, l.tunedSession = id, session
@@ -42,6 +61,8 @@ func (l *listenTuner) Tune(_ context.Context, session string, id int64) (string,
 }
 
 func (l *listenTuner) Feedback(_ context.Context, userID, stationID int64, verdict string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.err != nil {
 		return l.err
 	}

@@ -330,7 +330,104 @@ evening without stopping the station.
 already exposes its class of information to anyone who can reach the stream, so
 gating it would break the player and protect nothing. Everything under
 `/admin/` requires the admin role, and the listener endpoints require a signed-in
-listener.
+listener — unless public listening is on.
+
+### Letting the DJ describe songs nothing was looked up about
+
+The overview has a second switch with real consequences: **"Let the DJ describe
+songs the library could not look up."** Off by default.
+
+Enrichment has exactly two external sources. LRCLIB supplies lyrics, and it has
+synced words for about 41% of a real library. MusicBrainz supplies four
+primitives about the artist — country, group or person, founding year, and a
+disambiguation note — and nothing else. There is **no web search anywhere in
+this program.** So for the other half of a library the DJ has nothing to say
+about the song itself and falls back to personality.
+
+With this on, the model fills `subject_summary` and `themes` from its own
+knowledge for exactly those tracks. **That is a deliberate weakening of the rule
+the whole DJ design rests on** — that the DJ may only assert what a named source
+supplied — and it is opt-in for that reason.
+
+It is bounded as tightly as it can be:
+
+- **Two fields only.** Artist facts still need a real MusicBrainz hit, the
+  release still comes from the file's own tags, and `notable_line` stays empty
+  because a lyric quoted from memory is a misquote.
+- **Lyrics always win.** Recall applies only where LRCLIB found nothing.
+- **The model must commit.** The schema gains a required `recognised` boolean,
+  so declining is something the sampler can express. A `false` blanks both
+  fields. Telling a small model to "leave it empty if you do not know" does not
+  work; making the refusal representable does.
+- **It is labelled.** Every recalled dossier carries `model` in its `sources`,
+  beside `musicbrainz` and `lrclib`, so what grounded a break stays traceable.
+
+**Measured on gemma-4-E4B-it-Q6_K**, 12 tracks: 7 of 8 real songs described,
+every description accurate, including a Filipino OPM track; 0 of 4 invented
+titles described. The one refusal was a genuinely obscure OPM record, which is
+the conservative direction. That is one model and a small sample — re-run
+`TestLiveRecall` in `internal/enrich/` against your own model before trusting it.
+
+Obscure libraries benefit least: a model refuses what it does not know, which is
+correct and also means an OPM- or bootleg-heavy library will see fewer tracks
+gain meaning than a mainstream one.
+
+#### It does nothing until you clear the old dossiers
+
+A dossier is written once and kept for the life of the library, and the
+enrichment queue only ever visits tracks that have **no dossier row at all**. So
+turning this on changes nothing about a library that is already enriched.
+
+The overview says how many stored dossiers say nothing about what the track is
+about **and were written before you changed this setting**, and offers **Clear
+and re-enrich**. That deletes only those rows — a dossier built from real lyrics
+is never touched — and wakes the enrichment worker, which parks itself once
+there is no work left. Those tracks leave the dial until their replacement
+lands, which is why it is a button and not something that happens on its own.
+
+**The cutoff is what stops it looping.** Recall does not rescue every track: a
+model refuses what it does not know, so re-enrichment writes a fresh empty
+dossier for each track it still cannot describe. Without a cutoff the console
+would offer to clear those too, you would spend a night of model time
+reproducing them exactly, and it would offer again. Only rows written under the
+older setting are ever offered, so the button empties itself and stays empty.
+
+Turning the setting off and on again re-stamps the cutoff, which offers every
+meaningless dossier written before that moment for another try. That is the
+escape hatch if you change models. It never re-offers a dossier that says
+something: those are only ever written once.
+
+### Letting anyone listen
+
+The overview has one switch that changes **who can reach the product**: *Anyone
+can listen without signing in*. Off by default, and off is what an install that
+has never been asked stays.
+
+With it on, the dial (`/stations.json`), tuning (`POST /tune`) and the stream
+(`/hls/…`) answer callers with no account at all. **The console is not affected
+and cannot be.** The switch only ever opens the listener role, so every
+`/admin/` route keeps asking for an operator account whatever it is set to —
+which is what makes leaving it on a decision about the dial rather than a
+decision about the server.
+
+Two things a guest does not get:
+
+- **A thumbs-down.** A verdict is recorded against an account, and an unowned
+  one in the feed the console reports as what listeners said would be worse
+  than none. The control is absent for a guest rather than present and failing.
+- **A thirty-day session.** A guest carries a `jockora_guest` cookie that lasts
+  a day and does nothing but tell one browser from another, so presence can
+  start and stop the station they are on. It is not a credential and it is
+  deliberately not the session cookie.
+
+The setting outlives a restart, in both directions. It is stored in the
+database rather than in a flag, for the same reason the cadence is: a door that
+silently reopened on every restart is one nobody can rely on having shut.
+
+**It is a door onto whatever network can reach this server**, which on the usual
+plain-HTTP LAN install is the whole house and anything else on that subnet.
+Combined with `-allow-lan` it is the whole local network. Leave it off unless
+that is what you want.
 
 Create the first operator account from the machine running the server:
 

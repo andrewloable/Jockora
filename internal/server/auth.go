@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 	"sync"
 	"time"
 
@@ -24,6 +25,18 @@ const SessionCookie = "jockora_session"
 
 // SessionLife is how long a login lasts before it has to be repeated.
 const SessionLife = 30 * 24 * time.Hour
+
+// GuestCookie names the presence key a guest carries while public listening is
+// on. A SEPARATE NAME from the session, not a second value under the same one:
+// presence needs to tell one browser from another and nothing more, and an
+// unsigned random id sharing a name with a signed token is how the two get
+// confused by the next person to read this.
+const GuestCookie = "jockora_guest"
+
+// GuestLife is how long that key lasts. A day, because it identifies a browser
+// for as long as somebody might leave the radio on, and nothing is attributed
+// to it that would be worth keeping longer.
+const GuestLife = 24 * time.Hour
 
 // Login rate limiting. Small enough to stop a password being guessed, large
 // enough that a person mistyping theirs is never locked out.
@@ -170,15 +183,19 @@ func (s *Server) cookie(r *http.Request, value string, maxAge int) *http.Cookie 
 
 // serveMe says who the caller is.
 func (s *Server) serveMe(w http.ResponseWriter, r *http.Request) {
-	_, user, err := s.session(r)
-	if err != nil {
-		http.Error(w, "sign in", http.StatusUnauthorized)
-		return
+	// A GUEST UNLESS THE COOKIE SAYS OTHERWISE, and no 401 of its own: this
+	// handler is behind require(RoleListener), which is the gate. Somebody with
+	// no session only gets here while public listening is open, so a second
+	// check on it would be a branch nothing can reach -- and an unreachable
+	// guard is one nobody can prove still works.
+	name, role := "", auth.RoleGuest
+	if _, user, err := s.session(r); err == nil {
+		name, role = user.Name, user.Role
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	if err := json.NewEncoder(w).Encode(map[string]any{
-		"name": user.Name, "role": user.Role,
+		"name": name, "role": role,
 	}); err != nil {
 		s.log.Warn("writing /me", "err", err)
 	}
@@ -230,6 +247,14 @@ func (s *Server) require(role string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_, user, err := s.session(r)
 		if err != nil {
+			// THE LISTENER GATE ONLY, and only while the operator has opened
+			// it. RoleAdmin never reaches this branch, so the console asks for
+			// a login whatever public listening is set to -- which is the
+			// whole point of the switch being safe to leave on.
+			if role == auth.RoleListener && s.publicListening() {
+				h(w, r)
+				return
+			}
 			http.Error(w, "sign in", http.StatusUnauthorized)
 			return
 		}
@@ -247,13 +272,56 @@ func (s *Server) require(role string, h http.HandlerFunc) http.HandlerFunc {
 // exist: a listener is their signed session, and nobody else is served.
 func (s *Server) sessionFromCookie(w http.ResponseWriter, r *http.Request) (string, bool) {
 	sess, _, err := s.session(r)
-	if err != nil {
-		return "", false
+	if err == nil {
+		// The SIGN-IN, not the account: two devices on one household account
+		// are two listeners, and keying on the user would make the second one
+		// move the first one's station.
+		return sess.SID, true
 	}
-	// The SIGN-IN, not the account: two devices on one household account are
-	// two listeners, and keying on the user would make the second one move the
-	// first one's station.
-	return sess.SID, true
+	// A GUEST IS STILL A LISTENER as far as presence is concerned. Without a
+	// key of their own they would stream a station that nobody was counted on,
+	// and it would stop underneath them at the end of the grace period.
+	if s.publicListening() {
+		return s.guestSession(w, r), true
+	}
+	return "", false
+}
+
+// publicListening reports whether the listener half is open to anyone.
+//
+// FALSE WHENEVER THERE IS NO ADMIN SURFACE, which is the spike path and every
+// test that wires only what it is testing. A missing capability must read as
+// "closed": defaulting the other way would open a stream on any server that had
+// not got round to answering the question.
+func (s *Server) publicListening() bool {
+	return s.admin != nil && s.admin.PublicListener()
+}
+
+// guestKey is the exact shape newSID mints: twelve random bytes as hex.
+//
+// THE VALUE IS THE CALLER'S TO CHOOSE, and without this it was taken verbatim
+// as a presence identity -- a four-kilobyte cookie became a four-kilobyte map
+// key in the tracker, once per request, held for the grace period. A signed
+// listener's SID arrives inside a token nobody can forge; a guest's arrives in
+// a plain cookie, so the shape is the only check there is.
+//
+// Anyone can still mint themselves many VALID keys. That is inherent to
+// cookie-based presence and it is bounded by the grace period; what this stops
+// is the content and the size being theirs as well.
+var guestKey = regexp.MustCompile(`^[0-9a-f]{24}$`)
+
+// guestSession returns this browser's presence key, minting one if it has none
+// -- or if the one it brought is not a key this server ever issued.
+func (s *Server) guestSession(w http.ResponseWriter, r *http.Request) string {
+	if c, err := r.Cookie(GuestCookie); err == nil && guestKey.MatchString(c.Value) {
+		return c.Value
+	}
+	id := newSID()
+	http.SetCookie(w, &http.Cookie{
+		Name: GuestCookie, Value: id, Path: "/", MaxAge: int(GuestLife.Seconds()),
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil,
+	})
+	return id
 }
 
 // newSID mints the identifier that distinguishes one sign-in from another.
