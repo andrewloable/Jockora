@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/andrewloable/jockora/internal/mix"
 	"github.com/andrewloable/jockora/internal/station"
@@ -133,4 +134,94 @@ func TestBoundaryBufferedSecondsWithoutARing(t *testing.T) {
 	if got := bufferedSeconds(&station.Runtime{}); got != 0 {
 		t.Errorf("bufferedSeconds with no ring = %v, want 0", got)
 	}
+}
+
+// TestHoldForBreakMakesTheHole: Jockora-ey4. The break is spliced to start
+// before the outgoing track runs out, so by the time the music stops the DJ is
+// already talking. Holding the next track back for the rest of the break is
+// what puts the incoming record under the DJ's LAST words rather than under all
+// of them.
+func TestHoldForBreakMakesTheHole(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("silence lands in the ring", func(t *testing.T) {
+		rt := station.NewRuntime(station.Deps{}, 1, t.TempDir())
+		feedSilence(ctx, rt.Ring(), 0.5)
+		if got := rt.Ring().Occupancy(); got != 500*time.Millisecond {
+			t.Errorf("the hole is %v of audio, want 500ms", got)
+		}
+	})
+
+	t.Run("no break, no hole", func(t *testing.T) {
+		// Most boundaries carry no break at all, and holding the music for one
+		// of those is dead air with nothing over it.
+		rt := station.NewRuntime(station.Deps{}, 1, t.TempDir())
+		for _, seconds := range []float64{0, -1} {
+			feedSilence(ctx, rt.Ring(), seconds)
+		}
+		if got := rt.Ring().Occupancy(); got != 0 {
+			t.Errorf("an empty gap still wrote %v", got)
+		}
+	})
+
+	t.Run("a cancelled feed stops part way", func(t *testing.T) {
+		// The station is going off air. Filling the whole hole first would
+		// block the shutdown for the length of a break.
+		stopped, cancel := context.WithCancel(ctx)
+		cancel()
+		rt := station.NewRuntime(station.Deps{}, 1, t.TempDir())
+		feedSilence(stopped, rt.Ring(), 5)
+		if got := rt.Ring().Occupancy(); got != 0 {
+			t.Errorf("a cancelled feed wrote %v", got)
+		}
+	})
+
+	t.Run("a full ring that never drains gives up rather than spinning", func(t *testing.T) {
+		// THE HOLE CANNOT ALWAYS BE FILLED. feedRing waits for space when the
+		// ring is full, so a station shutting down mid-gap has to come back out
+		// of that wait -- otherwise the feed goroutine outlives the station by
+		// the length of a break, holding the ring it was told to stop writing.
+		//
+		// Deterministic rather than timing-dependent: the ring is filled to
+		// capacity here and nothing is draining it, so the write CANNOT
+		// proceed and the deadline is the only way out.
+		rt := station.NewRuntime(station.Deps{}, 1, t.TempDir())
+		full := make([]mix.Frame, station.RingSeconds*mix.SampleRate)
+		if n := rt.Ring().Write(full); n != len(full) {
+			t.Fatalf("filled %d of %d frames", n, len(full))
+		}
+		deadline, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+		defer cancel()
+
+		done := make(chan struct{})
+		go func() { defer close(done); feedSilence(deadline, rt.Ring(), 5) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("feedSilence never returned; the feed goroutine is stuck on a full ring")
+		}
+	})
+
+	t.Run("a runtime with no ring is not a crash", func(t *testing.T) {
+		// Several tests build a Runtime directly and a zero-valued one has no
+		// ring. This runs on the feed goroutine, where a panic ends the feed.
+		feedSilence(ctx, (&station.Runtime{}).Ring(), 3)
+	})
+
+	t.Run("the pipeline is asked, and only once", func(t *testing.T) {
+		a := &App{}
+		rt := station.NewRuntime(station.Deps{}, 1, t.TempDir())
+
+		// No break machinery at all is a shuffle, and it holds nothing.
+		a.holdForBreak(ctx, rt, 2)
+		if got := rt.Ring().Occupancy(); got != 0 {
+			t.Errorf("a station with no pipeline held the music for %v", got)
+		}
+
+		a.opts.Breaks = &station.Pipeline{Cadence: station.NewCadence(1)}
+		a.holdForBreak(ctx, rt, 2)
+		if got := rt.Ring().Occupancy(); got != 0 {
+			t.Errorf("a boundary with no scheduled break held %v", got)
+		}
+	})
 }

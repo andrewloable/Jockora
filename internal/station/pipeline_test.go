@@ -536,61 +536,112 @@ func TestOverlapStartsTheBreakBeforeTheBoundary(t *testing.T) {
 	if entries[0].Placement != "outro" {
 		t.Errorf("placement = %q, want outro", entries[0].Placement)
 	}
+
+	// AND NO HOLE, WHICH IS CORRECT HERE AND WORTH PINNING. This break is six
+	// seconds and the overlap is three at each end, so the two records meet in
+	// the middle of it with nothing left over. A hole would mean silence that
+	// the break is not long enough to pay for.
+	//
+	// THE BOUNDARY INDEX MATTERS AS MUCH AS THE NUMBER: a gap filed against the
+	// wrong boundary is silence in front of a record nobody is talking over.
+	if got := p.TakeGap(4); got != 0 {
+		t.Errorf("a %gs break with %gs at each end left a %gs hole; there is "+
+			"nothing left of it to hold the music with", 6.0, 3.0, got)
+	}
+	if got := p.TakeGap(3); got != 0 {
+		t.Errorf("boundary 3 claimed a gap of %g, and no break was scheduled there", got)
+	}
 }
 
-func TestOverlapNeverExceedsTheMeasuredOutro(t *testing.T) {
-	// THE GTA RULE. A flat lead-in on a track whose instrumental tail is one
-	// second talks over the singing, which is the defect Jockora-8om was filed
-	// for. The measurement caps the setting, never the other way round.
+func TestOverlapIgnoresWhatTheTrackIsDoing(t *testing.T) {
+	// THE GTA RULE IS OFF, BY INSTRUCTION. The overlap used to be capped by the
+	// outgoing track's measured instrumental outro and the incoming track's
+	// measured intro, so that a break could never land over singing. The
+	// operator has said to disregard that: the configured number applies to
+	// every break at both ends, whatever the track does.
+	//
+	// So a record that sings to its final second gets talked over for three of
+	// them, and so does one that starts singing immediately. That is the
+	// instruction rather than an oversight, and this test is the record of it.
+	// The setting is the only bound left; 0 turns the behaviour off entirely.
 	for _, c := range []struct {
-		name    string
-		outro   float64
-		overlap float64
-		want    float64
+		name  string
+		track *Track
 	}{
-		{"setting is the smaller", 20, 3, 3},
-		{"outro is the smaller", 1, 3, 1},
-		{"no overlap configured", 20, 0, 0},
+		{"a long measured tail", lrcTrack(0, 20)},
+		// The case the old cap existed for: one second of instrumental, or
+		// none at all, at a confidence the placement code trusts.
+		{"one second of tail, measured", lrcTrack(1, 1)},
+		{"no tail at all, measured", lrcTrack(0, 0)},
+		{"never measured", &Track{DurationS: 200}},
+		{"measured but not trusted", &Track{DurationS: 200, OutroS: 20, RampConfidence: enrich.ConfidenceNone}},
+		{"no track at all", nil},
 	} {
-		got := leadIn(mix.PlacementOutro, lrcTrack(0, c.outro), c.overlap)
-		if got != c.want {
-			t.Errorf("%s: leadIn = %g, want %g", c.name, got, c.want)
+		if got := gapFor(15, 3); got != 9 {
+			t.Errorf("%s: gapFor = %g, want 9", c.name, got)
 		}
-	}
-	// AN UNMEASURED OUTRO GETS NOTHING. Most of a library is unmeasured until
-	// the enricher reaches it, and guessing there is exactly how a break lands
-	// over a vocal.
-	if got := leadIn(mix.PlacementOutro, &Track{DurationS: 200}, 3); got != 0 {
-		t.Errorf("an unmeasured outro gave a lead-in of %g, want 0", got)
-	}
-	// AND NEITHER DOES A NUMBER NOBODY TRUSTS. This is the case the zero test
-	// above cannot see: a track can carry an outro of twenty seconds at a
-	// confidence usableRamp rejects -- a guess from a duration heuristic rather
-	// than synced lyrics or analysis. min() would happily return three seconds
-	// of it. Dropping the confidence check survives every other assertion here,
-	// which is how this case came to be written.
-	guessed := &Track{DurationS: 200, OutroS: 20, RampConfidence: enrich.ConfidenceNone}
-	if got := leadIn(mix.PlacementOutro, guessed, 3); got != 0 {
-		t.Errorf("an untrusted outro measurement gave a lead-in of %g, want 0", got)
-	}
-	if got := leadIn(mix.PlacementOutro, nil, 3); got != 0 {
-		t.Errorf("a nil track gave a lead-in of %g, want 0", got)
+		// The track is not consulted at all any more, which is the assertion:
+		// there is no longer a function that takes one.
+		_ = c.track
 	}
 }
 
-func TestOverlapOnlyAppliesToBreaksAboutTheOutgoingTrack(t *testing.T) {
-	// A RAMP BREAK INTRODUCES THE INCOMING RECORD. Starting it early would put
-	// it over the outgoing track's ending -- announcing the next song over the
-	// end of the last one, which is precisely Jockora-8om.
-	for placement, want := range map[mix.Placement]float64{
-		mix.PlacementRamp:    0,
-		mix.PlacementBetween: 0,
-		mix.PlacementOutro:   3,
-		mix.PlacementSpan:    3,
+func TestGapIsWhatIsLeftOfTheBreak(t *testing.T) {
+	// The outgoing record ends one overlap into the break and the incoming one
+	// starts one overlap before it finishes, so the hole is the remainder.
+	for _, c := range []struct {
+		name             string
+		seconds, overlap float64
+		want             float64
+	}{
+		{"the ordinary case", 15, 3, 9},
+		{"no overlap configured leaves the whole break in the hole", 15, 0, 15},
+		{"a wider overlap eats into it", 15, 6, 3},
+		// A break shorter than its own two overlaps needs no hole: the records
+		// simply overlap it by less than was asked for, because there is not
+		// enough break to overlap. Negative silence is not a thing the feed
+		// could act on even if it were asked to.
+		{"break shorter than its overlaps", 5, 3, 0},
+		{"exactly its overlaps", 6, 3, 0},
 	} {
-		if got := leadIn(placement, lrcTrack(0, 20), 3); got != want {
-			t.Errorf("%s: leadIn = %g, want %g", placement, got, want)
+		if got := gapFor(c.seconds, c.overlap); got != c.want {
+			t.Errorf("%s: gapFor = %g, want %g", c.name, got, c.want)
 		}
+	}
+}
+
+func TestTakeGapAnswersOnceAndOnlyForABreakThatWasScheduled(t *testing.T) {
+	p := &Pipeline{}
+	// A boundary nobody scheduled a break for is the ordinary case, and it
+	// holds the music for exactly no time.
+	if got := p.TakeGap(7); got != 0 {
+		t.Errorf("an unclaimed boundary gave a gap of %g, want 0", got)
+	}
+
+	p.setGap(7, 9)
+	if got := p.TakeGap(7); got != 9 {
+		t.Errorf("TakeGap = %g, want 9", got)
+	}
+	// CONSUMED. A feed that asks twice must not hold the music twice.
+	if got := p.TakeGap(7); got != 0 {
+		t.Errorf("TakeGap answered twice: %g", got)
+	}
+
+	// Zero and negative are not recorded at all, so the map does not fill up
+	// with boundaries that mean nothing.
+	p.setGap(8, 0)
+	p.setGap(9, -1)
+	if got := p.TakeGap(8) + p.TakeGap(9); got != 0 {
+		t.Errorf("an empty gap was recorded: %g", got)
+	}
+
+	// A NEW FEED COUNTS BOUNDARIES FROM ZERO. A gap left by the run that just
+	// ended would be collected by the next one and hold the music for a break
+	// nobody is about to hear.
+	p.setGap(3, 9)
+	p.SetQueue(nil, nil)
+	if got := p.TakeGap(3); got != 0 {
+		t.Errorf("a gap survived the feed restart: %g", got)
 	}
 }
 
@@ -647,5 +698,86 @@ func TestOverlapDeadlineMovesWithTheLeadIn(t *testing.T) {
 	// person tuning the lookahead cannot see why the budget shrank.
 	if !strings.Contains(out, "lead_in_s=3") {
 		t.Errorf("the late line does not carry the lead-in:\n%s", out)
+	}
+}
+
+// TestPipelineWhatTheListenerActuallyHears: Jockora-ey4, and the assertion the
+// first pass at it was missing.
+//
+// The earlier test proved a gap was CLAIMED and nothing more. A gap of the
+// wrong size still passes that, and the wrong size is the whole failure mode:
+// the operator asked for three seconds of the outgoing record under the start
+// of the break and three seconds of the incoming record under its end, and
+// "some gap exists" is not that. This reconstructs the three positions the way
+// a listener meets them and measures both overlaps.
+func TestPipelineWhatTheListenerActuallyHears(t *testing.T) {
+	const (
+		boundaryS = 240.0 // where the outgoing record's audio runs out
+		breakS    = 15.0  // what the renderer produced
+		overlap   = 3.0
+	)
+	clk := clock.NewFake(time.Unix(1_700_000_000, 0))
+	p, _, q := newPipeline(t, clk, 20*time.Second, breakS)
+	p.SetOverlap(overlap)
+
+	for i := 1; i <= 4; i++ {
+		p.Announce(Boundary{
+			Index: i,
+			// NEITHER TRACK IS MEASURED, which is the fixture that matters
+			// now. The old rule gave a pair like this no overlap at all -- it
+			// is two thirds of the reporting library -- and the operator has
+			// said to disregard that rule, so the full three seconds must land
+			// on both ends of a break between two records nothing is known
+			// about.
+			Cur: &Track{DurationS: 200}, Next: &Track{DurationS: 200},
+			InsertionAt:     float64(i) * 60,
+			InsertionSample: int64(float64(i) * 60 * mix.SampleRate),
+		})
+	}
+	if _, err := p.Tick(context.Background(), boundaryS-150); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	entries := q.DrainDue(1 << 62)
+	if len(entries) != 1 {
+		t.Fatalf("got %d scheduled entries, want 1", len(entries))
+	}
+
+	// The three things a listener meets, all on the mixer's timeline.
+	spliceS := float64(entries[0].AfterSample) / mix.SampleRate
+	gapS := p.TakeGap(4)
+	nextStartsS := boundaryS + gapS
+	breakEndsS := spliceS + breakS
+
+	// THE OUTGOING RECORD plays until the boundary, and the DJ starts before
+	// it. What overlaps is the distance between those.
+	if got := boundaryS - spliceS; got != overlap {
+		t.Errorf("the outgoing record overlaps the break by %gs, want %gs\n"+
+			"the break is spliced at %gs and the record runs out at %gs",
+			got, overlap, spliceS, boundaryS)
+	}
+
+	// THE INCOMING RECORD starts once the hole closes, and the DJ is still
+	// talking. What overlaps is the distance between those.
+	if got := breakEndsS - nextStartsS; got != overlap {
+		t.Errorf("the break overlaps the incoming record by %gs, want %gs\n"+
+			"the break ends at %gs and the record starts at %gs (a %gs hole "+
+			"after the boundary at %gs)",
+			got, overlap, breakEndsS, nextStartsS, gapS, boundaryS)
+	}
+
+	// AND THE HOLE IS THE REMAINDER, which is the number an operator hears as
+	// silence and the one worth naming in a failure.
+	if want := breakS - 2*overlap; gapS != want {
+		t.Errorf("the music pauses for %gs, want %gs", gapS, want)
+	}
+
+	// NOTHING IS PLAYED TWICE AND NOTHING IS SKIPPED: the outgoing record ends
+	// exactly where the hole begins, and the incoming one begins exactly where
+	// it ends. Stated as a total because that is the property that breaks if
+	// any one of the three terms drifts.
+	if got := (boundaryS - spliceS) + gapS + (breakEndsS - nextStartsS); got != breakS {
+		t.Errorf("the three pieces sum to %gs of break, but the audio is %gs; "+
+			"the record and the hole disagree about where the boundary is", got, breakS)
 	}
 }

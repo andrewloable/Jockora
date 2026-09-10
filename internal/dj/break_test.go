@@ -23,6 +23,20 @@ func dossierWith(confidence string, facts ...string) *enrich.Dossier {
 	}
 }
 
+// factsDossier is a dossier that knows NOTHING about the song, which is now the
+// only condition under which artist facts and the release are offered at all.
+//
+// The mechanism tests below are about ids resolving, not about the policy that
+// decides which ids exist; they say "given a fact, does its id work". Since
+// Jockora-ey4's sibling change the answer is only interesting for a dossier
+// with no meaning, because one that has meaning is shown no facts to resolve.
+func factsDossier(confidence string, facts ...string) *enrich.Dossier {
+	d := dossierWith(confidence, facts...)
+	d.SubjectSummary = ""
+	d.Themes = nil
+	return d
+}
+
 func TestBreakValidBreakParses(t *testing.T) {
 	b, err := ParseBreak(`{"opening":"Three in the morning.","body":"That was a record about leaving.",
 		"handoff":"Stay where you are.","asserted_facts":["cur.artist_facts[0]"]}`)
@@ -49,8 +63,8 @@ func TestBreakMalformedJSON(t *testing.T) {
 }
 
 func TestBreakFactIDResolves(t *testing.T) {
-	cur := dossierWith(enrich.ConfidenceHigh, "The band formed in 1980.")
-	b := &Break{AssertedFacts: []string{"cur.artist_facts[0]", "cur.subject_summary", "cur.mood"}}
+	cur := factsDossier(enrich.ConfidenceHigh, "The band formed in 1980.")
+	b := &Break{AssertedFacts: []string{"cur.artist_facts[0]", "cur.mood"}}
 
 	if err := ResolveFacts(b, nil, cur, nil); err != nil {
 		t.Fatalf("ResolveFacts: %v", err)
@@ -145,10 +159,21 @@ func TestBreakFactEnumBuiltFromResolvableIds(t *testing.T) {
 
 	ids := ResolvableFactIDs(nil, cur, next)
 
-	for _, want := range []string{"cur.artist_facts[0]", "cur.artist_facts[1]",
-		"cur.subject_summary", "cur.station_tags", "cur.mood"} {
+	for _, want := range []string{"cur.subject_summary", "cur.station_tags", "cur.mood"} {
 		if !containsStr(ids, want) {
 			t.Errorf("resolvable ids missing %q: %v", want, ids)
+		}
+	}
+	// THE ENUM CARRIES THE SAME BUDGET THE PROMPT DOES. This dossier has a
+	// subject summary, so it offers one artist fact and not the old three: an
+	// id the writer was never shown is what makes a hosted model send the fact
+	// TEXT instead of the label, and every fact-bearing break then drops as
+	// ungrounded -- measured live on the first break after a host switch.
+	for _, gone := range []string{"cur.artist_facts[0]", "cur.artist_facts[1]", "cur.release"} {
+		if containsStr(ids, gone) {
+			t.Errorf("the enum offers %q beside a subject summary; the prompt "+
+				"withholds it, and an id the writer never saw is how a hosted "+
+				"model comes to declare the sentence instead of the label", gone)
 		}
 	}
 	for _, banned := range ids {
@@ -160,7 +185,34 @@ func TestBreakFactEnumBuiltFromResolvableIds(t *testing.T) {
 		t.Error("an id was offered for a fact that does not exist")
 	}
 
-	schema := BreakSchema(nil, cur, next)
+	// AND A DOSSIER WITH NO MEANING STILL OFFERS THREE, because there the facts
+	// are all the writer has.
+	blank := dossierWith(enrich.ConfidenceHigh, "One.", "Two.", "Three.", "Four.")
+	blank.SubjectSummary = ""
+	blank.Themes = nil
+	blankIDs := ResolvableFactIDs(nil, blank, nil)
+	for _, want := range []string{"cur.artist_facts[0]", "cur.artist_facts[1]", "cur.artist_facts[2]"} {
+		if !containsStr(blankIDs, want) {
+			t.Errorf("a dossier with no meaning is missing %q: %v", want, blankIDs)
+		}
+	}
+	if containsStr(blankIDs, "cur.artist_facts[3]") {
+		t.Error("more facts than the prompt shows")
+	}
+
+	// THEMES RESOLVE NOW. They were stored on half this library and no id
+	// pointed at them, so the sampler could not emit one even where the dossier
+	// had them.
+	themed := dossierWith(enrich.ConfidenceHigh, "One.")
+	themed.Themes = []string{"leaving"}
+	if !containsStr(ResolvableFactIDs(nil, themed, nil), "cur.themes") {
+		t.Error("themes are not assertable")
+	}
+	if text, ok := ResolveFactText("cur.themes", nil, themed, nil); !ok || text != "leaving" {
+		t.Errorf("ResolveFactText for themes = %q, %v", text, ok)
+	}
+
+	schema := BreakSchema(nil, blank, next)
 	raw := mustJSONString(t, schema)
 	if !strings.Contains(raw, "cur.artist_facts[0]") {
 		t.Error("the schema enum omits a resolvable id")

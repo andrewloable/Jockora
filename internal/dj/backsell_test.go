@@ -13,7 +13,7 @@ import (
 func TestBacksellOutroPromptIncludesPreviousTrack(t *testing.T) {
 	got, err := BuildBreakPrompt(PromptInput{
 		Persona:        testPersona(t),
-		Previous:       dossierWith(enrich.ConfidenceHigh, "Recorded in one take."),
+		Previous:       factsDossier(enrich.ConfidenceHigh, "Recorded in one take."),
 		PreviousArtist: "New Order",
 		PreviousTitle:  "Blue Monday",
 		Current:        testDossier(2),
@@ -65,8 +65,8 @@ func TestBacksellRampPromptDoesNotBacksell(t *testing.T) {
 }
 
 func TestBacksellFactsResolveAgainstPreviousTrack(t *testing.T) {
-	prev := dossierWith(enrich.ConfidenceHigh, "Recorded in one take.")
-	cur := dossierWith(enrich.ConfidenceHigh, "A different fact.")
+	prev := factsDossier(enrich.ConfidenceHigh, "Recorded in one take.")
+	cur := factsDossier(enrich.ConfidenceHigh, "A different fact.")
 
 	ids := ResolvableFactIDs(prev, cur, nil)
 	if !containsStr(ids, "prev.artist_facts[0]") {

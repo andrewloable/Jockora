@@ -111,24 +111,109 @@ func TestPromptTruncatesProhibitionsNotPersona(t *testing.T) {
 	}
 }
 
-func TestPromptIncludesOnlyThreeFacts(t *testing.T) {
+func TestPromptTradesTriviaForMeaning(t *testing.T) {
+	// THE WRITER TALKS ABOUT WHAT IS ON THE TABLE, and the table was three
+	// parts trivia to one part meaning. Measured on the reporting library:
+	// artist_facts on 87.6% of dossiers, release on 82.7%, subject_summary on
+	// 49.5% -- and the operator reported the DJ saying the year, the country
+	// and the album over and over.
+	//
+	// So a track whose meaning is known offers ONE fact, and one whose meaning
+	// is not offers the old three, because there it is all the writer has.
+	meaning := testDossier(10)
+	if got, err := BuildBreakPrompt(PromptInput{
+		Persona: testPersona(t), Current: meaning, WindowSeconds: 9,
+	}); err != nil {
+		t.Fatal(err)
+	} else if n := strings.Count(got, "  fact ["); n != 0 {
+		t.Errorf("%d artist facts offered beside a subject summary, want none: "+
+			"the MusicBrainz record holds Country, Type and BeginYear and "+
+			"nothing else, so any budget above zero is spent on the year or "+
+			"the country the operator asked the DJ to stop saying", n)
+	} else if strings.Contains(got, "release [cur") {
+		t.Error("the release was offered beside a subject summary; it is " +
+			"\"Album, Year\" and it is the easiest line here to recite")
+	}
+
+	blank := testDossier(10)
+	blank.SubjectSummary = ""
+	blank.Themes = nil
 	got, err := BuildBreakPrompt(PromptInput{
-		Persona:       testPersona(t),
-		Current:       testDossier(10),
-		WindowSeconds: 9,
+		Persona: testPersona(t), Current: blank, WindowSeconds: 9,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Each fact now carries the id the schema will accept for it, so the
-	// model can name the label instead of declaring the sentence.
 	if n := strings.Count(got, "  fact ["); n != MaxFactsInPrompt {
-		t.Errorf("%d facts in the prompt, want exactly %d", n, MaxFactsInPrompt)
+		t.Errorf("%d facts offered with no meaning to offer instead, want %d", n, MaxFactsInPrompt)
+	}
+	// AND THE RECORD DETAILS COME BACK, because here they are all there is.
+	// writeDossier's own measurement says a writer with less to say pads until
+	// it hits the token budget and the break is truncated away entirely, so
+	// withholding these from a dossier with no meaning would cost breaks.
+	blank.Release = "Nightdrive, 1984"
+	withRelease, err := BuildBreakPrompt(PromptInput{
+		Persona: testPersona(t), Current: blank, WindowSeconds: 9,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(withRelease, "release [cur.release]: Nightdrive, 1984") {
+		t.Error("a dossier with no meaning was denied its release too, which " +
+			"leaves the writer padding to the token budget")
 	}
 	for i := MaxFactsInPrompt; i < 10; i++ {
 		if strings.Contains(got, fmt.Sprintf("Distinct fact number %d ", i)) {
 			t.Errorf("fact %d leaked into the prompt", i)
+		}
+	}
+}
+
+func TestPromptShowsThemes(t *testing.T) {
+	// COLLECTED AND NEVER SHOWN, on 49.8% of the library. The enricher filled
+	// them, port.go sanitised them, the store kept them, and no break had ever
+	// seen one -- nothing printed them and no id resolved to them. This is the
+	// cheapest meaning available because it was already paid for.
+	d := testDossier(3)
+	d.Themes = []string{"leaving", "insomnia"}
+	got, err := BuildBreakPrompt(PromptInput{
+		Persona: testPersona(t), Current: d, WindowSeconds: 30,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "themes [cur.themes]: leaving, insomnia") {
+		t.Errorf("themes are not in the prompt:\n%s", got)
+	}
+}
+
+func TestPromptPutsMeaningAheadOfTheRecordDetails(t *testing.T) {
+	// THE ALBUM AND THE YEAR ARE THE EASIEST THING TO TURN INTO A SENTENCE, and
+	// a writer that meets them before it has read what the song is about says
+	// them first and then pads. Release used to be the second line; it is now
+	// the last.
+	d := testDossier(3)
+	d.Themes = []string{"leaving"}
+	d.Release = "Nightdrive, 1984"
+	got, err := BuildBreakPrompt(PromptInput{
+		Persona: testPersona(t), Current: d, WindowSeconds: 30,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	about, themes := strings.Index(got, "about [cur"), strings.Index(got, "themes [cur")
+	if about < 0 || themes < 0 {
+		t.Fatalf("a meaning line is missing: about=%d themes=%d", about, themes)
+	}
+	if about > themes {
+		t.Errorf("order is about=%d themes=%d; what the song is about leads", about, themes)
+	}
+	// AND THE RECORD DETAILS ARE NOT THERE AT ALL. They were second in the
+	// list before this; now a dossier that knows what the song is about does
+	// not offer the album, the year or the artist's country.
+	for _, gone := range []string{"release [cur", "  fact ["} {
+		if strings.Contains(got, gone) {
+			t.Errorf("%q is still offered beside the meaning:\n%s", gone, got)
 		}
 	}
 }
@@ -499,5 +584,41 @@ func TestPromptYearUsesSay(t *testing.T) {
 			t.Errorf("year %d: the prompt does not contain say.YearWords(%d) = %q:\n%s",
 				year, year, want, got)
 		}
+	}
+}
+
+func TestPromptPointsTheWriterAtTheMeaning(t *testing.T) {
+	// MEASURED LIVE BEFORE THIS LINE EXISTED. Given the about and themes lines
+	// and nothing else, the deployment's model returned "The track is ending."
+	// and "The next track is coming up." -- it had the meaning and did not use
+	// it, because nothing in several hundred words of instruction said to.
+	// With the line, the same model and the same dossier produced a handoff
+	// about somebody counting the hours until a shift ends.
+	d := testDossier(0)
+	d.Themes = []string{"leaving"}
+	got, err := BuildBreakPrompt(PromptInput{
+		Persona: testPersona(t), Current: d, WindowSeconds: 30,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "TALK ABOUT WHAT THE SONG IS ABOUT") {
+		t.Errorf("nothing points the writer at the meaning:\n%s", got)
+	}
+
+	// AND NOT WHEN THERE IS NO MEANING TO TALK ABOUT. Pointing a writer at
+	// material it has not been given is how it invents some, which is the one
+	// thing the whole dossier design exists to prevent.
+	blank := testDossier(2)
+	blank.SubjectSummary = ""
+	blank.Themes = nil
+	bare, err := BuildBreakPrompt(PromptInput{
+		Persona: testPersona(t), Current: blank, WindowSeconds: 30,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(bare, "TALK ABOUT WHAT THE SONG IS ABOUT") {
+		t.Error("the writer is pointed at meaning the dossier does not have")
 	}
 }

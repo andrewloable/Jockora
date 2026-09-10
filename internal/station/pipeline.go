@@ -109,6 +109,13 @@ type Pipeline struct {
 	pending []Boundary
 	// scheduled is how many rendered breaks the mixer queue is holding.
 	scheduled int
+	// gaps is how long the music pauses after a boundary, by boundary index,
+	// waiting for the feed to come and collect it.
+	//
+	// RECORDED ONLY AFTER THE SCHEDULER HAS ACCEPTED THE BREAK. A gap held for
+	// a break that never airs is dead air, which is the one outcome here that
+	// is worse than no gap at all.
+	gaps map[int]float64
 }
 
 func (p *Pipeline) log() *slog.Logger {
@@ -150,6 +157,10 @@ func (p *Pipeline) SetQueue(q *sched.Queue, onScheduled func(text string, placem
 	if onScheduled != nil {
 		p.OnScheduled = onScheduled
 	}
+	// A NEW FEED COUNTS BOUNDARIES FROM ZERO, so gaps claimed by the run that
+	// just ended would be collected by the next one and hold the music for a
+	// break nobody is about to hear. Same reason Cadence is reset here.
+	p.gaps = nil
 }
 
 func (p *Pipeline) SetCadence(c *Cadence) {
@@ -184,31 +195,56 @@ func (p *Pipeline) Overlap() float64 {
 	return p.OverlapSeconds
 }
 
-// leadIn is how far before the boundary THIS break should start.
-//
-// PLACEMENT DECIDES WHETHER, THE MEASUREMENT DECIDES HOW FAR. Only a break
-// placed on the outgoing tail or spanning the transition belongs before the
-// boundary at all: a ramp break is about the incoming record and starting it
-// early would put it over the outgoing vocal, which is the whole thing the
-// placement rules exist to prevent.
-//
-// BOUNDED BY THE MEASURED OUTRO, never a flat number. The design's GTA rule is
-// that a break never lands over a vocal, and cur.OutroS is the only thing that
-// knows where the singing stops. A track with no usable measurement gets no
-// lead-in and behaves exactly as it did before this existed -- silence about it
-// is correct, because an unmeasured outro is the normal case on a library the
-// enricher has not reached.
-func leadIn(placement mix.Placement, cur *Track, overlap float64) float64 {
-	if overlap <= 0 || cur == nil || !cur.usableRamp() {
-		return 0
+// setGap records how long the music should pause after one boundary.
+func (p *Pipeline) setGap(index int, seconds float64) {
+	if seconds <= 0 {
+		return
 	}
-	switch placement {
-	case mix.PlacementOutro, mix.PlacementSpan:
-		return min(overlap, cur.OutroS)
-	default:
-		return 0
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.gaps == nil {
+		p.gaps = make(map[int]float64)
 	}
+	p.gaps[index] = seconds
 }
+
+// TakeGap is how long the music pauses after this boundary, and it can only be
+// asked once.
+//
+// CONSUMED RATHER THAN READ, so a feed that asks twice does not hold the music
+// twice. Zero is the ordinary answer: most boundaries carry no break at all.
+func (p *Pipeline) TakeGap(index int) float64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	seconds := p.gaps[index]
+	delete(p.gaps, index)
+	return seconds
+}
+
+// gapFor is how long the music pauses between the two records, so that the
+// break sits in a hole with a record overlapping each end of it.
+//
+// THE MEASURED OUTRO AND INTRO ARE NOT CONSULTED. They used to cap each end --
+// the GTA rule, that a break never lands over a vocal -- and the operator has
+// since said to disregard it: the configured overlap applies to every break at
+// both ends, whatever the track does. So the DJ will talk over the closing
+// seconds of a record that sings to the end, and over the opening seconds of
+// one that starts singing immediately. That is the instruction, and the setting
+// is the only thing that bounds it now; 0 turns the whole behaviour off.
+//
+// The two ends are the same number by construction, which is why there is no
+// lead and no tail here to tell apart any more.
+//
+// A break shorter than its own two overlaps needs no hole at all, which is the
+// clamp at zero -- and there the records simply overlap the break by less than
+// was asked for, because there is not enough break to overlap.
+func gapFor(seconds, overlap float64) float64 {
+	return max(0, seconds-2*overlap)
+}
+
+// round1 keeps a log line readable. These are seconds of audio, and a
+// nanosecond-precision float in a log is noise nobody reads past.
+func round1(seconds float64) float64 { return math.Round(seconds*10) / 10 }
 
 func (p *Pipeline) Announce(b Boundary) bool {
 	// THE LOCK COVERS THE CADENCE TOO, not just the pending list. Announce runs
@@ -334,7 +370,7 @@ func (p *Pipeline) generate(ctx context.Context, now float64, b Boundary) (bool,
 	// deleted, and reported as "break rejected by the scheduler" rather than as
 	// the late generation it actually was. Jockora-ugw introduced the lead-in;
 	// this is the deadline moving with it.
-	leadS := leadIn(rendered.Placement, b.Cur, p.Overlap())
+	leadS := p.Overlap()
 	startsAt := b.InsertionAt - leadS
 	if !p.Lookahead.InTime(now, startsAt, elapsed) {
 		p.log().Warn("break generated too late", "boundary", b.Index, "elapsed", elapsed,
@@ -385,8 +421,17 @@ func (p *Pipeline) generate(ctx context.Context, now float64, b Boundary) (bool,
 		return false, nil
 	}
 
+	// THE HOLE THE BREAK SITS IN, claimed only now that the scheduler has taken
+	// the break. The feed collects it when it finishes decoding this boundary's
+	// outgoing track and writes that much silence into the ring before starting
+	// the next one, which is what puts the incoming record under the DJ's last
+	// words instead of under all of them. Jockora-ey4.
+	gap := gapFor(rendered.Seconds, leadS)
+	p.setGap(b.Index, gap)
+
 	p.log().Info("break scheduled", "boundary", b.Index, "placement", rendered.Placement.String(),
-		"seconds", rendered.Seconds, "attempts", rendered.Attempts, "elapsed", elapsed)
+		"seconds", rendered.Seconds, "attempts", rendered.Attempts, "elapsed", elapsed,
+		"overlap_s", round1(leadS), "music_gap_s", round1(gap))
 
 	// WHAT THE DJ SAID, BESIDE THE RECORDS IT WAS WRITTEN ABOUT.
 	//
@@ -406,7 +451,7 @@ func (p *Pipeline) generate(ctx context.Context, now float64, b Boundary) (bool,
 	p.log().Info("break text",
 		"boundary", b.Index,
 		"placement", rendered.Placement.String(),
-		"starts_before_boundary_s", math.Round(leadS*10)/10,
+		"starts_before_boundary_s", round1(leadS),
 		"just_played", song(b.CurArtist, b.CurTitle),
 		"coming_up", song(b.NextArtist, b.NextTitle),
 		"before_that", song(b.PrevArtist, b.PrevTitle),

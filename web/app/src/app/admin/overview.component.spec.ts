@@ -818,11 +818,28 @@ describe('Overview', () => {
     );
   });
 
-  it('the DJ overlap says what it cannot do, beside the number', () => {
-    // An operator who asks for six seconds on a library with no measured
-    // outros gets none, and without this the setting looks broken.
+  it('the DJ overlap says what it does, beside the number', () => {
+    // THE NOTE DESCRIBED THE WRONG BEHAVIOUR FOR A WHILE. It said the DJ starts
+    // talking N seconds before the song ends -- one end only -- and promised
+    // that a song ending on a vocal got no overlap at all, which stopped being
+    // true when an unmeasured outro started getting the full overlap instead of
+    // none. Jockora-ey4.
+    //
+    // ASSERTED ON THE SUBSTANCE, not on the word "measured": the old assertion
+    // was that one word, and it survived the whole sentence being rewritten
+    // around it, which is how the note stayed wrong through a behaviour change.
     const note = mounted().nativeElement.querySelector('[data-overlap-note]');
     expect(note).not.toBeNull();
-    expect(note.textContent).toContain('measured');
+    const text = note.textContent.toLowerCase();
+    // Both ends, because one control now sets both and the old copy named one.
+    expect(text).toContain('outgoing');
+    expect(text).toContain('incoming');
+    // The silence, which is the part an operator hears and did not ask for.
+    expect(text).toContain('pauses');
+    // And the part that can sound like a fault: it is not bounded by what the
+    // track is doing, so it will talk over a vocal ending. The note claimed the
+    // opposite for a while, which is the reason this assertion is here.
+    expect(text).toContain('sings');
+    expect(text).not.toContain('capped');
   });
 });

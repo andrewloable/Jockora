@@ -272,11 +272,22 @@ func ResolvableFactIDs(prev, cur, next *enrich.Dossier) []string {
 		if side.d.SubjectSummary != "" {
 			out = append(out, side.prefix+".subject_summary")
 		}
-		if side.d.Release != "" {
+		// THEMES ARE ASSERTABLE NOW. They were stored, sanitised and never
+		// offered -- no id resolved to them, so the sampler could not emit one
+		// even where the dossier had them. Half this library carries themes and
+		// no break has ever been able to use one.
+		if len(side.d.Themes) > 0 {
+			out = append(out, side.prefix+".themes")
+		}
+		// RELEASE ONLY WHERE THERE IS NOTHING BETTER, matching the prompt.
+		if side.d.Release != "" && !KnowsMeaning(side.d) {
 			out = append(out, side.prefix+".release")
 		}
+		// THE SAME BUDGET THE PROMPT USES, so the enum lists exactly the facts
+		// the writer was shown. A track whose meaning is known offers fewer.
+		budget := factBudget(side.d)
 		for i := range side.d.ArtistFacts {
-			if i >= MaxFactsInPrompt {
+			if i >= budget {
 				break
 			}
 			out = append(out, fmt.Sprintf("%s.artist_facts[%d]", side.prefix, i))
@@ -368,8 +379,10 @@ func ResolveFactText(id string, prev, cur, next *enrich.Dossier) (string, bool) 
 	switch {
 	case field == "subject_summary":
 		return d.SubjectSummary, d.SubjectSummary != ""
+	case field == "themes":
+		return strings.Join(d.Themes, ", "), len(d.Themes) > 0
 	case field == "release":
-		return d.Release, d.Release != ""
+		return d.Release, d.Release != "" && !KnowsMeaning(d)
 	case field == "station_tags":
 		return strings.Join(d.StationTags, ", "), len(d.StationTags) > 0
 	case field == "mood":
@@ -380,7 +393,7 @@ func ResolveFactText(id string, prev, cur, next *enrich.Dossier) (string, bool) 
 			return "", false
 		}
 		i, err := strconv.Atoi(m[1])
-		if err != nil || i < 0 || i >= len(d.ArtistFacts) || i >= MaxFactsInPrompt {
+		if err != nil || i < 0 || i >= len(d.ArtistFacts) || i >= factBudget(d) {
 			return "", false
 		}
 		return d.ArtistFacts[i], true

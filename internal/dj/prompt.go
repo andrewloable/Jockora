@@ -31,6 +31,47 @@ const WordsPerSecond = 2.5
 // three and a thirty-second break turns into a recitation.
 const MaxFactsInPrompt = 3
 
+// KnowsMeaning reports whether this dossier says anything about the SONG, as
+// opposed to about the record it came on and the people who made it.
+//
+// THE RECORD DETAILS ARE THE FALLBACK, NOT THE DEFAULT. When this is true the
+// writer is shown what the song is about and is shown no artist facts and no
+// release at all; when it is false it gets the old three facts and the release,
+// because then they are all there is.
+//
+// WHY SO BLUNT. The artist facts are not trivia that happens to be dull, they
+// are a MusicBrainz artist record and nothing else: Country, Type, BeginYear
+// and Disambiguation, rendered into sentences. "Howard Shore is a Canadian
+// score composer" and "Howard Shore was formed in 1946" is the entire
+// vocabulary available, so a budget of one fact still spends it on the year or
+// the country. Release is "Album, Year". The operator asked twice for the DJ to
+// stop saying the year, the country and the album; those four fields are where
+// all three come from, and demoting them was not enough.
+//
+// THE RISK, NAMED. writeDossier's own note below records the measurement that
+// says removing material backfires: hiding facts cut recitation from 9 to 2 and
+// took surviving breaks from 47 to 38, because a writer with less to say pads
+// until it hits the token budget. That experiment removed facts and gave
+// nothing back. This one substitutes themes, which half this library carries
+// and no break has ever been shown. That is the bet, and it is a bet: it needs
+// a live run against a real model to say whether the padding comes back.
+func KnowsMeaning(d *enrich.Dossier) bool {
+	return d != nil && (d.SubjectSummary != "" || len(d.Themes) > 0)
+}
+
+// factBudget is how many artist facts this dossier may put in the prompt.
+//
+// THE SAME NUMBER IS USED TO BUILD THE SCHEMA'S ENUM, in dj.ResolvableFactIDs.
+// The two must agree: a fact the writer can see and cannot declare is wasted,
+// and one it can declare and has never seen is what makes a hosted model send
+// the fact TEXT instead of the label.
+func factBudget(d *enrich.Dossier) int {
+	if KnowsMeaning(d) {
+		return 0
+	}
+	return MaxFactsInPrompt
+}
+
 // Prohibitions is what the DJ has already said and must not repeat.
 //
 // NOTHING POPULATES THIS, AND THAT IS DELIBERATE. Wiring it was tried on
@@ -290,6 +331,21 @@ func assemble(in PromptInput, next *enrich.Dossier, prohib Prohibitions) string 
 		b.WriteString("A guess the listener can hear is a guess is entertainment; the\n")
 		b.WriteString("same sentence said flatly is a lie they will repeat.\n")
 	} else {
+		// POINT THE WRITER AT THE MEANING, ONCE, AND ONLY WHEN THERE IS SOME.
+		//
+		// Measured live against the deployment's model before this line
+		// existed: given the about and themes lines and nothing else, the
+		// writer produced "The track is ending." / "The next track is coming
+		// up." It had the meaning and did not use it, because nothing in
+		// several hundred words of instruction ever said to.
+		//
+		// TWO LINES, NOT A PARAGRAPH. The note below records that four extra
+		// lines here tripled the responses that hit the token budget and came
+		// back truncated. This is the smallest thing that names the material.
+		if KnowsMeaning(in.Previous) || KnowsMeaning(in.Current) || KnowsMeaning(in.Next) {
+			b.WriteString("\nTALK ABOUT WHAT THE SONG IS ABOUT. The about and themes lines are\n")
+			b.WriteString("your material; a title and a name are only labels for it.\n")
+		}
 		b.WriteString("\nState ONLY the facts listed above. Anything else you think you\n")
 		b.WriteString("know about these records is not available to you.\n")
 		// The facts arrive as finished sentences and a model will happily read
@@ -446,11 +502,19 @@ func writeDossier(b *strings.Builder, heading, prefix string, d *enrich.Dossier,
 		b.WriteString("  (nothing else is known about this record)\n")
 		return
 	}
+	// MEANING FIRST, AND IT IS WHAT THE LINE IS CALLED. What the song is about
+	// leads, because a small model reaches for the top of a list and for the
+	// thing whose label matches what it was asked for.
 	if d.SubjectSummary != "" {
 		fmt.Fprintf(b, "  about [%s.subject_summary]: %s\n", prefix, d.SubjectSummary)
 	}
-	if d.Release != "" {
-		fmt.Fprintf(b, "  release [%s.release]: %s\n", prefix, d.Release)
+	// THEMES WERE COLLECTED AND NEVER SHOWN. The enricher fills them, port.go
+	// sanitises them and the dossier stores them -- on 49.8% of this library --
+	// and no break has ever seen one, because nothing in this file printed them
+	// and no id resolved to them. That is the cheapest meaning there is: it was
+	// already paid for.
+	if len(d.Themes) > 0 {
+		fmt.Fprintf(b, "  themes [%s.themes]: %s\n", prefix, strings.Join(d.Themes, ", "))
 	}
 	if len(d.StationTags) > 0 {
 		b.WriteString("  genre: " + strings.Join(d.StationTags, ", ") + "\n")
@@ -473,10 +537,20 @@ func writeDossier(b *strings.Builder, heading, prefix string, d *enrich.Dossier,
 	// anything, and the instructions already say a field name is plumbing
 	// rather than speech.
 	facts := d.ArtistFacts
-	if len(facts) > MaxFactsInPrompt {
-		facts = facts[:MaxFactsInPrompt]
+	if n := factBudget(d); len(facts) > n {
+		facts = facts[:n]
 	}
 	for i, f := range facts {
 		fmt.Fprintf(b, "  fact [%s.artist_facts[%d]]: %s\n", prefix, i, f)
+	}
+
+	// RELEASE LAST, AND ONLY WHERE THERE IS NOTHING BETTER. It is "Album,
+	// Year" -- two thirds of what the operator asked the DJ to stop saying --
+	// and it is the easiest line in a dossier to turn into a sentence, so a
+	// writer that can see it says it and then pads. The title and the artist
+	// are printed above whatever happens, so the DJ can still name the record;
+	// what it loses here is the album and the year to recite.
+	if d.Release != "" && !KnowsMeaning(d) {
+		fmt.Fprintf(b, "  release [%s.release]: %s\n", prefix, d.Release)
 	}
 }

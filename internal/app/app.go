@@ -1622,7 +1622,8 @@ func (a *App) feedFromLibrary(ctx context.Context, rt *station.Runtime) {
 
 		// The boundary at the END of the track now starting. Announced here,
 		// a whole track early, which is exactly the room the lookahead needs.
-		if upcoming.path != "" {
+		announced := upcoming.path != ""
+		if announced {
 			boundary++
 			a.announceBoundary(ctx, rt, boundary, prev, cur, upcoming)
 		}
@@ -1640,7 +1641,92 @@ func (a *App) feedFromLibrary(ctx context.Context, rt *station.Runtime) {
 			a.markUnplayable(ctx, cur)
 			continue
 		}
+		// THE HOLE THE BREAK SITS IN, if this boundary got one. The break was
+		// spliced to start before this track's audio ran out, so it is already
+		// talking; holding the next track back for the rest of it is what puts
+		// the incoming record under the DJ's LAST words rather than under all
+		// of them. Jockora-ey4.
+		//
+		// ONLY FOR A BOUNDARY THIS PASS ANNOUNCED. The counter does not advance
+		// when track selection fails, so without this the same index is
+		// collected twice, one track apart -- and a generation that landed in
+		// between would have its hole punched after the WRONG record, while the
+		// break it belonged to was already airing over the right one. TakeGap
+		// consuming its answer hides this whenever the gap was already claimed,
+		// which is most of the time and is why it would not show up in testing.
+		if announced {
+			a.holdForBreak(ctx, rt, boundary)
+		}
 		prev = cur
+	}
+}
+
+// silenceBlockFrames is how much of a break's hole is written at a time.
+//
+// 4096 frames is 85ms at the bus rate -- small enough that a cancelled feed
+// stops promptly, large enough that a nine second gap is a hundred writes and
+// not a hundred thousand.
+const silenceBlockFrames = 4096
+
+// holdForBreak writes silence into the ring so a scheduled break has room.
+//
+// AFTER THE DECODE, NOT BEFORE THE NEXT ONE, which are the same instant and not
+// the same thing: finishFeeder has already drained this track into the ring, so
+// the silence lands immediately behind its last sample and nothing has to know
+// where that was.
+//
+// IT DEGRADES BY DOING NOTHING. The gap is only ever recorded once the
+// scheduler has accepted a break, so silence is never held for one that will
+// not air -- and a break generated after this ran simply plays over the next
+// track the way every break did before this existed. The feed runs a whole ring
+// ahead of the mixer, so that window is real and it is the safe direction to
+// lose the race in: a gap with no DJ in it is dead air, and a DJ with no gap is
+// just the old behaviour.
+func (a *App) holdForBreak(ctx context.Context, rt *station.Runtime, boundary int) {
+	br := a.breaksFor(rt.StationID())
+	if br == nil {
+		return
+	}
+	feedSilence(ctx, rt.Ring(), br.pipeline.TakeGap(boundary))
+}
+
+// feedSilence writes this many seconds of nothing into the ring.
+//
+// SEPARATE FROM THE LOOKUP because the two fail differently and only one of
+// them can be driven from a test without building a whole break: the lookup is
+// three lines of plumbing, and this is the part with the arithmetic in it.
+//
+// ZERO SECONDS IS THE ORDINARY ANSWER -- most boundaries carry no break at all
+// -- and the early return is there so those do not allocate a block they will
+// never write. It changes no behaviour: the loop below would decline to run
+// anyway, which a mutation proved by surviving the whole suite. Said here
+// rather than defended with a test that could not fail.
+func feedSilence(ctx context.Context, ring *mix.Ring, seconds float64) {
+	remaining := int(seconds * mix.SampleRate)
+	if remaining <= 0 || ring == nil {
+		return
+	}
+	// One block at a time so a long break does not allocate its whole hole at
+	// once, and so a station going off air mid-gap stops within a block rather
+	// than after the length of a break.
+	//
+	// THE RETURN BELOW IS A FAST EXIT, NOT A BEHAVIOUR, and two mutations
+	// proved it: feedRing already refuses to write on a cancelled context, so
+	// dropping the error check leaves the loop spinning through the rest of the
+	// blocks writing nothing and returning at the same moment. Nothing a test
+	// can observe changes. It stays because ignoring an error return is not
+	// something to leave in a feed goroutine, and the loop condition that used
+	// to duplicate the check has gone -- one cancellation test, in one place.
+	silence := make([]mix.Frame, silenceBlockFrames)
+	for remaining > 0 {
+		block := silence
+		if remaining < len(block) {
+			block = block[:remaining]
+		}
+		if err := feedRing(ctx, ring, block); err != nil {
+			return
+		}
+		remaining -= len(block)
 	}
 }
 

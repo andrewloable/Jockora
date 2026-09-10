@@ -117,7 +117,7 @@ const REFRESH_MS = 10_000;
       <p>
         <!-- THE SENTENCE IS THE LABEL, like the cadence above it. -->
         <label data-inline-field>
-          Start talking
+          Overlap each break with
           <input
             data-overlap
             type="number"
@@ -127,16 +127,21 @@ const REFRESH_MS = 10_000;
             [value]="overlap()"
             (input)="editOverlap(+$any($event.target).value)"
           />
-          seconds before the song ends.
+          seconds of music at each end.
         </label>
         <button type="button" data-set-overlap (click)="saveOverlap()">Set</button>
-        <!-- WHAT IT CANNOT DO, said where the number is set. An operator who
-             asks for six seconds on a library with no measured outros gets
-             none, and without this the setting looks broken rather than
-             bounded. Jockora-ugw. -->
+        <!-- WHAT IT ACTUALLY DOES, said where the number is set, and it is BOTH
+             ENDS. This has been wrong twice: first it described only the
+             lead-in, then it promised a cap by the measured outro that no
+             longer exists. The operator asked for the GTA rule to be
+             disregarded, so the number applies whatever the track is doing --
+             which is worth saying out loud on the screen where it is typed,
+             because it is the part that can sound like a fault. Jockora-ey4. -->
         <small data-overlap-note
-          >Never over singing: each break is capped by the outgoing track's measured instrumental
-          tail, so a song that ends on a vocal gets no overlap at all.</small
+          >The outgoing record plays under the start of each break and the incoming one under its
+          end, and the music pauses in between. It applies to every break whatever the track is
+          doing, so a song that sings to its last second gets talked over. Set it to 0 for no
+          overlap and no pause.</small
         >
       </p>
       <p data-dj-line>

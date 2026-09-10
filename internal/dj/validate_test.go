@@ -47,9 +47,14 @@ func validator(t *testing.T, w Writer) *Validator {
 	return &Validator{Writer: w, Said: saidStore(t)}
 }
 
-// TestValidateCollisionDropsTheBreak. It used to regenerate once. The writer now
-// gets ONE generation and a rejected break is dropped, which is a designed
-// outcome: the music continues and nothing about it is audible as a fault.
+// TestValidateCollisionDropsTheBreak: a rejected break buys one more go.
+//
+// The budget went to one when the second generation was being spent rewriting
+// breaks that came out too long, and came back to two when it was measured what
+// the CONTENT checks reject: three of four real generations against the
+// deployment model were caught as loops, echoes or recitations, and with a
+// budget of one every catch was also a lost break. The name is kept because the
+// second failure still drops it -- see the end of this test.
 func TestValidateCollisionDropsTheBreak(t *testing.T) {
 	v := validator(t, nil)
 	ctx := context.Background()
@@ -63,11 +68,30 @@ func TestValidateCollisionDropsTheBreak(t *testing.T) {
 	}}
 	v.Writer = w
 
+	b, err := v.Generate(ctx, "prompt", 0, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("the retry did not save the break: %v", err)
+	}
+	if !strings.Contains(b.Text(), "saxophones") {
+		t.Errorf("aired %q, want the second attempt", b.Text())
+	}
+	if w.calls != 2 {
+		t.Errorf("%d generate calls, want 2: a collision has to cost a retry, not the break", w.calls)
+	}
+
+	// AND THE BUDGET IS TWO, NOT UNLIMITED. A model that collides twice is not
+	// having a bad roll, and the music playing is the designed outcome.
+	again := &scriptedWriter{replies: []string{
+		breakJSON("They cut it in a converted chapel outside Bristol during a heatwave."),
+		breakJSON("They cut it in a converted chapel outside Bristol in the winter."),
+		breakJSON("A different sentence entirely, mentioning saxophones and cold mornings."),
+	}}
+	v.Writer = again
 	if _, err := v.Generate(ctx, "prompt", 0, nil, nil, nil); !errors.Is(err, ErrBreakRepetitive) {
 		t.Fatalf("Generate returned %v, want ErrBreakRepetitive", err)
 	}
-	if w.calls != 1 {
-		t.Errorf("%d generate calls, want exactly 1", w.calls)
+	if again.calls != 2 {
+		t.Errorf("%d generate calls, want exactly 2", again.calls)
 	}
 }
 
@@ -460,5 +484,104 @@ func TestGenerateRejectsPlaceholdersStructurally(t *testing.T) {
 		if phrase, echoed := echoesInstructions(text, nil); echoed {
 			t.Errorf("echoesInstructions(%q) matched %q on a real break", text, phrase)
 		}
+	}
+}
+
+// TestValidateRecitedDossierIsCaught: Jockora-ey4's sibling. The writer is now
+// pointed at the subject summary, so the sentence it is most likely to copy is
+// the subject summary.
+func TestValidateRecitedDossierIsCaught(t *testing.T) {
+	d := &enrich.Dossier{
+		Confidence:     enrich.ConfidenceHigh,
+		SubjectSummary: "Someone counts the hours until a shift ends and admits they have nowhere to be afterwards.",
+		Themes:         []string{"work", "loneliness"},
+	}
+
+	// MEASURED LIVE, 2026-09-10, and this is the handoff verbatim: the model
+	// was given the summary and read it out.
+	recited := "The next track is Clocking Off by Shift Work. " +
+		"Someone counts the hours until a shift ends and admits they have nowhere to be afterwards."
+	phrase, caught := recitesDossier(recited, []string{"Shift Work", "Clocking Off"}, nil, d, nil)
+	if !caught {
+		t.Fatalf("a break that reads the summary out was not caught\ntext: %q", recited)
+	}
+	if phrase == "" {
+		t.Error("nothing was named as the copied run, so a log line cannot say what happened")
+	}
+
+	// A BREAK THAT IS ABOUT THE SAME THING IN ITS OWN WORDS IS THE POINT.
+	// A threshold that punished overlap would forbid exactly what the summary
+	// is in the prompt for, so this must pass.
+	own := "Next up, somebody watching the clock on a late shift with nobody waiting at the other end of it."
+	if phrase, caught := recitesDossier(own, nil, nil, d, nil); caught {
+		t.Errorf("a paraphrase was called a recitation: %q", phrase)
+	}
+
+	// Nothing to copy from is not a recitation.
+	if _, caught := recitesDossier(recited, nil, nil, nil, nil); caught {
+		t.Error("a break was called a recitation with no dossier to recite")
+	}
+	if _, caught := recitesDossier("", nil, nil, d, nil); caught {
+		t.Error("an empty break was called a recitation")
+	}
+	// AND A DOSSIER WITH NO PROSE IN IT. Half this library has no summary and
+	// no themes, and comparing against nothing must not become comparing
+	// against everything.
+	bare := &enrich.Dossier{Confidence: enrich.ConfidenceHigh, Release: "Nightdrive, 1984"}
+	if _, caught := recitesDossier(recited, nil, nil, bare, nil); caught {
+		t.Error("a dossier with no meaning produced a recitation hit")
+	}
+}
+
+// TestValidateRecitedBreakIsDropped: catching a recitation is only half of it.
+// The check has to be WIRED, and a mutation that removed it from Generate
+// survived the whole suite until this existed.
+func TestValidateRecitedBreakCostsARetryThenTheBreak(t *testing.T) {
+	d := &enrich.Dossier{
+		Confidence:     enrich.ConfidenceHigh,
+		SubjectSummary: "Someone counts the hours until a shift ends and admits they have nowhere to be afterwards.",
+	}
+
+	// THE RECITATION COSTS A GENERATION, NOT THE BREAK. That is the whole
+	// reason MaxAttempts went back to two: catching a recitation is only worth
+	// something if the writer gets to try again while there is still time.
+	w := &scriptedWriter{replies: []string{
+		breakJSON("Someone counts the hours until a shift ends and admits they have nowhere to be afterwards."),
+		breakJSON("Somebody watching the clock on a late one, with nobody waiting at the far end of it."),
+	}}
+	v := validator(t, w)
+
+	b, err := v.Generate(context.Background(), "prompt", 40, nil, d, nil)
+	if err != nil {
+		t.Fatalf("the retry did not save the break: %v", err)
+	}
+	if strings.Contains(b.Text(), "nowhere to be afterwards") {
+		t.Error("the recited break aired; the summary goes out as a description read " +
+			"aloud, and the said-lines index then refuses it the next time the track " +
+			"comes round")
+	}
+	if w.calls != 2 {
+		t.Errorf("the writer was called %d times, want 2: the recitation costs a retry", w.calls)
+	}
+
+	// TWICE IS A DROP. The reason is what the console counts.
+	twice := &scriptedWriter{replies: []string{
+		breakJSON("Someone counts the hours until a shift ends and admits they have nowhere to be afterwards."),
+		breakJSON("Someone counts the hours until a shift ends and admits they have nowhere to be afterwards, again."),
+	}}
+	if _, err := validator(t, twice).Generate(context.Background(), "prompt", 40, nil, d, nil); err == nil {
+		t.Error("a break that recited twice still aired")
+	} else if !strings.Contains(err.Error(), string(DropRecited)) {
+		t.Errorf("dropped for %v, want %s", err, DropRecited)
+	}
+
+	// AND A BREAK IN ITS OWN WORDS ABOUT THE SAME THING STILL AIRS. A check
+	// that punished overlap would forbid exactly what the summary is in the
+	// prompt for.
+	own := &scriptedWriter{replies: []string{
+		breakJSON("Somebody watching the clock on a late one, with nobody waiting at the far end of it."),
+	}}
+	if _, err := validator(t, own).Generate(context.Background(), "prompt", 40, nil, d, nil); err != nil {
+		t.Errorf("a paraphrase was dropped as a recitation: %v", err)
 	}
 }

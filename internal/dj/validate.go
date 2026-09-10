@@ -49,12 +49,28 @@ const DefaultRefusalBackoff = 15 * time.Second
 
 // MaxAttempts is the ceiling on GENERATIONS per break.
 //
-// ONE. Whatever the model writes is what airs, or the break is dropped and
-// music plays -- which is the designed outcome and is not audible as a fault.
-// It was two, spent rewriting a break that came out too long; a break that
-// does not fit is now re-placed into the wider gap instead, which costs no
-// call at all.
-const MaxAttempts = 1
+// TWO, AND THE SECOND IS FOR CONTENT RATHER THAN LENGTH.
+//
+// It was two, spent rewriting a break that came out too long, and went to one
+// when a break that does not fit started being re-placed into the wider gap
+// instead -- which costs no call at all. That reasoning was about LENGTH and it
+// still holds; nothing here rewrites for length any more.
+//
+// What brought it back is what the checks below actually reject. Measured on
+// 2026-09-10 against the deployment's model, four real generations at the real
+// temperature: one usable break, one that said "It's the tail of this track"
+// three times, one that returned "text text text", and one that talked about
+// talking. Three of four are caught -- by repeatsItself, by echoesInstructions,
+// by recitesDossier -- and with a budget of one, "caught" and "the break is
+// lost" were the same sentence. A second generation is the difference between
+// a defence that saves the break and a defence that only names why it went.
+//
+// AFFORDABLE BECAUSE GENERATION STARTS EARLY. ShouldTrigger fires as soon as a
+// slot exists rather than at T minus the lookahead, so a break usually has a
+// whole track to be written in -- minutes against the 55 seconds one generation
+// measured. InTime still refuses anything that came back too late, so the worst
+// case is the break that would have been dropped anyway.
+const MaxAttempts = 2
 
 // MaxRefusals is how many times a REFUSAL is waited out.
 //
@@ -77,6 +93,9 @@ const (
 	DropUngrounded      DropReason = "ungrounded"
 	// DropSelfRepetitive means the break repeated a phrase inside itself.
 	DropSelfRepetitive DropReason = "self_repetitive"
+	// DropRecited is a break that read the dossier out loud instead of saying
+	// it in the DJ's own words.
+	DropRecited DropReason = "recited_dossier"
 	DropBadJSON        DropReason = "bad_json"
 	DropLLMError       DropReason = "llm_error"
 )
@@ -292,6 +311,29 @@ func (v *Validator) Generate(ctx context.Context, prompt string, words int, prev
 		if phrase, looped := repeatsItself(b.Text(), v.names()); looped {
 			lastReason = DropSelfRepetitive
 			lastErr = fmt.Errorf("%w: the break says %q more than once", ErrBreakDropped, phrase)
+			continue
+		}
+
+		// READING THE DOSSIER OUT LOUD IS NOT SAYING IT IN YOUR OWN WORDS.
+		//
+		// The prompt asks for the writer's own words and the writer does not
+		// always oblige. Measured live on 2026-09-10: a handoff came back as
+		// "Someone counts the hours until a shift ends and admits they have
+		// nowhere to be afterwards", which is the subject summary to the word.
+		//
+		// It matters beyond taste. A recited summary is the same sentence every
+		// time that track comes round, so the said-lines index refuses the
+		// SECOND airing -- the recitation costs a future break as well as
+		// sounding like a description being read out.
+		//
+		// THIS DROPS THE BREAK, because MaxAttempts is one and every other
+		// content check here does the same: an instruction echo, a self-repeat
+		// and a said-lines collision all land on this line and all end with
+		// music playing instead. That is the designed outcome and it is not
+		// audible as a fault, which a description read out loud is.
+		if phrase, recited := recitesDossier(b.Text(), v.names(), prev, cur, next); recited {
+			lastReason = DropRecited
+			lastErr = fmt.Errorf("%w: the break reads the dossier out: %q", ErrBreakDropped, phrase)
 			continue
 		}
 
@@ -658,4 +700,72 @@ func dominates(match, text string) bool {
 		return false
 	}
 	return float64(len(spokenWords(match)))/float64(whole) >= ShoutingShare
+}
+
+// RecitedGramSize is how long a run of shared content words has to be before a
+// break counts as reading the dossier out rather than talking about it.
+//
+// SIX, MATCHING stripQuotedLyrics, which blanks any dossier field sharing a
+// six-word run with the lyrics it was derived from. The same question is being
+// asked here -- did this text get written, or copied -- so it gets the same
+// answer rather than a second number to keep in step.
+//
+// It is deliberately longer than GramSize. Four content words in common with a
+// one-sentence summary is what a paraphrase looks like: a break SHOULD be about
+// what the summary says, and a threshold that punished overlap would forbid the
+// thing the summary is there for.
+const RecitedGramSize = 6
+
+// recitesDossier reports a run of words the break took verbatim from the
+// dossier it was written from.
+//
+// THE COMPARISON IS AGAINST MEANING, NOT AGAINST NAMES. A title and an artist
+// are supposed to be said exactly, so name words are excluded the same way
+// repeatsItself and the said-lines index exclude them; what is left is the
+// prose a writer was meant to rewrite.
+func recitesDossier(text string, names []string, dossiers ...*enrich.Dossier) (string, bool) {
+	// ContentWords ON BOTH SIDES, and this is the whole check. The first
+	// version compared spokenWords against ContentWords: one keeps stopwords
+	// and the other strips them, so a six-gram from one could never equal a
+	// six-gram from the other and this function could only ever return false.
+	// It passed every test that way, because a check that cannot fire also
+	// cannot be seen firing.
+	//
+	// Content words are also the right comparison on the merits: a writer that
+	// swaps the filler and keeps the substance has still copied the sentence.
+	spoken := NGrams(ContentWords(text), RecitedGramSize)
+	if len(spoken) == 0 {
+		return "", false
+	}
+	nameWords := nameWordSet(names)
+
+	source := map[string]bool{}
+	for _, d := range dossiers {
+		if d == nil {
+			continue
+		}
+		// SUMMARY AND THEMES, which is what the writer is now pointed at and
+		// therefore what it now has to copy from. Artist facts are already
+		// covered by the said-lines index, which caught them reciting
+		// "howard shore born 1946" across two breaks.
+		for _, g := range NGrams(ContentWords(d.SubjectSummary), RecitedGramSize) {
+			source[g] = true
+		}
+		for _, g := range NGrams(ContentWords(strings.Join(d.Themes, " ")), RecitedGramSize) {
+			source[g] = true
+		}
+	}
+	if len(source) == 0 {
+		return "", false
+	}
+
+	for _, g := range spoken {
+		if len(nameWords) > 0 && allNameWords(g, nameWords) {
+			continue
+		}
+		if source[g] {
+			return g, true
+		}
+	}
+	return "", false
 }

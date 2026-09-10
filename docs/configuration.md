@@ -79,26 +79,56 @@ credentials. That is the same trust boundary as the password in your config.
 |---|---|---|
 | `-persona` | — | A `.toml` card, or a **directory** to pick from by what the library sounds like. |
 | `-break-every-n-tracks` | `4` | **The knob most likely to be wrong.** See below. |
-| `-break-overlap` | `3` | Seconds the DJ may start talking *before* the song ends. See below. |
+| `-break-overlap` | `3` | Seconds of music that play under each end of a break. See below. |
 | `-station` | — | Which station to broadcast. |
 
-### Talking over the outro
+### The music under a break
 
-`-break-overlap` is how far into the outgoing track's instrumental tail the DJ
-may start. Three seconds by default, and the console has the same control on the
-Overview page — the stored value outranks this flag, because a setting an
-operator chose must survive a restart.
+`-break-overlap` is how many seconds of music play underneath each end of a
+break. Three by default, and the console has the same control on the Overview
+page — the stored value outranks this flag, because a setting an operator chose
+must survive a restart.
 
-**It is capped by the music, not by you.** The break never starts earlier than
-the outgoing track's *measured* instrumental outro, so a song that ends on a
-vocal gets no overlap at all whatever this is set to. A track the enricher has
-not reached yet, or whose outro was only guessed at rather than derived from
-synced lyrics or analysis, also gets none. Setting this to six on a library with
-no measured outros changes nothing, and that is the design rather than a fault.
+A break is heard like this:
 
-It applies only to breaks placed on the outgoing track or spanning the
-transition. A break that introduces the *incoming* record never starts early —
-that would announce the next song over the end of the last one.
+```
+outgoing record ─────────────╮
+                             ╰── 3s under the DJ
+DJ                     ┌─────────────────────────────────┐
+                       │  3s  │   in the clear    │  3s  │
+                       └─────────────────────────────────┘
+                                                  ╭────────────────
+incoming record ──────────────────────────────────╯
+```
+
+The outgoing record ends three seconds into the break, the DJ talks in the
+clear, and the incoming record comes up under the last three seconds. **The
+music pauses in the middle**, for however long is left of the break — about nine
+seconds of a fifteen second one. That silence is the point rather than a fault:
+it is what leaves the DJ in the clear.
+
+**It is not bounded by the music.** The overlap applies to every break at both
+ends whatever the track is doing, so a record that sings to its final second
+gets talked over for three of them, and so does one that starts singing
+immediately.
+
+That is deliberate. It used to be capped by the outgoing track's measured
+instrumental outro and the incoming track's measured intro — the rule that a
+break never lands over a vocal — but only about a third of a real library
+carries those measurements, so the cap refused the overlap on most boundaries
+and the setting looked broken. The caps were removed on instruction rather than
+by accident.
+
+It also applies whichever side of the transition the DJ's words are about.
+Breaks introducing the incoming record used to get no overlap at all, and since
+that is the placement the station prefers, the setting almost never did
+anything.
+
+**The setting is the only bound left.** If breaks start clipping vocal endings,
+lower it or set it to `0`.
+
+Set it to `0` for the old behaviour — every break starting exactly at the
+transition, with no gap and no music underneath it.
 
 ### JockPacks
 

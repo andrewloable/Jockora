@@ -31,11 +31,14 @@ import (
 // Every test here is TestFactID*, which is the -run pattern for this fix.
 
 func TestFactIDAppearsBesideItsFact(t *testing.T) {
+	// NO SUBJECT SUMMARY AND NO THEMES, which is now the only case where facts
+	// and the release are offered at all. The invariant under test is that
+	// every id the schema accepts is visible in the prompt; the dossier just
+	// has to be one that HAS facts for that to be worth checking.
 	d := &enrich.Dossier{
-		Confidence:     enrich.ConfidenceHigh,
-		SubjectSummary: "A song about driving at night.",
-		Release:        "Released in 1983.",
-		ArtistFacts:    []string{"Formed in 1980.", "From Manchester."},
+		Confidence:  enrich.ConfidenceHigh,
+		Release:     "Released in 1983.",
+		ArtistFacts: []string{"Formed in 1980.", "From Manchester."},
 	}
 	prompt, err := BuildBreakPrompt(PromptInput{
 		Persona: testPersona(t),

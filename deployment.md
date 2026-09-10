@@ -36,8 +36,9 @@ you an hour:
   the box and never pushed;
 - it mounts the Kokoro weights from `/home/mandark/jockora/models`, but they
   live in `/home/mandark/tts-endurance/models`;
-- it points the model at the host's `llama-server` on `172.20.0.1:8081`, but the
-  deployment runs **Cloudflare Workers AI** (`@cf/meta/llama-3.3-70b-instruct-fp8-fast`).
+- it points the model at the host's `llama-server` on `172.20.0.1:8081`, which
+  as of 2026-09-09 is **right again** — see §3.8. It was wrong for a day and a
+  half, while the deployment ran Cloudflare Workers AI.
 
 Read the compose file **on the box** before every deploy. Treat the one in the
 repository as history until somebody reconciles them.
@@ -223,6 +224,73 @@ restart must not undo it — but it means **the compose flag is only the default
 for a station nobody has tuned**. Do not debug a cadence by reading the compose
 file. Read the log line, or the `break_cadence` row in `settings`.
 
+### 3.8 The stored provider outranks the compose file, exactly like the cadence
+
+Same trap as §3.7 and it costs more, because it is silent. A provider chosen in
+the operator console is written to `settings.llm_config`, and `buildLLM` reads
+that row **before** it looks at any environment variable. Editing
+`JOCKORA_LLM_URL` in the compose and restarting therefore changes nothing at all
+while that row exists — the station comes up healthy, on the old provider, with
+no warning anywhere.
+
+Moving the box back to the local llama-server on 2026-09-09 needed both halves:
+
+```sh
+# the row wins, so it has to go. As uid 10001, with the container stopped.
+docker run --rm -u 10001 -v /home/mandark/jockora:/config \
+  --entrypoint python3 jockora:v0.2 -c "
+import sqlite3
+c = sqlite3.connect('/config/jockora.db')
+c.execute('delete from settings where key=?', ('llm_config',)); c.commit()"
+```
+
+That `docker run` is also the general answer to §3.4: `/home/mandark/jockora` is
+owned by uid 10001 and `mandark` cannot write there, but a throwaway container
+on the same volume can, and the image already carries python3.
+
+**Read the startup log to find out which one won.** The three outcomes are
+distinguishable, and only by their log lines:
+
+| Line at startup | What is in force |
+|---|---|
+| `language model from the console` | the database row |
+| `using a hosted language model; TRACK METADATA AND LYRICS LEAVE THIS MACHINE` | compose, OpenAI-compatible route |
+| *(nothing)* | compose, llama.cpp native route — silence is success here |
+| `no language model yet; choose one in the operator console` | nothing works |
+
+The silent case is the awkward one: a healthy local model logs nothing at all,
+so the only positive proof is from the other side. `journalctl -u llama-server`
+shows the request arriving **from the container's address**, not the host's:
+
+```
+srv log_server_r: done request: POST /completion 172.20.0.22 200
+```
+
+`docker inspect jockora --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'`
+confirms that address is the station. A request from `192.168.0.254` is the host
+— which is you, testing — and proves nothing about Jockora.
+
+### 3.9 The "local is too slow" measurement was taken under load
+
+The compose file carried a note rejecting the local model: breaks generated in
+**187s against the 148s** the lookahead gives them, arriving too late to air.
+That was true when it was measured, and it was measured while enrichment was
+running flat out against the same 12 threads.
+
+Enrichment finished (7,595 of 7,595). Re-measured on 2026-09-09 with the CPU
+free, against the same Qwen3.5-4B Q4\_K\_M on `172.20.0.1:8081`:
+
+| | |
+|---|---|
+| Prompt, 1,331 tokens | 74.8 tok/s |
+| Output, 160 tokens | 4.26 tok/s |
+| **Total** | **55 s**, against a 148 s budget |
+
+So the rejection had an expiry date on it and nobody had noticed. **Re-measure
+before trusting a performance note that predates a finished enrichment run** —
+and re-measure again if enrichment ever restarts, because the 187s comes back
+with it.
+
 ---
 
 ## 4. Verifying a deploy
@@ -339,10 +407,12 @@ NULL or 0 is zero.
 ### The heartbeat-age criterion above is calibrated to a LOCAL model
 
 §4 asks for a lock heartbeat in single-digit seconds. That number comes from the
-local llama-server era, when enrichment ran about eight tracks a minute. This
-deployment runs **Cloudflare Workers AI**, and one dossier takes roughly
-thirty-five seconds, so the heartbeat is written once per track and its age
-sweeps from zero to about that.
+local llama-server era, when enrichment ran about eight tracks a minute. The
+hosted era stretched it: one Cloudflare dossier took roughly thirty-five
+seconds, so the heartbeat was written once per track and its age swept from zero
+to about that. **The box is back on the local model as of 2026-09-09** (§3.8),
+so the original number applies again — but the rule below is the one to keep,
+because it survived both.
 
 Measured here: 13 s, then 40 s, while dossiers moved 5145 → 5150. That is
 healthy. **Read the heartbeat against the dossier count, not against a fixed
@@ -490,6 +560,100 @@ strings. Worth knowing before you read one into a bug report.
 **The audio path is NOT verified.** `now` was null again, so no encoder ran and
 no break was placed. In particular the break lead-in shipped here -- the DJ now
 starting up to three seconds before a transition -- has never been heard.
+
+### What the 2026-09-09 provider deploy verified (no migration)
+
+Two changes in one window: the playlist's server-side sort (`Jockora-22s`), and
+the move off Cloudflare back to the local llama-server.
+
+```
+image                        sha256:225adf3aca2e   built on the box
+version                      jockora 0.2.0
+schema                       14 -> 14, no migration crossed
+backup                       jockora.db.schema-14-20260909d
+rollback image               jockora:rollback-20260909d
+ERROR lines                  0
+WARN other than the LAN one  none
+health                       llm ok, tts ok, ffmpeg ok
+enrichment                   7595 of 7595, running
+```
+
+The provider, proved from both ends:
+
+```
+settings.llm_config                     deleted (was cloudflare)
+compose                                 one LLM variable, JOCKORA_LLM_URL
+docker compose config                   JOCKORA_LLM_URL: http://172.20.0.1:8081
+startup log                             silent -- the llama.cpp success case
+llama-server journal, 6s after boot     POST /completion 172.20.0.22 200
+container address                       172.20.0.22
+```
+
+The playlist sort, proved in the binary and in the served bundle rather than by
+clicking:
+
+```
+binary        "t.artist COLLATE NOCASE"    1 hit
+binary        "coalesce(t.bpm, 0) = 0"     1 hit
+main-D6DTLDHJ.js                           references 2 lazy chunks
+chunk-TWBHOZSV.js                          data-playlist, aria-sort, data-sort,
+                                           sort-marker, Tempo
+```
+
+**The audio path is STILL not verified, and the backlog of unheard changes is
+now three deep.** `now` was null again at deploy time, so no encoder ran and no
+break was placed. Unheard, in the order they shipped: the break lead-in (the DJ
+starting up to three seconds before a transition), and now every break coming
+from a 4B local model instead of a 70B hosted one. The second is the one to
+listen for -- **groundedness and the said-lines rule were measured against
+Cloudflare's model, not this one**, and a smaller model is exactly where a
+schema-constrained prompt starts producing valid JSON that reads badly.
+
+Tune in through three or four track boundaries before calling this good.
+
+### What the 2026-09-10 DJ-content deploy verified (no migration)
+
+The break writer round: meaning-first prompt material, a recitation check, and a
+second generation for a rejected break.
+
+```
+image                        sha256:a085050654de   built on the box
+version                      jockora 0.2.0
+schema                       14 -> 14, no migration crossed
+backup                       jockora.db.schema-14-20260910
+rollback image               jockora:rollback-20260910
+ERROR lines                  0
+WARN other than the LAN one  none
+health                       llm ok, tts ok, ffmpeg ok
+enrichment                   7595 of 7595
+provider                     still local llama.cpp -- POST /completion from
+                             172.20.0.22, the container's own address
+```
+
+The changes, proved in the shipped binary rather than by clicking:
+
+```
+recited_dossier                     1 hit   the new drop reason
+TALK ABOUT WHAT THE SONG IS ABOUT   1 hit   the pointer at the meaning
+themes [                            1 hit   the field that was never shown
+```
+
+**THE AUDIO PATH IS STILL UNVERIFIED AND THE BACKLOG IS NOW FOUR DEEP.** `now`
+was null again, so no encoder ran and no break was placed. Unheard, in shipping
+order: the break lead-in, the music gap around a break, every break coming from
+a 4B local model rather than a 70B hosted one, and now this round's prompt.
+
+**What to listen for, and it is not subtle.** Measured with
+`internal/dj/liveprobe_test.go` against the deployment's model at the real
+sampler settings, seven generations gave one good break, two fillers, two loops,
+one that returned ellipses and one unparseable. The checks catch the loops and
+the recitations, and `MaxAttempts` is now two so a bad roll costs a retry rather
+than the break -- but at roughly one usable generation in four, expect
+boundaries with no break at all. `Jockora-izw` has the numbers.
+
+The good one read: *"This is Midnight, 2031. I'm driving out of a city I'm not
+coming back to, still talking to someone who isn't there."* That is the dossier's
+subject summary, in the DJ's own words, which is the whole point of the round.
 
 ## 6. Rolling back
 
